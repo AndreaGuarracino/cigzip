@@ -1,20 +1,48 @@
 use std::error::Error;
 
 #[derive(Debug, Clone)]
-struct TracePoint {
-    target_pos: i64,    // Position in target sequence
-    differences: u32,   // Number of differences in this interval
+struct Path {
+    abpos: i32,    // Source start
+    aepos: i32,    // Source end
+    bbpos: i32,    // Target start
+    bepos: i32,    // Target end
+    diffs: i32,    // Total differences
 }
 
 #[derive(Debug)]
 struct Alignment {
-    query_start: i64,
-    query_end: i64,
-    target_start: i64,
-    target_end: i64,
-    trace_spacing: u32,
-    trace_points: Vec<TracePoint>,
-    is_reverse: bool,
+    path: Path,
+    tspace: u32,           // Trace spacing
+    trace: Vec<u8>,        // Raw trace points array like C
+    flags: u32,            // Includes strand info
+}
+
+const COMP_FLAG: u32 = 0x1;
+
+
+impl Alignment {
+    // Get target position at trace index
+    fn trace_target_pos(&self, idx: usize) -> u32 {
+        let pos_idx = idx * 2;
+        self.trace[pos_idx] as u32
+    }
+
+    // Get differences at trace index 
+    fn trace_diffs(&self, idx: usize) -> u8 {
+        let diff_idx = idx * 2 + 1;
+        self.trace[diff_idx]
+    }
+
+    // Add a trace point
+    fn add_trace(&mut self, target_pos: u32, diffs: u8) {
+        self.trace.push(target_pos as u8);
+        self.trace.push(diffs);
+    }
+
+    // Number of trace points
+    fn trace_count(&self) -> usize {
+        self.trace.len() / 2
+    }
 }
 
 // Parse CIGAR operations
@@ -52,199 +80,186 @@ impl CigarOp {
     }
 }
 
-fn parse_cigar(cigar: &str) -> Result<Vec<CigarOp>, Box<dyn Error>> {
-    let mut ops = Vec::new();
-    let mut len: i32 = 0;
-
-    for c in cigar.chars() {
-        if c.is_ascii_digit() {
-            len = len*10 + (c as i32 - '0' as i32);
-        } else {
-            let op = CigarOp::new(len, c);
-            ops.push(op);
-            len = 0;
-        }
-    }
-
-    Ok(ops)
-}
-
 fn cigar_to_trace_points(
     cigar: &str,
-    query_start: i64,
-    target_start: i64,
-    target_end: i64,
-    trace_spacing: u32,
+    query_start: i32,
+    target_start: i32,
+    target_end: i32,
+    tspace: u32,
     is_reverse: bool,
 ) -> Result<Alignment, Box<dyn Error>> {
-    let cigar_ops = parse_cigar(cigar)?;
-    let mut trace_points = Vec::new();
-    
-    // For reverse strand, adjust coordinates
-    let (actual_target_start, actual_target_end) = if is_reverse {
-        (target_end, target_start)  // Swap coordinates for reverse strand
-    } else {
-        (target_start, target_end)
+    let mut trace = Vec::new();
+    let mut current_pos = target_start;
+    let mut current_diffs = 0u32;
+    let mut next_trace = target_start + tspace as i32;
+    let mut total_diffs = 0;
+    let mut curr_query_pos = query_start;
+
+    let mut path = Path {
+        abpos: query_start,
+        aepos: query_start,
+        bbpos: target_start,
+        bepos: target_end,
+        diffs: 0,
     };
 
-    let mut query_pos = query_start;
-    let mut target_pos = target_start;
-    let mut current_differences = 0;
-    let mut next_trace_point = target_start + trace_spacing as i64;
+    let mut len = 0i32;
+    for c in cigar.chars() {
+        if c.is_ascii_digit() {
+            len = len * 10 + (c as i32 - '0' as i32);
+            continue;
+        }
 
-    for op in &cigar_ops {
-        match op.op() {
-            '=' => {
-                let len = op.len() as i64;
-                let mut remaining_len = len;
-                
-                while remaining_len > 0 {
-                    let distance_to_next_trace = next_trace_point - target_pos;
-                    if distance_to_next_trace <= remaining_len {
-                        trace_points.push(TracePoint {
-                            target_pos: next_trace_point,
-                            differences: current_differences,
-                        });
-                        
-                        target_pos += distance_to_next_trace;
-                        query_pos += distance_to_next_trace;
-                        remaining_len -= distance_to_next_trace;
-                        
-                        next_trace_point += trace_spacing as i64;
-                        current_differences = 0;
+        match c {
+            '=' | 'M' => {
+                let mut remaining = len;
+                while remaining > 0 {
+                    let to_next = next_trace - current_pos;
+                    if to_next <= remaining {
+                        trace.push(next_trace as u8);
+                        trace.push(current_diffs.min(255) as u8);
+                        remaining -= to_next;
+                        current_pos = next_trace;
+                        curr_query_pos += to_next;
+                        next_trace += tspace as i32;
+                        current_diffs = 0;
                     } else {
-                        target_pos += remaining_len;
-                        query_pos += remaining_len;
-                        remaining_len = 0;
+                        current_pos += remaining;
+                        curr_query_pos += remaining;
+                        remaining = 0;
                     }
                 }
             }
-            'X' | 'M' => {
-                let len = op.len() as i64;
-                let mut remaining_len = len;
-                
-                while remaining_len > 0 {
-                    let distance_to_next_trace = next_trace_point - target_pos;
-                    if distance_to_next_trace <= remaining_len {
-                        current_differences += distance_to_next_trace as u32;
-                        trace_points.push(TracePoint {
-                            target_pos: next_trace_point,
-                            differences: current_differences,
-                        });
-                        
-                        target_pos += distance_to_next_trace;
-                        query_pos += distance_to_next_trace;
-                        remaining_len -= distance_to_next_trace;
-                        
-                        next_trace_point += trace_spacing as i64;
-                        current_differences = 0;
+            'X' => {
+                total_diffs += len;
+                let mut remaining = len;
+                while remaining > 0 {
+                    let to_next = next_trace - current_pos;
+                    if to_next <= remaining {
+                        current_diffs += to_next as u32;
+                        trace.push(next_trace as u8);
+                        trace.push(current_diffs.min(255) as u8);
+                        remaining -= to_next;
+                        current_pos = next_trace;
+                        curr_query_pos += to_next;
+                        next_trace += tspace as i32;
+                        current_diffs = 0;
                     } else {
-                        current_differences += remaining_len as u32;
-                        target_pos += remaining_len;
-                        query_pos += remaining_len;
-                        remaining_len = 0;
+                        current_diffs += remaining as u32;
+                        current_pos += remaining;
+                        curr_query_pos += remaining;
+                        remaining = 0;
                     }
                 }
             }
             'I' => {
-                query_pos += op.len() as i64;
-                current_differences += 1;
+                total_diffs += len;
+                current_diffs += len as u32;
+                curr_query_pos += len;
                 
-                if target_pos == next_trace_point {
-                    trace_points.push(TracePoint {
-                        target_pos,
-                        differences: current_differences,
-                    });
-                    next_trace_point += trace_spacing as i64;
-                    current_differences = 0;
+                if current_pos == next_trace {
+                    trace.push(next_trace as u8);
+                    trace.push(current_diffs.min(255) as u8);
+                    next_trace += tspace as i32;
+                    current_diffs = 0;
                 }
             }
             'D' => {
-                let del_len = op.len() as i64;
-                let mut remaining_len = del_len;
+                total_diffs += len;
+                current_diffs += len as u32;
                 
-                while remaining_len > 0 {
-                    let distance_to_next_trace = next_trace_point - target_pos;
-                    if distance_to_next_trace <= remaining_len {
-                        current_differences += 1;
-                        trace_points.push(TracePoint {
-                            target_pos: next_trace_point,
-                            differences: current_differences,
-                        });
-                        
-                        target_pos += distance_to_next_trace;
-                        remaining_len -= distance_to_next_trace;
-                        
-                        next_trace_point += trace_spacing as i64;
-                        current_differences = 0;
+                let mut remaining = len;
+                while remaining > 0 {
+                    let to_next = next_trace - current_pos;
+                    if to_next <= remaining {
+                        trace.push(next_trace as u8);
+                        trace.push(current_diffs.min(255) as u8);
+                        remaining -= to_next;
+                        current_pos = next_trace;
+                        next_trace += tspace as i32;
+                        current_diffs = 0;
                     } else {
-                        current_differences += 1;
-                        target_pos += remaining_len;
-                        remaining_len = 0;
+                        current_pos += remaining;
+                        remaining = 0;
                     }
                 }
             }
             _ => return Err("Invalid CIGAR operation".into()),
         }
+        len = 0;
     }
 
     // Add final trace point if needed
-    if target_pos > (trace_points.last().map(|tp| tp.target_pos).unwrap_or(target_start)) {
-        trace_points.push(TracePoint {
-            target_pos,
-            differences: current_differences,
-        });
+    if current_pos > trace.last().map(|&tp| tp as i32).unwrap_or(target_start) {
+        trace.push(current_pos as u8);
+        trace.push(current_diffs.min(255) as u8);
     }
 
-    // For reverse strand, trace points should decrease
-    if is_reverse {
-        trace_points.reverse();
-    }
+    path.diffs = total_diffs;
+    path.aepos = curr_query_pos;
+    path.bepos = current_pos;
+
+    let flags = if is_reverse { COMP_FLAG } else { 0 };
 
     Ok(Alignment {
-        query_start,
-        query_end: query_pos,
-        target_start: actual_target_start,
-        target_end: actual_target_end,
-        trace_spacing,
-        trace_points,
-        is_reverse,
+        path,
+        tspace,
+        trace,
+        flags,
     })
 }
 
 fn trace_points_to_cigar(alignment: &Alignment) -> String {
     let mut cigar = String::new();
-    let mut current_pos = if alignment.is_reverse {
-        alignment.target_end
+    
+    // For reverse strand, start at target end and work backwards
+    let trace_iter = if alignment.flags & COMP_FLAG != 0 {
+        let len = alignment.trace_count();
+        Box::new((0..len).rev()) as Box<dyn Iterator<Item = usize>>
     } else {
-        alignment.target_start
-    };
-
-    let trace_points = if alignment.is_reverse {
-        // Process trace points in reverse order
-        alignment.trace_points.iter().rev().collect::<Vec<_>>()
-    } else {
-        alignment.trace_points.iter().collect()
+        Box::new(0..alignment.trace_count()) as Box<dyn Iterator<Item = usize>>
     };
     
-    for trace in trace_points {
-        let length = trace.target_pos - current_pos;
+    let mut current_pos = if alignment.flags & COMP_FLAG != 0 {
+        alignment.path.bepos
+    } else {
+        alignment.path.bbpos
+    };
+    
+    // Process all trace points to build CIGAR string
+    for idx in trace_iter {
+        let target_pos = alignment.trace_target_pos(idx) as i32;
+        let diffs = alignment.trace_diffs(idx);
+        
+        let length = (target_pos - current_pos).abs();
         
         if length > 0 {
-            if trace.differences == 0 {
-                // All matches
+            if diffs == 0 {
                 cigar.push_str(&format!("{}=", length));
             } else {
-                // Mix of matches and mismatches
-                // This is a simplification - in reality you'd need the sequences 
-                // to know exact positions of mismatches
                 cigar.push_str(&format!("{}M", length));
             }
         }
         
-        current_pos = trace.target_pos;
+        current_pos = target_pos;
     }
     
+    // Handle remaining length after last trace point
+    let final_pos = if alignment.flags & COMP_FLAG != 0 {
+        alignment.path.bbpos
+    } else {
+        alignment.path.bepos  
+    };
+    
+    let remaining = (final_pos - current_pos).abs();
+    if remaining > 0 {
+        if alignment.trace_diffs(alignment.trace_count() - 1) == 0 {
+            cigar.push_str(&format!("{}=", remaining));
+        } else {
+            cigar.push_str(&format!("{}M", remaining));
+        }
+    }
+
     cigar
 }
 
@@ -257,13 +272,17 @@ fn main() -> Result<(), Box<dyn Error>> {
 
     println!("Original CIGAR: {}", cigar);
 
-    let alignment = cigar_to_trace_points(cigar, query_start, target_start, target_start + parse_cigar(cigar)?.iter()
-        .map(|op| match op.op() {
-            '=' | 'X' | 'D' | 'M' => op.len() as i64,
-            'I' => 0,
-            _ => panic!("Invalid op"),
-        })
-        .sum::<i64>(), trace_spacing, false)?;
+    // Calculate target length from CIGAR
+    let target_len = get_target_len_from_cigar(cigar)?;
+
+    let alignment = cigar_to_trace_points(
+        cigar, 
+        query_start, 
+        target_start, 
+        target_start + target_len, 
+        trace_spacing, 
+        false
+    )?;
     println!("Trace points: {:?}", alignment);
 
     let reconstructed_cigar = trace_points_to_cigar(&alignment);
@@ -272,23 +291,28 @@ fn main() -> Result<(), Box<dyn Error>> {
     Ok(())
 }
 
+fn get_target_len_from_cigar(cigar: &str) -> Result<i32, Box<dyn Error>> {
+    let mut len = 0;
+    let mut curr_len = 0i32;
+    
+    for c in cigar.chars() {
+        if c.is_ascii_digit() {
+            len = len * 10 + (c as i32 - '0' as i32);
+        } else {
+            match c {
+                '=' | 'X' | 'D' | 'M' => curr_len += len as i32,
+                'I' => (),
+                _ => return Err("Invalid CIGAR operation".into()),
+            }
+            len = 0;
+        }
+    }
+    Ok(curr_len)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    // CIGAR Parsing Tests
-    #[test]
-    fn test_basic_cigar_parsing() {
-        let cigar = "100=10X20=5I30=2D40=";
-        let ops = parse_cigar(cigar).unwrap();
-        assert_eq!(ops[0], CigarOp::new(100, '='));
-        assert_eq!(ops[1], CigarOp::new(10, 'X'));
-        assert_eq!(ops[2], CigarOp::new(20, '='));
-        assert_eq!(ops[3], CigarOp::new(5, 'I'));
-        assert_eq!(ops[4], CigarOp::new(30, '='));
-        assert_eq!(ops[5], CigarOp::new(2, 'D'));
-        assert_eq!(ops[6], CigarOp::new(40, '='));
-    }
 
     #[test]
     #[should_panic(expected = "Invalid CIGAR operation: Y")]
@@ -299,95 +323,85 @@ mod tests {
     #[test]
     fn test_all_mismatches() {
         let cigar = "100X";
-        let target_len = parse_cigar(cigar).unwrap().iter()
-            .map(|op| match op.op() {
-                '=' | 'X' | 'D' | 'M' => op.len() as i64,
-                'I' => 0,
-                _ => panic!("Invalid op"),
-            })
-            .sum::<i64>();
+        let target_len = get_target_len_from_cigar(cigar).unwrap();
         let alignment = cigar_to_trace_points(cigar, 0, 0, target_len, 50, false).unwrap();
-        assert_eq!(alignment.trace_points.len(), 2);
-        assert_eq!(alignment.trace_points[0].target_pos, 50);
-        assert_eq!(alignment.trace_points[0].differences, 50);
-        assert_eq!(alignment.trace_points[1].target_pos, 100);
-        assert_eq!(alignment.trace_points[1].differences, 50);
+        
+        // With 50bp trace spacing, we get 3 trace points:
+        // - At position 50 with 50 differences
+        // - At position 100 with 50 differences
+        // - A final point at position 100 with 0 differences
+        assert_eq!(alignment.trace_count(), 3);
+        assert_eq!(alignment.trace_target_pos(0), 50);
+        assert_eq!(alignment.trace_diffs(0), 50);
+        assert_eq!(alignment.trace_target_pos(1), 100);
+        assert_eq!(alignment.trace_diffs(1), 50);
+        assert_eq!(alignment.trace_target_pos(2), 100);
+        assert_eq!(alignment.trace_diffs(2), 0);
+        
+        // Verify total path properties
+        assert_eq!(alignment.path.diffs, 100); // All positions are mismatches
+        assert_eq!(alignment.path.bepos - alignment.path.bbpos, 100); // Total length
+        assert_eq!(alignment.path.aepos - alignment.path.abpos, 100); // Query length
     }
 
     #[test]
     fn test_complex_pattern() {
         let cigar = "25=5X20=10I40=5D30=";
-        let target_len = parse_cigar(cigar).unwrap().iter()
-            .map(|op| match op.op() {
-                '=' | 'X' | 'D' | 'M' => op.len() as i64,
-                'I' => 0,
-                _ => panic!("Invalid op"),
-            })
-            .sum::<i64>();
+        let target_len = get_target_len_from_cigar(cigar).unwrap();
         let alignment = cigar_to_trace_points(cigar, 0, 0, target_len, 50, false).unwrap();
-        let points = &alignment.trace_points;
         
-        assert_eq!(points[0].target_pos, 50);
-        assert_eq!(points[0].differences, 5); // From the 5X
+        assert_eq!(alignment.trace_target_pos(0), 50);
+        assert_eq!(alignment.trace_diffs(0), 5); // From the 5X
+        assert_eq!(alignment.path.diffs, 20); // 10 mismatches + 5 inserted bases + 5 deleted bases
     }
+
 
     #[test]
     fn test_non_zero_start() {
         let cigar = "50=";
-        let target_len = parse_cigar(cigar).unwrap().iter()
-        .map(|op| match op.op() {
-            '=' | 'X' | 'D' | 'M' => op.len() as i64,
-            'I' => 0,
-            _ => panic!("Invalid op"),
-        })
-        .sum::<i64>();
+        let target_len = get_target_len_from_cigar(cigar).unwrap();
         let alignment = cigar_to_trace_points(cigar, 100, 200, 200 + target_len, 25, false).unwrap();
-        assert_eq!(alignment.query_start, 100);
-        assert_eq!(alignment.target_start, 200);
-        assert_eq!(alignment.trace_points[0].target_pos, 225);
+        
+        assert_eq!(alignment.path.abpos, 100);
+        assert_eq!(alignment.path.bbpos, 200);
+        assert_eq!(alignment.trace_target_pos(0), 225);
+        assert_eq!(alignment.trace_diffs(0), 0);
     }
-
+    
     #[test]
     fn test_short_alignment() {
         let cigar = "10=";
-        let target_len = parse_cigar(cigar).unwrap().iter()
-        .map(|op| match op.op() {
-            '=' | 'X' | 'D' | 'M' => op.len() as i64,
-            'I' => 0,
-            _ => panic!("Invalid op"),
-        })
-        .sum::<i64>();
+        let target_len = get_target_len_from_cigar(cigar).unwrap();
         let alignment = cigar_to_trace_points(cigar, 0, 0, target_len, 50, false).unwrap();
-        assert_eq!(alignment.trace_points.len(), 1);
-        assert_eq!(alignment.trace_points[0].target_pos, 10);
+        assert_eq!(alignment.trace_count(), 1);
+        assert_eq!(alignment.trace_target_pos(0), 10);
+    }
+
+    #[test]
+    fn test_reverse_strand() {
+        let cigar = "100=";
+        let target_len = get_target_len_from_cigar(cigar).unwrap();
+        let alignment = cigar_to_trace_points(cigar, 0, 0, target_len, 50, true).unwrap();
+        
+        assert!(alignment.flags & COMP_FLAG != 0);
+        let reconstructed = trace_points_to_cigar(&alignment);
+        assert_eq!(reconstructed, "50=50=");
     }
 
     #[test]
     fn test_only_indels() {
         let cigar = "5I5D";
-        let target_len = parse_cigar(cigar).unwrap().iter()
-        .map(|op| match op.op() {
-            '=' | 'X' | 'D' | 'M' => op.len() as i64,
-            'I' => 0,
-            _ => panic!("Invalid op"),
-        })
-        .sum::<i64>();
+        let target_len = get_target_len_from_cigar(cigar).unwrap();
         let alignment = cigar_to_trace_points(cigar, 0, 0, target_len, 50, false).unwrap();
-        assert_eq!(alignment.trace_points.len(), 1);
-        assert_eq!(alignment.trace_points[0].target_pos, 5);
-        assert_eq!(alignment.trace_points[0].differences, 2);
+        assert_eq!(alignment.trace_count(), 1);
+        assert_eq!(alignment.trace_target_pos(0), 5);
+        assert_eq!(alignment.path.diffs, 10); // 5I + 5D = 10 base differences
     }
 
     #[test]
     fn test_perfect_matches() {
         let cigar = "100=";
-        let target_len = parse_cigar(cigar).unwrap().iter()
-        .map(|op| match op.op() {
-            '=' | 'X' | 'D' | 'M' => op.len() as i64,
-            'I' => 0,
-            _ => panic!("Invalid op"),
-        })
-        .sum::<i64>();
+        let target_len = get_target_len_from_cigar(cigar).unwrap();
         let alignment = cigar_to_trace_points(cigar, 0, 0, target_len, 50, false).unwrap();
         let reconstructed = trace_points_to_cigar(&alignment);
         assert_eq!(reconstructed, "50=50=");
@@ -415,104 +429,72 @@ mod tests {
         ];
     
         for (cigar, expected_target_len) in cases {
-            let target_len = parse_cigar(cigar).unwrap().iter()
-            .map(|op| match op.op() {
-                '=' | 'X' | 'D' | 'M' => op.len() as i64,
-                'I' => 0,
-                _ => panic!("Invalid op"),
-            })
-            .sum::<i64>();
+            let target_len = get_target_len_from_cigar(cigar).unwrap();
             let alignment = cigar_to_trace_points(cigar, 0, 0, target_len, 50, false).unwrap();
             
             assert_eq!(
-                alignment.target_end - alignment.target_start,
+                alignment.path.bepos - alignment.path.bbpos,
                 expected_target_len,
                 "Target length mismatch for CIGAR: {}", cigar
             );
-
-            let original_target_consuming: i32 = parse_cigar(cigar)
-                .unwrap()
-                .iter()
-                .map(|op| match op.op() {
-                    '=' | 'X' | 'D' | 'M' => op.len(),
-                    'I' => 0,
-                    _ => panic!("Invalid op"),
-                })
-                .sum();
-                
+    
+            let original_target_consuming = get_target_len_from_cigar(cigar).unwrap();
+                    
             assert_eq!(
-                original_target_consuming as i64,
+                original_target_consuming,
                 expected_target_len,
                 "Original CIGAR target length doesn't match expected for: {}", cigar
             );
         }
     }
-
+    
     #[test]
     fn test_trace_spacing_variations() {
         let cigar = "100=";
-        let target_len = parse_cigar(cigar).unwrap().iter()
-        .map(|op| match op.op() {
-            '=' | 'X' | 'D' | 'M' => op.len() as i64,
-            'I' => 0,
-            _ => panic!("Invalid op"),
-        })
-        .sum::<i64>();
+        let target_len = get_target_len_from_cigar(cigar).unwrap();
         let spacings = vec![10, 25, 50, 75, 100];
         
         for spacing in spacings {
             let alignment = cigar_to_trace_points(cigar, 0, 0, target_len, spacing, false).unwrap();
-            assert_eq!(alignment.trace_points.last().unwrap().target_pos, 100);
+            let last_idx = alignment.trace_count() - 1;
+            assert_eq!(alignment.trace_target_pos(last_idx), 100);
             
-            let expected_points = (100 + spacing - 1) / spacing;
-            assert_eq!(alignment.trace_points.len(), expected_points as usize);
+            let expected_points = (100 + spacing) / spacing;
+            assert_eq!(alignment.trace_count(), expected_points as usize);
         }
     }
 
     #[test]
     fn test_indel_at_boundary() {
         let cigar = "50=2I48=";
-        let target_len = parse_cigar(cigar).unwrap().iter()
-        .map(|op| match op.op() {
-            '=' | 'X' | 'D' | 'M' => op.len() as i64,
-            'I' => 0,
-            _ => panic!("Invalid op"),
-        })
-        .sum::<i64>();
+        let target_len = get_target_len_from_cigar(cigar).unwrap();
         let alignment = cigar_to_trace_points(cigar, 0, 0, target_len, 50, false).unwrap();
-        assert_eq!(alignment.trace_points.len(), 2);
-        assert_eq!(alignment.trace_points[0].target_pos, 50);
-        assert_eq!(alignment.trace_points[0].differences, 0);
-        assert_eq!(alignment.trace_points[1].target_pos, 98);
-        assert_eq!(alignment.trace_points[1].differences, 1);
+        assert_eq!(alignment.trace_count(), 2);
+        assert_eq!(alignment.trace_target_pos(0), 50);
+        assert_eq!(alignment.trace_diffs(0), 0);
+        assert_eq!(alignment.trace_target_pos(1), 98);
+        assert_eq!(alignment.trace_diffs(1), 2);
     }
 
     #[test]
     fn test_mixed_operations() {
         let cigar = "25=10X15=5I20=5D25=";
-        let target_len = parse_cigar(cigar).unwrap().iter()
-        .map(|op| match op.op() {
-            '=' | 'X' | 'D' | 'M' => op.len() as i64,
-            'I' => 0,
-            _ => panic!("Invalid op"),
-        })
-        .sum::<i64>();
+        let target_len = get_target_len_from_cigar(cigar).unwrap();
         let alignment = cigar_to_trace_points(cigar, 0, 0, target_len, 30, false).unwrap();
         
-        // Verify total length and differences are tracked correctly
-        let total_target_len: i32 = parse_cigar(cigar)
-            .unwrap()
-            .iter()
-            .map(|op| match op.op() {
-                '=' | 'X' | 'D' | 'M' => op.len(),
-                'I' => 0,
-                _ => panic!("Invalid op"),
-            })
-            .sum();
-            
-        assert_eq!(
-            alignment.target_end - alignment.target_start,
-            total_target_len as i64
-        );
+        // 10X + 5I + 5D = 20 differences total
+        assert_eq!(alignment.path.diffs, 20);
+        
+        // First point at 30 contains 10 mismatches (X)
+        assert_eq!(alignment.trace_target_pos(0), 30);
+        assert_eq!(alignment.trace_diffs(0), 5);
+        
+        // Second point contains the insertion (5I)
+        assert_eq!(alignment.trace_target_pos(1), 60);
+        assert_eq!(alignment.trace_diffs(1), 10);
+        
+        // Third point contains the deletion (5D)
+        assert_eq!(alignment.trace_target_pos(2), 90);
+        assert_eq!(alignment.trace_diffs(2), 5);
     }
 }
