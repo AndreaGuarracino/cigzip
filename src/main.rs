@@ -14,6 +14,7 @@ struct Alignment {
     target_end: i64,
     trace_spacing: u32,
     trace_points: Vec<TracePoint>,
+    is_reverse: bool,
 }
 
 // Parse CIGAR operations
@@ -53,16 +54,18 @@ impl CigarOp {
 
 fn parse_cigar(cigar: &str) -> Result<Vec<CigarOp>, Box<dyn Error>> {
     let mut ops = Vec::new();
-    let mut current_len = 0;
+    let mut len: i32 = 0;
 
     for c in cigar.chars() {
-        if c.is_digit(10) {
-            current_len = current_len * 10 + c.to_digit(10).unwrap();
+        if c.is_ascii_digit() {
+            len = len*10 + (c as i32 - '0' as i32);
         } else {
-            ops.push(CigarOp::new(current_len as i32, c));
-            current_len = 0;
+            let op = CigarOp::new(len, c);
+            ops.push(op);
+            len = 0;
         }
     }
+
     Ok(ops)
 }
 
@@ -70,11 +73,20 @@ fn cigar_to_trace_points(
     cigar: &str,
     query_start: i64,
     target_start: i64,
+    target_end: i64,
     trace_spacing: u32,
+    is_reverse: bool,
 ) -> Result<Alignment, Box<dyn Error>> {
     let cigar_ops = parse_cigar(cigar)?;
     let mut trace_points = Vec::new();
     
+    // For reverse strand, adjust coordinates
+    let (actual_target_start, actual_target_end) = if is_reverse {
+        (target_end, target_start)  // Swap coordinates for reverse strand
+    } else {
+        (target_start, target_end)
+    };
+
     let mut query_pos = query_start;
     let mut target_pos = target_start;
     let mut current_differences = 0;
@@ -184,21 +196,38 @@ fn cigar_to_trace_points(
         });
     }
 
+    // For reverse strand, trace points should decrease
+    if is_reverse {
+        trace_points.reverse();
+    }
+
     Ok(Alignment {
         query_start,
         query_end: query_pos,
-        target_start,
-        target_end: target_pos,
+        target_start: actual_target_start,
+        target_end: actual_target_end,
         trace_spacing,
         trace_points,
+        is_reverse,
     })
 }
 
 fn trace_points_to_cigar(alignment: &Alignment) -> String {
     let mut cigar = String::new();
-    let mut current_pos = alignment.target_start;
+    let mut current_pos = if alignment.is_reverse {
+        alignment.target_end
+    } else {
+        alignment.target_start
+    };
+
+    let trace_points = if alignment.is_reverse {
+        // Process trace points in reverse order
+        alignment.trace_points.iter().rev().collect::<Vec<_>>()
+    } else {
+        alignment.trace_points.iter().collect()
+    };
     
-    for (i, trace) in alignment.trace_points.iter().enumerate() {
+    for trace in trace_points {
         let length = trace.target_pos - current_pos;
         
         if length > 0 {
@@ -228,7 +257,13 @@ fn main() -> Result<(), Box<dyn Error>> {
 
     println!("Original CIGAR: {}", cigar);
 
-    let alignment = cigar_to_trace_points(cigar, query_start, target_start, trace_spacing)?;
+    let alignment = cigar_to_trace_points(cigar, query_start, target_start, target_start + parse_cigar(cigar)?.iter()
+        .map(|op| match op.op() {
+            '=' | 'X' | 'D' | 'M' => op.len() as i64,
+            'I' => 0,
+            _ => panic!("Invalid op"),
+        })
+        .sum::<i64>(), trace_spacing, false)?;
     println!("Trace points: {:?}", alignment);
 
     let reconstructed_cigar = trace_points_to_cigar(&alignment);
@@ -264,7 +299,14 @@ mod tests {
     #[test]
     fn test_all_mismatches() {
         let cigar = "100X";
-        let alignment = cigar_to_trace_points(cigar, 0, 0, 50).unwrap();
+        let target_len = parse_cigar(cigar).unwrap().iter()
+            .map(|op| match op.op() {
+                '=' | 'X' | 'D' | 'M' => op.len() as i64,
+                'I' => 0,
+                _ => panic!("Invalid op"),
+            })
+            .sum::<i64>();
+        let alignment = cigar_to_trace_points(cigar, 0, 0, target_len, 50, false).unwrap();
         assert_eq!(alignment.trace_points.len(), 2);
         assert_eq!(alignment.trace_points[0].target_pos, 50);
         assert_eq!(alignment.trace_points[0].differences, 50);
@@ -275,7 +317,14 @@ mod tests {
     #[test]
     fn test_complex_pattern() {
         let cigar = "25=5X20=10I40=5D30=";
-        let alignment = cigar_to_trace_points(cigar, 0, 0, 50).unwrap();
+        let target_len = parse_cigar(cigar).unwrap().iter()
+            .map(|op| match op.op() {
+                '=' | 'X' | 'D' | 'M' => op.len() as i64,
+                'I' => 0,
+                _ => panic!("Invalid op"),
+            })
+            .sum::<i64>();
+        let alignment = cigar_to_trace_points(cigar, 0, 0, target_len, 50, false).unwrap();
         let points = &alignment.trace_points;
         
         assert_eq!(points[0].target_pos, 50);
@@ -285,7 +334,14 @@ mod tests {
     #[test]
     fn test_non_zero_start() {
         let cigar = "50=";
-        let alignment = cigar_to_trace_points(cigar, 100, 200, 25).unwrap();
+        let target_len = parse_cigar(cigar).unwrap().iter()
+        .map(|op| match op.op() {
+            '=' | 'X' | 'D' | 'M' => op.len() as i64,
+            'I' => 0,
+            _ => panic!("Invalid op"),
+        })
+        .sum::<i64>();
+        let alignment = cigar_to_trace_points(cigar, 100, 200, 200 + target_len, 25, false).unwrap();
         assert_eq!(alignment.query_start, 100);
         assert_eq!(alignment.target_start, 200);
         assert_eq!(alignment.trace_points[0].target_pos, 225);
@@ -294,7 +350,14 @@ mod tests {
     #[test]
     fn test_short_alignment() {
         let cigar = "10=";
-        let alignment = cigar_to_trace_points(cigar, 0, 0, 50).unwrap();
+        let target_len = parse_cigar(cigar).unwrap().iter()
+        .map(|op| match op.op() {
+            '=' | 'X' | 'D' | 'M' => op.len() as i64,
+            'I' => 0,
+            _ => panic!("Invalid op"),
+        })
+        .sum::<i64>();
+        let alignment = cigar_to_trace_points(cigar, 0, 0, target_len, 50, false).unwrap();
         assert_eq!(alignment.trace_points.len(), 1);
         assert_eq!(alignment.trace_points[0].target_pos, 10);
     }
@@ -302,7 +365,14 @@ mod tests {
     #[test]
     fn test_only_indels() {
         let cigar = "5I5D";
-        let alignment = cigar_to_trace_points(cigar, 0, 0, 50).unwrap();
+        let target_len = parse_cigar(cigar).unwrap().iter()
+        .map(|op| match op.op() {
+            '=' | 'X' | 'D' | 'M' => op.len() as i64,
+            'I' => 0,
+            _ => panic!("Invalid op"),
+        })
+        .sum::<i64>();
+        let alignment = cigar_to_trace_points(cigar, 0, 0, target_len, 50, false).unwrap();
         assert_eq!(alignment.trace_points.len(), 1);
         assert_eq!(alignment.trace_points[0].target_pos, 5);
         assert_eq!(alignment.trace_points[0].differences, 2);
@@ -311,7 +381,14 @@ mod tests {
     #[test]
     fn test_perfect_matches() {
         let cigar = "100=";
-        let alignment = cigar_to_trace_points(cigar, 0, 0, 50).unwrap();
+        let target_len = parse_cigar(cigar).unwrap().iter()
+        .map(|op| match op.op() {
+            '=' | 'X' | 'D' | 'M' => op.len() as i64,
+            'I' => 0,
+            _ => panic!("Invalid op"),
+        })
+        .sum::<i64>();
+        let alignment = cigar_to_trace_points(cigar, 0, 0, target_len, 50, false).unwrap();
         let reconstructed = trace_points_to_cigar(&alignment);
         assert_eq!(reconstructed, "50=50=");
     }
@@ -338,7 +415,14 @@ mod tests {
         ];
     
         for (cigar, expected_target_len) in cases {
-            let alignment = cigar_to_trace_points(cigar, 0, 0, 50).unwrap();
+            let target_len = parse_cigar(cigar).unwrap().iter()
+            .map(|op| match op.op() {
+                '=' | 'X' | 'D' | 'M' => op.len() as i64,
+                'I' => 0,
+                _ => panic!("Invalid op"),
+            })
+            .sum::<i64>();
+            let alignment = cigar_to_trace_points(cigar, 0, 0, target_len, 50, false).unwrap();
             
             assert_eq!(
                 alignment.target_end - alignment.target_start,
@@ -367,10 +451,17 @@ mod tests {
     #[test]
     fn test_trace_spacing_variations() {
         let cigar = "100=";
+        let target_len = parse_cigar(cigar).unwrap().iter()
+        .map(|op| match op.op() {
+            '=' | 'X' | 'D' | 'M' => op.len() as i64,
+            'I' => 0,
+            _ => panic!("Invalid op"),
+        })
+        .sum::<i64>();
         let spacings = vec![10, 25, 50, 75, 100];
         
         for spacing in spacings {
-            let alignment = cigar_to_trace_points(cigar, 0, 0, spacing).unwrap();
+            let alignment = cigar_to_trace_points(cigar, 0, 0, target_len, spacing, false).unwrap();
             assert_eq!(alignment.trace_points.last().unwrap().target_pos, 100);
             
             let expected_points = (100 + spacing - 1) / spacing;
@@ -381,7 +472,14 @@ mod tests {
     #[test]
     fn test_indel_at_boundary() {
         let cigar = "50=2I48=";
-        let alignment = cigar_to_trace_points(cigar, 0, 0, 50).unwrap();
+        let target_len = parse_cigar(cigar).unwrap().iter()
+        .map(|op| match op.op() {
+            '=' | 'X' | 'D' | 'M' => op.len() as i64,
+            'I' => 0,
+            _ => panic!("Invalid op"),
+        })
+        .sum::<i64>();
+        let alignment = cigar_to_trace_points(cigar, 0, 0, target_len, 50, false).unwrap();
         assert_eq!(alignment.trace_points.len(), 2);
         assert_eq!(alignment.trace_points[0].target_pos, 50);
         assert_eq!(alignment.trace_points[0].differences, 0);
@@ -392,7 +490,14 @@ mod tests {
     #[test]
     fn test_mixed_operations() {
         let cigar = "25=10X15=5I20=5D25=";
-        let alignment = cigar_to_trace_points(cigar, 0, 0, 30).unwrap();
+        let target_len = parse_cigar(cigar).unwrap().iter()
+        .map(|op| match op.op() {
+            '=' | 'X' | 'D' | 'M' => op.len() as i64,
+            'I' => 0,
+            _ => panic!("Invalid op"),
+        })
+        .sum::<i64>();
+        let alignment = cigar_to_trace_points(cigar, 0, 0, target_len, 30, false).unwrap();
         
         // Verify total length and differences are tracked correctly
         let total_target_len: i32 = parse_cigar(cigar)
