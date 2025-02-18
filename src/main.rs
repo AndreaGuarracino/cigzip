@@ -1,4 +1,5 @@
 use std::cmp::min;
+use clap::Parser;
 
 /// Parse a CIGAR string into a vector of (length, op) pairs.
 fn parse_cigar(cigar: &str) -> Vec<(usize, char)> {
@@ -45,8 +46,8 @@ fn cigar_to_tracepoints(
     cigar: &str,
     a_start: usize,
     a_end: usize,
-    _b_start: usize, // not used directly here
-    _b_end: usize, // not used directly here
+    _b_start: usize,
+    _b_end: usize,
     delta: usize,
 ) -> Vec<(usize, usize)> {
     let ops = parse_cigar(cigar);
@@ -605,8 +606,13 @@ fn tracepoints_to_cigar(
     a_start: usize,
     a_end: usize,
     b_start: usize,
-    _b_end: usize, // not used directly
+    _b_end: usize,
     delta: usize,
+    mismatch: i32,
+    gap_open_i: i32,
+    gap_extend_i: i32,
+    gap_open_d: i32,
+    gap_extend_d: i32,
 ) -> String {
     // First, compute the number of intervals based solely on A consumption.
     // (This does not count any trailing B-only operations.)
@@ -654,7 +660,7 @@ fn tracepoints_to_cigar(
         let b_sub = &b_seq[current_b..current_b + (b_len as usize)];
 
         // Align the two segments using affine gap penalties.
-        let mut seg_cigar = align_segment_dual_gap_affine(a_sub, b_sub, 3, 4, 2, 24, 1);
+        let mut seg_cigar = align_segment_dual_gap_affine(a_sub, b_sub, mismatch, gap_open_i, gap_extend_i, gap_open_d, gap_extend_d);
 
         // Append to our overall CIGAR operations.
         cigar_ops.append(&mut seg_cigar);
@@ -666,15 +672,42 @@ fn tracepoints_to_cigar(
     cigar_vec_to_string(&merged)
 }
 
-/// ---
-///
-/// Example driver.
+/// Command-line arguments parsed with Clap.
+#[derive(Parser, Debug)]
+#[command(author, version, about = "CIGAR Alignment and Tracepoint Reconstruction", long_about = None)]
+struct Args {
+    /// Gap penalties in the format mismatch,gap_open1,gap_ext1,gap_open2,gap_ext2
+    #[arg(short, long)]
+    penalties: String,
+
+    /// Delta value for tracepoints
+    #[arg(short, long, default_value = "100")]
+    delta: usize,
+}
+
 fn main() {
+    // Parse command-line arguments.
+    let args = Args::parse();
+    let tokens: Vec<&str> = args.penalties.split(',').collect();
+    if tokens.len() != 5 {
+        eprintln!("Error: penalties must be provided as mismatch,gap_open1,gap_ext1,gap_open2,gap_ext2");
+        std::process::exit(1);
+    }
+    let mismatch: i32 = tokens[0].parse().expect("Invalid mismatch value");
+    let gap_open1: i32 = tokens[1].parse().expect("Invalid gap_open1 value");
+    let gap_ext1: i32 = tokens[2].parse().expect("Invalid gap_ext1 value");
+    let gap_open2: i32 = tokens[3].parse().expect("Invalid gap_open2 value");
+    let gap_ext2: i32 = tokens[4].parse().expect("Invalid gap_ext2 value");
+
+    // IMPORTANT: if delta is small and the alignment has no huge INDELs, the tracepoints can be saved as Vec<u16,u16>
+    let delta = args.delta;
+
     // Example sequences.
     let a_seq: String = "GAACAGAGAAATGGTGGAATTCAAATACAAAAAAACCGCAAAATTAAAAATCTTGCGGCTCTCTGAACTCATTTTCATGAGTGAATTTGGCGGAACGGACGGGACTCGAACCCGCGACCCCCTGCGTGACAGGCAGGTATTCTAACCGACTGAACTACCGCTCCGCCGTTGTGTTCCGTTGGGAACGGGCGAATATTACGGATTTGCCTCACCCTTCGTCAACGGTTTTTCTCATCTTTTGAATCGTTTGCTGCAAAAATCGCCCAAGCCGCTATTTTTAGCGCCTTTTACAGGTATTTATGCCCGCCAGAGGCAGCTTCCGCCCTTCTTCTCCACCAGATCAAGACGGGCTTCCTGAGCTGCAAGCTCTTCATCTGTCGCAAAAACAACGCGTAACTTACTTGCCTGACGTACAATGCGCTGAATTGTTGCTTCACCTTGTTGCTGCTGTGTCTCTCCTTCCATCGCAAAAGCCATCGACGTTTGACCACCGGTCATCG".to_owned();
     let b_seq: String = "ACCGAATAAATCTTTGTCTGTCAGTTGCTGGGGAGTGTTTTTATTAATATTACTTTGTGTGACTTGAGCTTTTTTTTCTTCTTTTCATCAATAGAAGATTCAGAGGCACATCCTGCAAGCAGCGAGAATAACACACATATGCAACAAAGCTTTTTTGAATTCATAATTGGACACTCCCTCGCCTGTCATAATGATTAGAATATTTAGCATTGATAACGGACTCTAATTATATACCCCACTTAAATAATAACAAACAAAATCAATTTGAAATATACATTCATTTAATCAATATAAATTTTATTCTCTGGAAATATATTTAAGCTGAATGGTTCGATATCATTATTGAATTTTAATGAATGAGACAACAAGCGAGAATCACGCACTTACGCCAGAATAAAACATTGAACAGAGAAATGGTGGAATTCAAATACAAAAAAACCGCAAAATTAAAAATCTTGCGGGCTCTCTGAACTCATTTTCATGAGTGAATTTGGCGGAAC".to_owned();
 
-    let cigar = align_segment_dual_gap_affine(&a_seq, &b_seq, 3, 4, 2, 24, 1);
+    // Use the provided gap penalties when aligning the full sequences.
+    let cigar = align_segment_dual_gap_affine(&a_seq, &b_seq, mismatch, gap_open1, gap_ext1, gap_open2, gap_ext2);
     let cigar = cigar_vec_to_string(&cigar);
 
     let a_start = 0;
@@ -682,15 +715,12 @@ fn main() {
     let b_start = 0;
     let b_end = b_seq.len();
 
-    // IMPORTANT: if delta is small and the alignment has no huge INDELs, the tracepoints can be saved as Vec<u16,u16>
-    let delta = 100;
-
     // Convert CIGAR -> tracepoints.
     let tracepoints = cigar_to_tracepoints(&cigar, a_start, a_end, b_start, b_end, delta);
     println!("Tracepoints (d, b) = {:?}", tracepoints);
 
     // Reconstruct the CIGAR string from tracepoints.
-    let recon_cigar = tracepoints_to_cigar(&tracepoints, &a_seq, &b_seq, a_start, a_end, b_start, b_end, delta);
+    let recon_cigar = tracepoints_to_cigar(&tracepoints, &a_seq, &b_seq, a_start, a_end, b_start, b_end, delta, mismatch, gap_open1, gap_ext1, gap_open2, gap_ext2);
     println!("     Original CIGAR: {}", cigar);
     println!("Reconstructed CIGAR: {}", recon_cigar);
 
