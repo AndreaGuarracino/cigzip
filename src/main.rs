@@ -698,6 +698,7 @@ fn main() {
     let gap_ext1: i32 = tokens[2].parse().expect("Invalid gap_ext1 value");
     let gap_open2: i32 = tokens[3].parse().expect("Invalid gap_open2 value");
     let gap_ext2: i32 = tokens[4].parse().expect("Invalid gap_ext2 value");
+    eprintln!("Penalties: {},{},{},{},{}", mismatch, gap_open1, gap_ext1, gap_open2, gap_ext2);
 
     // IMPORTANT: if delta is small and the alignment has no huge INDELs, the tracepoints can be saved as Vec<u16,u16>
     let delta = args.delta;
@@ -706,23 +707,23 @@ fn main() {
     let a_seq: String = "GAACAGAGAAATGGTGGAATTCAAATACAAAAAAACCGCAAAATTAAAAATCTTGCGGCTCTCTGAACTCATTTTCATGAGTGAATTTGGCGGAACGGACGGGACTCGAACCCGCGACCCCCTGCGTGACAGGCAGGTATTCTAACCGACTGAACTACCGCTCCGCCGTTGTGTTCCGTTGGGAACGGGCGAATATTACGGATTTGCCTCACCCTTCGTCAACGGTTTTTCTCATCTTTTGAATCGTTTGCTGCAAAAATCGCCCAAGCCGCTATTTTTAGCGCCTTTTACAGGTATTTATGCCCGCCAGAGGCAGCTTCCGCCCTTCTTCTCCACCAGATCAAGACGGGCTTCCTGAGCTGCAAGCTCTTCATCTGTCGCAAAAACAACGCGTAACTTACTTGCCTGACGTACAATGCGCTGAATTGTTGCTTCACCTTGTTGCTGCTGTGTCTCTCCTTCCATCGCAAAAGCCATCGACGTTTGACCACCGGTCATCG".to_owned();
     let b_seq: String = "ACCGAATAAATCTTTGTCTGTCAGTTGCTGGGGAGTGTTTTTATTAATATTACTTTGTGTGACTTGAGCTTTTTTTTCTTCTTTTCATCAATAGAAGATTCAGAGGCACATCCTGCAAGCAGCGAGAATAACACACATATGCAACAAAGCTTTTTTGAATTCATAATTGGACACTCCCTCGCCTGTCATAATGATTAGAATATTTAGCATTGATAACGGACTCTAATTATATACCCCACTTAAATAATAACAAACAAAATCAATTTGAAATATACATTCATTTAATCAATATAAATTTTATTCTCTGGAAATATATTTAAGCTGAATGGTTCGATATCATTATTGAATTTTAATGAATGAGACAACAAGCGAGAATCACGCACTTACGCCAGAATAAAACATTGAACAGAGAAATGGTGGAATTCAAATACAAAAAAACCGCAAAATTAAAAATCTTGCGGGCTCTCTGAACTCATTTTCATGAGTGAATTTGGCGGAAC".to_owned();
 
-    // Use the provided gap penalties when aligning the full sequences.
-    let cigar = align_segment_dual_gap_affine(&a_seq, &b_seq, mismatch, gap_open1, gap_ext1, gap_open2, gap_ext2);
-    let cigar = cigar_vec_to_string(&cigar);
-
     let a_start = 0;
     let a_end = a_seq.len();
     let b_start = 0;
     let b_end = b_seq.len();
 
+    // Use the provided gap penalties when aligning the full sequences.
+    let cigar = align_segment_dual_gap_affine(&a_seq[a_start..a_end], &b_seq[b_start..b_end], mismatch, gap_open1, gap_ext1, gap_open2, gap_ext2);
+    let cigar = cigar_vec_to_string(&cigar);
+
     // Convert CIGAR -> tracepoints.
     let tracepoints = cigar_to_tracepoints(&cigar, a_start, a_end, b_start, b_end, delta);
-    println!("Tracepoints (d, b) = {:?}", tracepoints);
+    eprintln!("Tracepoints (d, b) = {:?}", tracepoints);
 
     // Reconstruct the CIGAR string from tracepoints.
     let recon_cigar = tracepoints_to_cigar(&tracepoints, &a_seq, &b_seq, a_start, a_end, b_start, b_end, delta, mismatch, gap_open1, gap_ext1, gap_open2, gap_ext2);
-    println!("     Original CIGAR: {}", cigar);
-    println!("Reconstructed CIGAR: {}", recon_cigar);
+    eprintln!("     Original CIGAR: {}", cigar);
+    eprintln!("Reconstructed CIGAR: {}", recon_cigar);
 
     // Verify that the reconstructed CIGAR matches the original.
     assert!(cigar == recon_cigar);
