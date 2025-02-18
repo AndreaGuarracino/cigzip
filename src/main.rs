@@ -45,10 +45,10 @@ fn cigar_to_tracepoints(
     cigar: &str,
     a_start: usize,
     a_end: usize,
-    b_start: usize,
+    _b_start: usize, // not used directly here
     _b_end: usize, // not used directly here
     delta: usize,
-) -> Vec<(u8, u8)> {
+) -> Vec<(usize, usize)> {
     let ops = parse_cigar(cigar);
 
     // Calculate the next A boundary (tracepoint) after a_start.
@@ -95,7 +95,7 @@ fn cigar_to_tracepoints(
             // If we’ve reached a tracepoint boundary (i.e. a_pos == next_thresh)
             if a_pos == next_thresh {
                 // Record the tracepoint for this segment.
-                tracepoints.push((current_diffs as u8, current_b_bases as u8));
+                tracepoints.push((current_diffs, current_b_bases));
                 // Reset accumulators for the next segment.
                 current_diffs = 0;
                 current_b_bases = 0;
@@ -105,7 +105,7 @@ fn cigar_to_tracepoints(
     }
     // Always record a final segment if we haven't reached a_end or if there is leftover.
     if a_pos < a_end || current_diffs != 0 || current_b_bases != 0 {
-        tracepoints.push((current_diffs as u8, current_b_bases as u8));
+        tracepoints.push((current_diffs, current_b_bases));
     }
     tracepoints
 }
@@ -565,7 +565,7 @@ fn align_segment_dual_gap_affine(
 }
 
 /// Helper: Merge two vectors of CIGAR operations (merging adjacent ops of the same kind).
-fn merge_cigar_ops(mut ops: Vec<(usize, char)>) -> Vec<(usize, char)> {
+fn merge_cigar_ops(ops: Vec<(usize, char)>) -> Vec<(usize, char)> {
     if ops.is_empty() {
         return ops;
     }
@@ -599,7 +599,7 @@ fn cigar_vec_to_string(ops: &[(usize, char)]) -> String {
 ///
 /// Note: here we ignore the d value (edit count) from the tracepoint.
 fn tracepoints_to_cigar(
-    tracepoints: &[(u8, u8)],
+    tracepoints: &[(usize, usize)],
     a_seq: &str,
     b_seq: &str,
     a_start: usize,
@@ -613,7 +613,7 @@ fn tracepoints_to_cigar(
     let consumed_intervals = ((a_end - a_start) + delta - 1) / delta;
     // If we recorded more tracepoints than that, we have a trailing segment.
     let extra = if tracepoints.len() > consumed_intervals { 1 } else { 0 };
-    let total_intervals = consumed_intervals + extra;
+    //let total_intervals = consumed_intervals + extra;
 
     // Now compute the boundaries.
     // For the consumed intervals, we use the standard boundaries.
@@ -681,7 +681,7 @@ fn main() {
     let a_end = a_seq.len();
     let b_start = 0;
     let b_end = b_seq.len();
-    let delta = 251;
+    let delta = 100;
 
     // Convert CIGAR -> tracepoints.
     let tracepoints = cigar_to_tracepoints(&cigar, a_start, a_end, b_start, b_end, delta);
