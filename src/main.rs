@@ -1,5 +1,10 @@
 use std::cmp::min;
 use clap::Parser;
+use std::io::{BufRead, BufReader};
+use std::fs::File;
+
+// Use rust-htslib for FASTA reading.
+use rust_htslib::faidx::Reader as FastaReader;
 
 /// Parse a CIGAR string into a vector of (length, op) pairs.
 fn parse_cigar(cigar: &str) -> Vec<(usize, char)> {
@@ -233,6 +238,12 @@ fn align_segment_gap_affine(
     dp_iy[0][0] = inf;
     ptr_m[0][0] = None;
 
+    for i in 0..=n {
+        dp_m[i][0] = i as i32;
+    }
+    for j in 0..=m {
+        dp_m[0][j] = j as i32;
+    }
     for i in 1..=n {
         if i == 1 {
             dp_ix[i][0] = gap_open;
@@ -660,7 +671,15 @@ fn tracepoints_to_cigar(
         let b_sub = &b_seq[current_b..current_b + (b_len as usize)];
 
         // Align the two segments using affine gap penalties.
-        let mut seg_cigar = align_segment_dual_gap_affine(a_sub, b_sub, mismatch, gap_open_i, gap_extend_i, gap_open_d, gap_extend_d);
+        let mut seg_cigar = align_segment_dual_gap_affine(
+            a_sub,
+            b_sub,
+            mismatch,
+            gap_open_i,
+            gap_extend_i,
+            gap_open_d,
+            gap_extend_d,
+        );
 
         // Append to our overall CIGAR operations.
         cigar_ops.append(&mut seg_cigar);
@@ -674,18 +693,31 @@ fn tracepoints_to_cigar(
 
 /// Command-line arguments parsed with Clap.
 #[derive(Parser, Debug)]
-#[command(author, version, about = "CIGAR Alignment and Tracepoint Reconstruction", long_about = None)]
+#[command(
+    author,
+    version,
+    about = "CIGAR Alignment and Tracepoint Reconstruction",
+    long_about = None
+)]
 struct Args {
+    /// PAF file for alignments (use "-" to read from standard input)
+    #[arg(short = 'p', long = "paf")]
+    paf: Option<String>,
+
+    /// FASTA file for sequences
+    #[arg(short = 'f', long = "fasta")]
+    fasta: Option<String>,
+
     /// Gap penalties in the format mismatch,gap_open1,gap_ext1,gap_open2,gap_ext2
-    #[arg(short, long)]
+    #[arg(long, default_value = "3,4,2,24,1")]
     penalties: String,
 
     /// Delta value for tracepoints
-    #[arg(short, long, default_value = "100")]
+    #[arg(long, default_value = "100")]
     delta: usize,
 }
 
-fn main() {
+fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Parse command-line arguments.
     let args = Args::parse();
     let tokens: Vec<&str> = args.penalties.split(',').collect();
@@ -693,38 +725,138 @@ fn main() {
         eprintln!("Error: penalties must be provided as mismatch,gap_open1,gap_ext1,gap_open2,gap_ext2");
         std::process::exit(1);
     }
-    let mismatch: i32 = tokens[0].parse().expect("Invalid mismatch value");
-    let gap_open1: i32 = tokens[1].parse().expect("Invalid gap_open1 value");
-    let gap_ext1: i32 = tokens[2].parse().expect("Invalid gap_ext1 value");
-    let gap_open2: i32 = tokens[3].parse().expect("Invalid gap_open2 value");
-    let gap_ext2: i32 = tokens[4].parse().expect("Invalid gap_ext2 value");
+    let mismatch: i32 = tokens[0].parse()?;
+    let gap_open1: i32 = tokens[1].parse()?;
+    let gap_ext1: i32 = tokens[2].parse()?;
+    let gap_open2: i32 = tokens[3].parse()?;
+    let gap_ext2: i32 = tokens[4].parse()?;
     eprintln!("Penalties: {},{},{},{},{}", mismatch, gap_open1, gap_ext1, gap_open2, gap_ext2);
 
-    // IMPORTANT: if delta is small and the alignment has no huge INDELs, the tracepoints can be saved as Vec<u16,u16>
     let delta = args.delta;
 
-    // Example sequences.
-    let a_seq: String = "GAACAGAGAAATGGTGGAATTCAAATACAAAAAAACCGCAAAATTAAAAATCTTGCGGCTCTCTGAACTCATTTTCATGAGTGAATTTGGCGGAACGGACGGGACTCGAACCCGCGACCCCCTGCGTGACAGGCAGGTATTCTAACCGACTGAACTACCGCTCCGCCGTTGTGTTCCGTTGGGAACGGGCGAATATTACGGATTTGCCTCACCCTTCGTCAACGGTTTTTCTCATCTTTTGAATCGTTTGCTGCAAAAATCGCCCAAGCCGCTATTTTTAGCGCCTTTTACAGGTATTTATGCCCGCCAGAGGCAGCTTCCGCCCTTCTTCTCCACCAGATCAAGACGGGCTTCCTGAGCTGCAAGCTCTTCATCTGTCGCAAAAACAACGCGTAACTTACTTGCCTGACGTACAATGCGCTGAATTGTTGCTTCACCTTGTTGCTGCTGTGTCTCTCCTTCCATCGCAAAAGCCATCGACGTTTGACCACCGGTCATCG".to_owned();
-    let b_seq: String = "ACCGAATAAATCTTTGTCTGTCAGTTGCTGGGGAGTGTTTTTATTAATATTACTTTGTGTGACTTGAGCTTTTTTTTCTTCTTTTCATCAATAGAAGATTCAGAGGCACATCCTGCAAGCAGCGAGAATAACACACATATGCAACAAAGCTTTTTTGAATTCATAATTGGACACTCCCTCGCCTGTCATAATGATTAGAATATTTAGCATTGATAACGGACTCTAATTATATACCCCACTTAAATAATAACAAACAAAATCAATTTGAAATATACATTCATTTAATCAATATAAATTTTATTCTCTGGAAATATATTTAAGCTGAATGGTTCGATATCATTATTGAATTTTAATGAATGAGACAACAAGCGAGAATCACGCACTTACGCCAGAATAAAACATTGAACAGAGAAATGGTGGAATTCAAATACAAAAAAACCGCAAAATTAAAAATCTTGCGGGCTCTCTGAACTCATTTTCATGAGTGAATTTGGCGGAAC".to_owned();
+    // If both a PAF file and FASTA file are provided, process each PAF record.
+    if let (Some(paf_path), Some(fasta_path)) = (args.paf, args.fasta) {
+        eprintln!("Processing PAF file: {}", paf_path);
+        eprintln!("Using FASTA file: {}", fasta_path);
 
-    let a_start = 0;
-    let a_end = a_seq.len();
-    let b_start = 0;
-    let b_end = b_seq.len();
+        // Open the FASTA file using rust-htslib.
+        let fasta_reader = FastaReader::from_path(&fasta_path)
+            .expect("Error reading FASTA file");
 
-    // Use the provided gap penalties when aligning the full sequences.
-    let cigar = align_segment_dual_gap_affine(&a_seq[a_start..a_end], &b_seq[b_start..b_end], mismatch, gap_open1, gap_ext1, gap_open2, gap_ext2);
-    let cigar = cigar_vec_to_string(&cigar);
+        // Open the PAF file (or use stdin if "-" is provided).
+        let reader: Box<dyn BufRead> = if paf_path == "-" {
+            Box::new(BufReader::new(std::io::stdin()))
+        } else {
+            Box::new(BufReader::new(File::open(&paf_path)?))
+        };
 
-    // Convert CIGAR -> tracepoints.
-    let tracepoints = cigar_to_tracepoints(&cigar, a_start, a_end, b_start, b_end, delta);
-    eprintln!("Tracepoints (d, b) = {:?}", tracepoints);
+        for (i, line) in reader.lines().enumerate() {
+            let line = line?;
+            if line.trim().is_empty() || line.starts_with('#') {
+                continue;
+            }
+            let fields: Vec<&str> = line.split('\t').collect();
+            if fields.len() < 12 {
+                eprintln!("Skipping malformed PAF line {}: {}", i + 1, line);
+                continue;
+            }
+            // Parse mandatory PAF fields.
+            let query_name = fields[0];
+            let _query_len: usize = fields[1].parse().unwrap_or(0);
+            let query_start: usize = fields[2].parse()?;
+            let query_end: usize = fields[3].parse()?;
+            let strand = fields[4];
+            if strand == "-" {
+                continue; // Still not supported
+            }
+            let target_name = fields[5];
+            let _target_len: usize = fields[6].parse().unwrap_or(0);
+            let target_start: usize = fields[7].parse()?;
+            let target_end: usize = fields[8].parse()?;
 
-    // Reconstruct the CIGAR string from tracepoints.
-    let recon_cigar = tracepoints_to_cigar(&tracepoints, &a_seq, &b_seq, a_start, a_end, b_start, b_end, delta, mismatch, gap_open1, gap_ext1, gap_open2, gap_ext2);
-    eprintln!("     Original CIGAR: {}", cigar);
-    eprintln!("Reconstructed CIGAR: {}", recon_cigar);
+            // Find the cg:Z: field (the CIGAR string).
+            let cg_field = fields.iter().find(|&&s| s.starts_with("cg:Z:"));
+            if cg_field.is_none() {
+                eprintln!("Skipping line {}: no cg field found", i + 1);
+                continue;
+            }
+            let cg = cg_field.unwrap().strip_prefix("cg:Z:").unwrap();
 
-    // Verify that the reconstructed CIGAR matches the original.
-    assert!(cigar == recon_cigar);
+            // Print PAF row
+            // eprintln!("{}", line);
+            // eprintln!("Line {}: Query: {}:{}-{}", i + 1, query_name, query_start, query_end);
+            // eprintln!("Line {}: Target: {}:{}-{}", i + 1, target_name, target_start, target_end);
+
+            // Convert CIGAR to tracepoints using query (A) and target (B) coordinates.
+            let tracepoints = cigar_to_tracepoints(cg, query_start, query_end, target_start, target_end, delta);
+
+            // Fetch query sequence from FASTA.
+            // Note: rust-htslib uses 1-based coordinates in region strings.
+            let query_seq_bytes = fasta_reader.fetch_seq(query_name, query_start, query_end - 1)?;
+            let query_seq = String::from_utf8(query_seq_bytes)?.to_ascii_uppercase();
+
+            // Fetch target sequence from FASTA.
+            let target_seq_bytes = fasta_reader.fetch_seq(target_name, target_start, target_end - 1)?;
+            let target_seq = String::from_utf8(target_seq_bytes)?.to_ascii_uppercase();
+
+            // eprintln!("Line {}: Query sequence: {} (len: {})", i + 1, query_seq, query_seq.len());
+            // eprintln!("Line {}: Target sequence: {} (len: {})", i + 1, target_seq, target_seq.len());
+
+            // Reconstruct the CIGAR from tracepoints.
+            let recon_cigar = tracepoints_to_cigar(
+                &tracepoints,
+                &query_seq,
+                &target_seq,
+                0,
+                query_seq.len(),
+                0,
+                target_seq.len(),
+                delta,
+                mismatch,
+                gap_open1,
+                gap_ext1,
+                gap_open2,
+                gap_ext2,
+            );
+
+            let cigar = align_segment_dual_gap_affine(&query_seq, &target_seq, mismatch, gap_open1, gap_ext1, gap_open2, gap_ext2);
+            let cigar = cigar_vec_to_string(&cigar);
+
+            if cigar == recon_cigar {
+                //eprintln!("Line {}: Conversion successful.", i + 1);
+            } else {
+                eprintln!("Line {}: Conversion mismatch!", i + 1);
+                eprintln!("\tLine {}:         Tracepoints: {:?}", i + 1, tracepoints);
+                eprintln!("\tLine {}:      Original CIGAR: {}", i + 1, cg);
+                eprintln!("\tLine {}:     Whole-seq CIGAR: {}", i + 1, cigar);
+                eprintln!("\tLine {}: Reconstructed CIGAR: {}", i + 1, recon_cigar);
+            }
+        }
+    } else {
+        // Fallback: run default example if no PAF/FASTA provided.
+        eprintln!("No PAF and FASTA provided, running default example.");
+
+        let a_seq: String = "GAACAGAGAAATGGTGGAATTCAAATACAAAAAAACCGCAAAATTAAAAATCTTGCGGCTCTCTGAACTCATTTTCATGAGTGAATTTGGCGGAACGGACGGGACTCGAACCCGCGACCCCCTGCGTGACAGGCAGGTATTCTAACCGACTGAACTACCGCTCCGCCGTTGTGTTCCGTTGGGAACGGGCGAATATTACGGATTTGCCTCACCCTTCGTCAACGGTTTTTCTCATCTTTTGAATCGTTTGCTGCAAAAATCGCCCAAGCCGCTATTTTTAGCGCCTTTTACAGGTATTTATGCCCGCCAGAGGCAGCTTCCGCCCTTCTTCTCCACCAGATCAAGACGGGCTTCCTGAGCTGCAAGCTCTTCATCTGTCGCAAAAACAACGCGTAACTTACTTGCCTGACGTACAATGCGCTGAATTGTTGCTTCACCTTGTTGCTGCTGTGTCTCTCCTTCCATCGCAAAAGCCATCGACGTTTGACCACCGGTCATCG".to_owned();
+        let b_seq: String = "ACCGAATAAATCTTTGTCTGTCAGTTGCTGGGGAGTGTTTTTATTAATATTACTTTGTGTGACTTGAGCTTTTTTTTCTTCTTTTCATCAATAGAAGATTCAGAGGCACATCCTGCAAGCAGCGAGAATAACACACATATGCAACAAAGCTTTTTTGAATTCATAATTGGACACTCCCTCGCCTGTCATAATGATTAGAATATTTAGCATTGATAACGGACTCTAATTATATACCCCACTTAAATAATAACAAACAAAATCAATTTGAAATATACATTCATTTAATCAATATAAATTTTATTCTCTGGAAATATATTTAAGCTGAATGGTTCGATATCATTATTGAATTTTAATGAATGAGACAACAAGCGAGAATCACGCACTTACGCCAGAATAAAACATTGAACAGAGAAATGGTGGAATTCAAATACAAAAAAACCGCAAAATTAAAAATCTTGCGGGCTCTCTGAACTCATTTTCATGAGTGAATTTGGCGGAAC".to_owned();
+
+        let a_start = 0;
+        let a_end = a_seq.len();
+        let b_start = 0;
+        let b_end = b_seq.len();
+
+        let cigar = align_segment_dual_gap_affine(&a_seq[a_start..a_end], &b_seq[b_start..b_end],
+            mismatch, gap_open1, gap_ext1, gap_open2, gap_ext2);
+        let cigar = cigar_vec_to_string(&cigar);
+
+        let tracepoints = cigar_to_tracepoints(&cigar, a_start, a_end, b_start, b_end, delta);
+        eprintln!("Tracepoints (d, b) = {:?}", tracepoints);
+
+        let recon_cigar = tracepoints_to_cigar(&tracepoints, &a_seq, &b_seq,
+            a_start, a_end, b_start, b_end, delta, mismatch, gap_open1, gap_ext1, gap_open2, gap_ext2);
+        eprintln!("     Original CIGAR: {}", cigar);
+        eprintln!("Reconstructed CIGAR: {}", recon_cigar);
+        assert!(cigar == recon_cigar);
+    }
+
+    Ok(())
 }
