@@ -682,6 +682,7 @@ fn main() {
     let b_start = 0;
     let b_end = b_seq.len();
 
+    // IMPORTANT: if delta is small and the alignment has no huge INDELs, the tracepoints can be saved as Vec<u16,u16>
     let delta = 100;
 
     // Convert CIGAR -> tracepoints.
