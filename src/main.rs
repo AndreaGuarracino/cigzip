@@ -103,8 +103,8 @@ fn cigar_to_tracepoints(
             }
         }
     }
-    // If there is a “final” segment (when a_end is not an exact multiple of delta)
-    if a_pos < a_end || (!tracepoints.is_empty() && a_pos != next_thresh - delta) {
+    // Always record a final segment if we haven't reached a_end or if there is leftover.
+    if a_pos < a_end || current_diffs != 0 || current_b_bases != 0 {
         tracepoints.push((current_diffs as u8, current_b_bases as u8));
     }
     tracepoints
@@ -531,13 +531,13 @@ fn align_segment_dual_gap_affine(
             }
             State::Ix => {
                 let prev = ptr_ix[i][j].unwrap();
-                ops_rev.push('I'); // Insertion (vertical move)
+                ops_rev.push('I'); // Insertion (vertical move, consuming A)
                 i -= 1;
                 current_state = prev;
             }
             State::Iy => {
                 let prev = ptr_iy[i][j].unwrap();
-                ops_rev.push('D'); // Deletion (horizontal move)
+                ops_rev.push('D'); // Deletion (horizontal move, consuming B)
                 j -= 1;
                 current_state = prev;
             }
@@ -545,7 +545,7 @@ fn align_segment_dual_gap_affine(
     }
     ops_rev.reverse();
 
-    // Compress consecutive operations into (count, op) pairs.
+    // Compress consecutive operations.
     let mut cigar = Vec::new();
     if !ops_rev.is_empty() {
         let mut count = 1;
@@ -608,7 +608,15 @@ fn tracepoints_to_cigar(
     _b_end: usize, // not used directly
     delta: usize,
 ) -> String {
-    // Determine the A boundaries.
+    // First, compute the number of intervals based solely on A consumption.
+    // (This does not count any trailing B-only operations.)
+    let consumed_intervals = ((a_end - a_start) + delta - 1) / delta;
+    // If we recorded more tracepoints than that, we have a trailing segment.
+    let extra = if tracepoints.len() > consumed_intervals { 1 } else { 0 };
+    let total_intervals = consumed_intervals + extra;
+
+    // Now compute the boundaries.
+    // For the consumed intervals, we use the standard boundaries.
     let mut boundaries = Vec::new();
     boundaries.push(a_start);
     let mut next = if a_start % delta == 0 {
@@ -616,13 +624,17 @@ fn tracepoints_to_cigar(
     } else {
         ((a_start / delta) + 1) * delta
     };
-    while next < a_end {
+    while boundaries.len() < consumed_intervals {
         boundaries.push(next);
         next += delta;
     }
     boundaries.push(a_end);
-
-    // We expect the number of intervals to equal the number of tracepoint pairs.
+    // If there's an extra tracepoint (trailing B-only segment),
+    // add an extra boundary equal to a_end so that the final interval is zero-length in A.
+    if extra == 1 {
+        boundaries.push(a_end);
+    }
+    // Now, boundaries.len() - 1 should equal total_intervals (which equals tracepoints.len()).
     if boundaries.len() - 1 != tracepoints.len() {
         panic!(
             "Mismatch: {} intervals vs {} tracepoint pairs",
@@ -661,17 +673,15 @@ fn main() {
     // Example sequences.
     let a_seq: String = "ATCACTTCTGATTCTTTCACTGCGATATGACGCACAGAGATACGTTCACCATGCATTGCCGCTTTCGAACCAGTAAGTAGCGGATGCCACGCAGGTAAATCTTTACCTTCCGCCAGCAAACGATAAGCGCAGGTCATTGGCAGCCATTCGAATGTTGGCAGATTTTCACGGGTTAATTTAATGCAGTCGGGTTCAAACTCGAAACGACGTTCGTAGTTCCGACATTGCAGGTTTTAATATTGAGCTGGCGACAGGCGACGTTAGTGAAGTAGATTTCGTCGGTGTCTTCATCCATCAGTTTATGCAGGCAACACTGACCGCAACCATCACACAACGACTCCCATTCCGCATCGCTCATTTCGTCCAGGGTTTTACTTTGCCAGAAAGGTACATCGCTCATCAGGTGTTCCGCCATTACGTTAAAACGCACCTTATAACCAGTCTGGCACAGCGATGCAAGTTTTGCCGCCGCTTTCAGGCGGCAAAAAGTATTACAAAAC".to_owned();
     let b_seq: String = "TCTTTCACTGCGATATGACGCACAGAGATACGTTCACCATGCATTGCCGCTTTCGAACCAGTAAGTAGCGGATGCCACGAGGTAAATCTTTACCTTCCGCCAGCAAACGATAAGCGCAGGTCATTGGCAGCCATTCGAATGTTGGCAGATTTTCACGGGTTAATTTAATGCAGTCGGGTTCAAACTCGAAACGACGTTCGTAGTTCCGACATTGACAGGTTTTAATATTGAGCTGGCGACAGGCGACGTTAGTGAAGTAGATTTCGTCGGTGTCTTCATCCATCAGTTTATGCAGGCAACACTGACCGCAACCATCACACAAACGACTCCCATTCCGCATCGCTCATTTCGTCCAGGGTTTTACTTTGCCAGAAAGGTACATCGCTCATCAGGTGTTCCGCCATTACGTTAAAACGCACCTTATAACCAGTCTGGCACAGCGATGCAAGTTTTGCCGCCGCTTTCAGGCGGCAAAAAGTATTACAAAACGCGAGTTGCCA".to_owned();
-    // Example CIGAR using the inverted logic:
-    // Here "I" operations will consume A and "D" operations will consume B.
+
     let cigar = align_segment_dual_gap_affine(&a_seq, &b_seq, 3, 4, 2, 24, 1);
     let cigar = cigar_vec_to_string(&cigar);
-    //let cigar = "12I79=1I135=1D107=1D166=";
 
     let a_start = 0;
     let a_end = a_seq.len();
     let b_start = 0;
     let b_end = b_seq.len();
-    let delta = 100;
+    let delta = 251;
 
     // Convert CIGAR -> tracepoints.
     let tracepoints = cigar_to_tracepoints(&cigar, a_start, a_end, b_start, b_end, delta);
