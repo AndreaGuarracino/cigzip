@@ -1,19 +1,9 @@
 # Alignment-tracepoints
 
-## Table of Contents
- - [Overview](#overview)
- - [Features](#features)
- - [How It Works](#how-it-works)
- - [Performance](#performance)
- - [Quick Start](#quick-start)
- - [Contributing](#contributing)
- - [References](#references)
- - [License](#license)
-
-A Rust implementation of sequence alignment with tracepoints, based on Gene Myers' concept for efficient alignment storage and reconstruction. This implementation provides functionality for converting between CIGAR strings and tracepoint representations of sequence alignments.
+A Rust implementation of efficient sequence alignment storage and reconstruction using tracepoints, providing a significant reduction in storage requirements while maintaining fast alignment reconstruction capabilities.
 
 ## Overview
-This project implements a novel approach to sequence alignment storage and reconstruction using tracepoints. By recording pairs of (difference count, consumed bases) at regular A–sequence intervals, we achieve a dramatic reduction in storage compared to full CIGAR strings—while preserving the ability to quickly reconstruct the alignment when needed.
+This project implements an efficient approach to sequence alignment storage using tracepoints. Instead of storing complete CIGAR strings, A-sequence (query) vs B-sequence (target) alignments are recorded as `(difference count, consumed bases in B-sequence)` pairs at regular intervals along the A-sequence. This approach achieves:
 
 Key benefits:
  - **Space Efficiency:** Significant reduction in alignment storage size.
