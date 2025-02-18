@@ -49,8 +49,8 @@ n = sequence length
 To get started, clone the repository and build the project with Cargo:
 
 ```bash
-git clone <repository-url>
-cd Alignment-tracepoints
+git clone trace_points
+cd trace_points
 cargo build --release
 ```
 
