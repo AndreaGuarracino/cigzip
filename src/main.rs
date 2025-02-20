@@ -3,7 +3,7 @@ use clap::Parser;
 use std::io::{BufRead, BufReader};
 use std::fs::File;
 use rust_htslib::faidx::Reader as FastaReader;
-use libwfa2::affine_wavefront::{AffineWavefronts, AlignmentSpan, AlignmentStatus, AlignmentScope, MemoryMode};
+use libwfa2::affine_wavefront::{AffineWavefronts, AlignmentSpan, AlignmentStatus, AlignmentScope, MemoryMode, HeuristicStrategy};
 
 /// Command-line arguments parsed with Clap.
 #[derive(Parser, Debug)]
@@ -102,7 +102,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             // eprintln!("Line {}: Target: {}:{}-{}", i + 1, target_name, target_start, target_end);
 
             // Convert CIGAR to tracepoints using query (A) and target (B) coordinates.
-            let tracepoints = cigar_to_tracepoints(paf_cigar, query_start, query_end, target_start, target_end, delta);
+            let tracepoints = cigar_to_tracepoints(paf_cigar, query_start, query_end, delta);
+            let tracepoints_variable = cigar_to_tracepoints_variable(paf_cigar, 64);
 
             // Fetch query sequence from FASTA.
             // Note: rust-htslib uses 1-based coordinates in region strings.
@@ -132,19 +133,34 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 gap_open2,
                 gap_ext2,
             );
+            let recon_cigar_variable = tracepoints_to_cigar_variable(
+                &tracepoints_variable,
+                &query_seq,
+                &target_seq,
+                0,
+                0,
+                mismatch,
+                gap_open1,
+                gap_ext1,
+                gap_open2,
+                gap_ext2,
+                32
+            );
 
             //let realn_cigar = align_segment_dual_gap_affine_wfa(&query_seq, &target_seq, mismatch, gap_open1, gap_ext1, gap_open2, gap_ext2);
             //let realn_cigar = cigar_ops_to_cigar_string(&realn_cigar);
 
-            if paf_cigar == recon_cigar {
+            if recon_cigar_variable == recon_cigar {
                 //eprintln!("Line {}: Conversion successful.", i + 1);
             } else {
                 eprintln!("Line {}: Conversion mismatch!", i + 1);
                 //eprintln!("\t           Query seq: {:?}", query_seq);
                 //eprintln!("\t          Target seq: {:?}", target_seq);
-                eprintln!("\t            Tracepoints: {:?}", tracepoints);
-                eprintln!("\t CIGAR from tracepoints: {}", recon_cigar);
-                eprintln!("\t     CIGAR from the PAF: {}", paf_cigar);
+                eprintln!("\t                     Tracepoints: {:?}", tracepoints);
+                eprintln!("\t            Tracepoints_variable: {:?}", tracepoints_variable);
+                eprintln!("\t          CIGAR from tracepoints: {}", recon_cigar);
+                eprintln!("\t CIGAR from tracepoints_variable: {}", recon_cigar_variable);
+                eprintln!("\t              CIGAR from the PAF: {}", paf_cigar);
                 //eprintln!("\t CIGAR from realignment: {}", realn_cigar);
             }
         }
@@ -153,25 +169,40 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         eprintln!("No PAF and FASTA provided, running default example.");
 
         let a_seq: String = "GAACAGAGAAATGGTGGAATTCAAATACAAAAAAACCGCAAAATTAAAAATCTTGCGGCTCTCTGAACTCATTTTCATGAGTGAATTTGGCGGAACGGACGGGACTCGAACCCGCGACCCCCTGCGTGACAGGCAGGTATTCTAACCGACTGAACTACCGCTCCGCCGTTGTGTTCCGTTGGGAACGGGCGAATATTACGGATTTGCCTCACCCTTCGTCAACGGTTTTTCTCATCTTTTGAATCGTTTGCTGCAAAAATCGCCCAAGCCGCTATTTTTAGCGCCTTTTACAGGTATTTATGCCCGCCAGAGGCAGCTTCCGCCCTTCTTCTCCACCAGATCAAGACGGGCTTCCTGAGCTGCAAGCTCTTCATCTGTCGCAAAAACAACGCGTAACTTACTTGCCTGACGTACAATGCGCTGAATTGTTGCTTCACCTTGTTGCTGCTGTGTCTCTCCTTCCATCGCAAAAGCCATCGACGTTTGACCACCGGTCATCG".to_owned();
-        let b_seq: String = "ACCGAATAAATCTTTGTCTGTCAGTTGCTGGGGAGTGTTTTTATTAATATTACTTTGTGTGACTTGAGCTTTTTTTTCTTCTTTTCATCAATAGAAGATTCAGAGGCACATCCTGCAAGCAGCGAGAATAACACACATATGCAACAAAGCTTTTTTGAATTCATAATTGGACACTCCCTCGCCTGTCATAATGATTAGAATATTTAGCATTGATAACGGACTCTAATTATATACCCCACTTAAATAATAACAAACAAAATCAATTTGAAATATACATTCATTTAATCAATATAAATTTTATTCTCTGGAAATATATTTAAGCTGAATGGTTCGATATCATTATTGAATTTTAATGAATGAGACAACAAGCGAGAATCACGCACTTACGCCAGAATAAAACATTGAACAGAGAAATGGTGGAATTCAAATACAAAAAAACCGCAAAATTAAAAATCTTGCGGGCTCTCTGAACTCATTTTCATGAGTGAATTTGGCGGAAC".to_owned();
+        let b_seq: String = "GAACAGAGAAATGGTGGAATTCAAATACAAAAAAACCGCAAAATTAAGCTCCGCCGTTGTGTTCCGTTGGGAACGGGCGAATATTACGGATTTGCCTCACCCTTCGTCAACGGTTTTTCTCATCTTTTGAATCGTTTGCTGCAAAAATCGCCCAAGCCGCTATTTTTAGCGCCTTTTACAGGTATTTATGCCCGCCAGAGGCAGCTTCCGCCCTTCTTCTCCACCAGATCAAGACGGGCTTCCTGAGCTGCAAGCTCTTCATCTGTCGCAAAAACAACGCGTAACTTACTTGCCTGACGTACAATGCGCTGAATTGTTGCTTCACCTTGTTGCTGCTGTGTCTCTCCTTCCATCGCAAAAGCCATCGACGTTTGACCACCGGTCATCG".to_owned();
 
         let a_start = 0;
         let a_end = a_seq.len();
         let b_start = 0;
         let b_end = b_seq.len();
 
-        let cigar = align_segment_dual_gap_affine_wfa(&a_seq[a_start..a_end], &b_seq[b_start..b_end],
+        let paf_cigar = align_segment_dual_gap_affine_wfa(&a_seq[a_start..a_end], &b_seq[b_start..b_end],
             mismatch, gap_open1, gap_ext1, gap_open2, gap_ext2);
-        let cigar = cigar_ops_to_cigar_string(&cigar);
+        let paf_cigar = cigar_ops_to_cigar_string(&paf_cigar);
 
-        let tracepoints = cigar_to_tracepoints(&cigar, a_start, a_end, b_start, b_end, delta);
+        let tracepoints = cigar_to_tracepoints(&paf_cigar, a_start, a_end, delta);
         eprintln!("Tracepoints (d, b) = {:?}", tracepoints);
+
+        let tracepoints_variable = cigar_to_tracepoints_variable(&paf_cigar, 64);
 
         let recon_cigar = tracepoints_to_cigar(&tracepoints, &a_seq, &b_seq,
             a_start, a_end, b_start, b_end, delta, mismatch, gap_open1, gap_ext1, gap_open2, gap_ext2);
-        eprintln!("     Original CIGAR: {}", cigar);
+        let recon_cigar_variable = tracepoints_to_cigar_variable(
+            &tracepoints_variable,
+            &a_seq,
+            &b_seq,
+            0,
+            0,
+            mismatch,
+            gap_open1,
+            gap_ext1,
+            gap_open2,
+            gap_ext2,
+            32
+        );
+        eprintln!("     Original CIGAR: {}", paf_cigar);
         eprintln!("Reconstructed CIGAR: {}", recon_cigar);
-        assert!(cigar == recon_cigar);
+        assert!(paf_cigar == recon_cigar);
     }
 
     Ok(())
@@ -205,8 +236,6 @@ fn cigar_to_tracepoints(
     cigar: &str,
     a_start: usize,
     a_end: usize,
-    _b_start: usize,
-    _b_end: usize,
     delta: usize,
 ) -> Vec<(usize, usize)> {
     let ops = cigar_str_to_cigar_ops(cigar);
@@ -270,6 +299,88 @@ fn cigar_to_tracepoints(
     tracepoints
 }
 
+/// A tracepoint record for the variable-delta strategy.
+/// Each tracepoint holds the number of bases from sequence A,
+/// the number of bases from sequence B, and the total number of differences
+/// observed in that segment.
+#[derive(Debug, Clone)]
+pub struct VariableTracepoint {
+    pub a_len: usize,
+    pub b_len: usize,
+    pub diff: usize,
+}
+
+/// Convert a CIGAR string into variable–delta tracepoints.
+/// Instead of using fixed A–intervals, we accumulate the numbers of bases (and differences)
+/// until we reach the given diff_threshold. (If an edit operation spans the threshold,
+/// it is split.)
+///
+/// Returns a vector of VariableTracepoint records (a_len, b_len, diff).
+fn cigar_to_tracepoints_variable(
+    cigar: &str,
+    diff_threshold: usize,
+) -> Vec<(usize, usize, usize)> {
+    let ops = cigar_str_to_cigar_ops(cigar);
+
+    let mut tracepoints = Vec::new();
+    // current counters for this segment
+    let mut cur_a_len = 0;
+    let mut cur_b_len = 0;
+    let mut cur_diff = 0;
+
+    // For each operation, process it in chunks if needed.
+    for (mut len, op) in ops {
+        while len > 0 {
+            // For edit operations (X, I, D) we limit the step so that we do not
+            // exceed the diff_threshold.
+            let step = if is_edit(op) {
+                let remaining = diff_threshold.saturating_sub(cur_diff);
+                // If we have already reached the threshold, record the current tracepoint
+                // and reset counters (do not consume any part of the current op yet).
+                if remaining == 0 {
+                    tracepoints.push((cur_a_len, cur_b_len, cur_diff));
+                    cur_a_len = 0;
+                    cur_b_len = 0;
+                    cur_diff = 0;
+                    continue;
+                } else {
+                    min(len, remaining)
+                }
+            } else {
+                // For non-edit ops (e.g. deletions that do not consume A, or other ops),
+                // we can take the whole op.
+                len
+            };
+
+            // Update counters
+            if consumes_a(op) {
+                cur_a_len += step;
+            }
+            if consumes_b(op) {
+                cur_b_len += step;
+            }
+            if is_edit(op) {
+                cur_diff += step;
+            }
+            len -= step;
+
+            // If we have now reached (or exceeded) the diff threshold, record a tracepoint.
+            if cur_diff >= diff_threshold {
+                tracepoints.push((cur_a_len, cur_b_len, cur_diff));
+                // Reset the per-segment counters.
+                cur_a_len = 0;
+                cur_b_len = 0;
+                cur_diff = 0;
+            }
+        }
+    }
+    // Always record any remaining bases (even if below the threshold)
+    if cur_a_len > 0 || cur_b_len > 0 || cur_diff > 0 {
+        tracepoints.push((cur_a_len, cur_b_len, cur_diff));
+    }
+    tracepoints
+}
+
 /// Given tracepoints (the per-segment (d,b) pairs), re‐construct the full CIGAR string.
 /// To “fill in” the alignment for each segment we use a global alignment with affine gap penalties
 /// on the corresponding sub–sequences. The A boundaries are determined by a_start, a_end and delta;
@@ -328,7 +439,7 @@ fn tracepoints_to_cigar(
 
     let mut cigar_ops = Vec::new();
     let mut current_b = b_start;
-    for (i, &(_d, b_len)) in tracepoints.iter().enumerate() {
+    for (i, &(d, b_len)) in tracepoints.iter().enumerate() {
         let a_left = boundaries[i];
         let a_right = boundaries[i + 1];
 
@@ -358,6 +469,70 @@ fn tracepoints_to_cigar(
     }
 
     // Merge adjacent operations if needed.
+    let merged = merge_cigar_ops(cigar_ops);
+    cigar_ops_to_cigar_string(&merged)
+}
+
+/// Reconstruct a CIGAR string from variable-delta tracepoints.
+/// For each tracepoint (which represents a segment from the original alignment),
+/// we extract the corresponding sub–sequences from A and B. Then, depending on the
+/// diff count in that segment, we choose to align it either with the default (full)
+/// WFA alignment or with a faster heuristic version.
+///
+/// The parameter `heuristic_diff_threshold` lets you decide the cutoff (e.g. segments
+/// with fewer differences can be aligned using a heuristic).
+fn tracepoints_to_cigar_variable(
+    tracepoints: &[(usize, usize, usize)],
+    a_seq: &str,
+    b_seq: &str,
+    a_start: usize,
+    b_start: usize,
+    mismatch: i32,
+    gap_open_i: i32,
+    gap_extend_i: i32,
+    gap_open_d: i32,
+    gap_extend_d: i32,
+    heuristic_diff_threshold: usize,
+) -> String {
+    let mut cigar_ops = Vec::new();
+    let mut current_a = a_start;
+    let mut current_b = b_start;
+
+    for (a_len, b_len, diff) in tracepoints {
+        let a_end = current_a + a_len;
+        let b_end = current_b + b_len;
+
+        let a_sub = &a_seq[current_a..a_end];
+        let b_sub = &b_seq[current_b..b_end];
+
+        // If the number of differences in this segment is below the threshold,
+        // use a heuristic alignment (for faster computation); otherwise use the
+        // standard (full) WFA alignment.
+        let seg_ops = if *diff < heuristic_diff_threshold {
+            align_segment_with_heuristic(
+                a_sub,
+                b_sub,
+                mismatch,
+                gap_open_i,
+                gap_extend_i,
+                gap_open_d,
+                gap_extend_d,
+            )
+        } else {
+            align_segment_dual_gap_affine_wfa(
+                a_sub,
+                b_sub,
+                mismatch,
+                gap_open_i,
+                gap_extend_i,
+                gap_open_d,
+                gap_extend_d,
+            )
+        };
+        cigar_ops.extend(seg_ops);
+        current_a = a_end;
+        current_b = b_end;
+    }
     let merged = merge_cigar_ops(cigar_ops);
     cigar_ops_to_cigar_string(&merged)
 }
@@ -429,466 +604,6 @@ fn cigar_ops_to_cigar_string(ops: &[(usize, char)]) -> String {
         .join("")
 }
 
-/// A simple Needleman–Wunsch alignment that returns a CIGAR string in extended format.
-/// Here we use unit cost for a mismatch and gap. With inverted gap logic:
-/// - Insertion ('I') now consumes an A–base (vertical move).
-/// - Deletion ('D') now consumes a B–base (horizontal move).
-fn align_segment(a: &str, b: &str) -> Vec<(usize, char)> {
-    let a_bytes = a.as_bytes();
-    let b_bytes = b.as_bytes();
-    let n = a_bytes.len();
-    let m = b_bytes.len();
-
-    // Create DP table.
-    let mut dp = vec![vec![0; m + 1]; n + 1];
-    for i in 0..=n {
-        dp[i][0] = i;
-    }
-    for j in 0..=m {
-        dp[0][j] = j;
-    }
-    for i in 1..=n {
-        for j in 1..=m {
-            let cost = if a_bytes[i - 1] == b_bytes[j - 1] { 0 } else { 1 };
-            dp[i][j] = min(
-                min(dp[i - 1][j - 1] + cost, dp[i - 1][j] + 1),
-                dp[i][j - 1] + 1,
-            );
-        }
-    }
-
-    // Traceback to recover operations.
-    let mut i = n;
-    let mut j = m;
-    let mut ops_rev = Vec::new();
-    while i > 0 || j > 0 {
-        if i > 0 && j > 0 {
-            let cost = if a_bytes[i - 1] == b_bytes[j - 1] { 0 } else { 1 };
-            if dp[i][j] == dp[i - 1][j - 1] + cost {
-                // Use '=' for a match and 'X' for a mismatch.
-                ops_rev.push(if cost == 0 { '=' } else { 'X' });
-                i -= 1;
-                j -= 1;
-                continue;
-            }
-        }
-        // Inverted gap logic:
-        // Vertical move (i-1, j) is now an insertion (consuming A).
-        if i > 0 && dp[i][j] == dp[i - 1][j] + 1 {
-            ops_rev.push('I');
-            i -= 1;
-        }
-        // Horizontal move (i, j-1) is now a deletion (consuming B).
-        else if j > 0 && dp[i][j] == dp[i][j - 1] + 1 {
-            ops_rev.push('D');
-            j -= 1;
-        }
-    }
-    ops_rev.reverse();
-
-    // Compress consecutive identical operations into (length, op) pairs.
-    let mut cigar = Vec::new();
-    if !ops_rev.is_empty() {
-        let mut count = 1;
-        let mut last = ops_rev[0];
-        for &op in ops_rev.iter().skip(1) {
-            if op == last {
-                count += 1;
-            } else {
-                cigar.push((count, last));
-                last = op;
-                count = 1;
-            }
-        }
-        cigar.push((count, last));
-    }
-    cigar
-}
-
-/// align_segment_gap_affine performs global alignment using affine gap penalties.
-/// It returns a vector of (length, op) pairs representing the CIGAR string.
-///  
-/// The scoring is:
-///   - Match: 0
-///   - Mismatch: mismatch
-///   - Gap open: gap_open
-///   - Gap extend: gap_extend
-///
-/// With the inverted logic:
-/// - Ix (gap in B) now produces an 'I' (insertion; consumes A).
-/// - Iy (gap in A) now produces a 'D' (deletion; consumes B).
-fn align_segment_gap_affine(
-    a: &str,
-    b: &str,
-    mismatch: i32,
-    gap_open: i32,
-    gap_extend: i32,
-) -> Vec<(usize, char)> {
-    let a_bytes = a.as_bytes();
-    let b_bytes = b.as_bytes();
-    let n = a_bytes.len();
-    let m = b_bytes.len();
-    let inf = i32::MAX / 2;
-
-    // Three matrices: M (match/mismatch), Ix (gap in B), Iy (gap in A)
-    let mut dp_m = vec![vec![inf; m + 1]; n + 1];
-    let mut dp_ix = vec![vec![inf; m + 1]; n + 1];
-    let mut dp_iy = vec![vec![inf; m + 1]; n + 1];
-
-    #[derive(Clone, Copy, Debug)]
-    enum State {
-        M,
-        Ix,
-        Iy,
-    }
-    let mut ptr_m = vec![vec![None; m + 1]; n + 1];
-    let mut ptr_ix = vec![vec![None; m + 1]; n + 1];
-    let mut ptr_iy = vec![vec![None; m + 1]; n + 1];
-
-    // Initialization.
-    dp_m[0][0] = 0;
-    dp_ix[0][0] = inf;
-    dp_iy[0][0] = inf;
-    ptr_m[0][0] = None;
-
-    for i in 0..=n {
-        dp_m[i][0] = i as i32;
-    }
-    for j in 0..=m {
-        dp_m[0][j] = j as i32;
-    }
-    for i in 1..=n {
-        if i == 1 {
-            dp_ix[i][0] = gap_open;
-            ptr_ix[i][0] = Some(State::M);
-        } else {
-            dp_ix[i][0] = dp_ix[i - 1][0] + gap_extend;
-            ptr_ix[i][0] = Some(State::Ix);
-        }
-        dp_m[i][0] = dp_ix[i][0];
-        ptr_m[i][0] = Some(State::Ix);
-        dp_iy[i][0] = inf;
-    }
-    for j in 1..=m {
-        if j == 1 {
-            dp_iy[0][j] = gap_open;
-            ptr_iy[0][j] = Some(State::M);
-        } else {
-            dp_iy[0][j] = dp_iy[0][j - 1] + gap_extend;
-            ptr_iy[0][j] = Some(State::Iy);
-        }
-        dp_m[0][j] = dp_iy[0][j];
-        ptr_m[0][j] = Some(State::Iy);
-        dp_ix[0][j] = inf;
-    }
-
-    // Fill in the DP matrices.
-    for i in 1..=n {
-        for j in 1..=m {
-            let sub_cost = if a_bytes[i - 1] == b_bytes[j - 1] { 0 } else { mismatch };
-
-            // M: coming diagonally from M, Ix, or Iy.
-            let cand_m = dp_m[i - 1][j - 1] + sub_cost;
-            let cand_ix = dp_ix[i - 1][j - 1] + sub_cost;
-            let cand_iy = dp_iy[i - 1][j - 1] + sub_cost;
-            if cand_m <= cand_ix && cand_m <= cand_iy {
-                dp_m[i][j] = cand_m;
-                ptr_m[i][j] = Some(State::M);
-            } else if cand_ix <= cand_iy {
-                dp_m[i][j] = cand_ix;
-                ptr_m[i][j] = Some(State::Ix);
-            } else {
-                dp_m[i][j] = cand_iy;
-                ptr_m[i][j] = Some(State::Iy);
-            }
-
-            // Ix: gap in B (vertical move, now yielding an 'I').
-            let cand_from_m = dp_m[i - 1][j] + gap_open + gap_extend;
-            let cand_from_ix = dp_ix[i - 1][j] + gap_extend;
-            if cand_from_m <= cand_from_ix {
-                dp_ix[i][j] = cand_from_m;
-                ptr_ix[i][j] = Some(State::M);
-            } else {
-                dp_ix[i][j] = cand_from_ix;
-                ptr_ix[i][j] = Some(State::Ix);
-            }
-
-            // Iy: gap in A (horizontal move, now yielding a 'D').
-            let cand_from_m = dp_m[i][j - 1] + gap_open + gap_extend;
-            let cand_from_iy = dp_iy[i][j - 1] + gap_extend;
-            if cand_from_m <= cand_from_iy {
-                dp_iy[i][j] = cand_from_m;
-                ptr_iy[i][j] = Some(State::M);
-            } else {
-                dp_iy[i][j] = cand_from_iy;
-                ptr_iy[i][j] = Some(State::Iy);
-            }
-        }
-    }
-
-    // Traceback: choose the best ending state.
-    let mut i = n;
-    let mut j = m;
-    let (mut current_state, _final_score) = if dp_m[n][m] <= dp_ix[n][m] && dp_m[n][m] <= dp_iy[n][m] {
-        (State::M, dp_m[n][m])
-    } else if dp_ix[n][m] <= dp_iy[n][m] {
-        (State::Ix, dp_ix[n][m])
-    } else {
-        (State::Iy, dp_iy[n][m])
-    };
-
-    let mut ops_rev = Vec::new();
-    while i > 0 || j > 0 {
-        if i == 0 {
-            // Only deletion possible.
-            ops_rev.push('D');
-            j -= 1;
-            continue;
-        } else if j == 0 {
-            // Only insertion possible.
-            ops_rev.push('I');
-            i -= 1;
-            continue;
-        }
-        match current_state {
-            State::M => {
-                let prev = ptr_m[i][j].unwrap();
-                let op = if a_bytes[i - 1] == b_bytes[j - 1] { '=' } else { 'X' };
-                ops_rev.push(op);
-                i -= 1;
-                j -= 1;
-                current_state = prev;
-            }
-            State::Ix => {
-                let prev = ptr_ix[i][j].unwrap();
-                ops_rev.push('I'); // now 'I' (vertical move, consuming A)
-                i -= 1;
-                current_state = prev;
-            }
-            State::Iy => {
-                let prev = ptr_iy[i][j].unwrap();
-                ops_rev.push('D'); // now 'D' (horizontal move, consuming B)
-                j -= 1;
-                current_state = prev;
-            }
-        }
-    }
-    ops_rev.reverse();
-
-    // Compress consecutive operations.
-    let mut cigar = Vec::new();
-    if !ops_rev.is_empty() {
-        let mut count = 1;
-        let mut last = ops_rev[0];
-        for &op in ops_rev.iter().skip(1) {
-            if op == last {
-                count += 1;
-            } else {
-                cigar.push((count, last));
-                last = op;
-                count = 1;
-            }
-        }
-        cigar.push((count, last));
-    }
-    cigar
-}
-
-/// Enum for traceback state.
-#[derive(Clone, Copy, Debug)]
-enum State {
-    M,  // Match/mismatch
-    Ix, // Insertion (gap in B; vertical move, consumes A)
-    Iy, // Deletion (gap in A; horizontal move, consumes B)
-}
-
-/// align_segment_dual_gap_affine performs global alignment with affine gap penalties,
-/// where the gap penalties for insertions (Ix) and deletions (Iy) are specified separately.
-/// 
-/// Parameters:
-/// - `a`: first sequence
-/// - `b`: second sequence
-/// - `mismatch`: cost for a mismatch (substitution)
-/// - `gap_open_i`: gap opening penalty for an insertion (vertical gap, consuming A)
-/// - `gap_extend_i`: gap extension penalty for an insertion
-/// - `gap_open_d`: gap opening penalty for a deletion (horizontal gap, consuming B)
-/// - `gap_extend_d`: gap extension penalty for a deletion
-///
-/// Returns a vector of (length, op) pairs (e.g. [(10, '='), (2, 'X'), (5, 'I'), …])
-/// representing the CIGAR string for the alignment. In our inverted logic, an 'I'
-/// denotes an insertion (consuming A) and a 'D' denotes a deletion (consuming B).
-fn align_segment_dual_gap_affine(
-    a: &str,
-    b: &str,
-    mismatch: i32,
-    gap_open_i: i32,
-    gap_extend_i: i32,
-    gap_open_d: i32,
-    gap_extend_d: i32,
-) -> Vec<(usize, char)> {
-    let a_bytes = a.as_bytes();
-    let b_bytes = b.as_bytes();
-    let n = a_bytes.len();
-    let m = b_bytes.len();
-    let inf = i32::MAX / 2;
-
-    // Create DP matrices for three states: M (match/mismatch), Ix (insertion), Iy (deletion)
-    let mut dp_m = vec![vec![inf; m + 1]; n + 1];
-    let mut dp_ix = vec![vec![inf; m + 1]; n + 1];
-    let mut dp_iy = vec![vec![inf; m + 1]; n + 1];
-
-    // Pointer matrices to record traceback decisions.
-    let mut ptr_m = vec![vec![None; m + 1]; n + 1];
-    let mut ptr_ix = vec![vec![None; m + 1]; n + 1];
-    let mut ptr_iy = vec![vec![None; m + 1]; n + 1];
-
-    // Initialization.
-    dp_m[0][0] = 0;
-    dp_ix[0][0] = inf;
-    dp_iy[0][0] = inf;
-    ptr_m[0][0] = None;
-
-    // Initialize first column: only vertical moves (insertions, i.e. gap in B)
-    for i in 1..=n {
-        if i == 1 {
-            dp_ix[i][0] = gap_open_i + gap_extend_i;
-            ptr_ix[i][0] = Some(State::M);
-        } else {
-            dp_ix[i][0] = dp_ix[i - 1][0] + gap_extend_i;
-            ptr_ix[i][0] = Some(State::Ix);
-        }
-        dp_m[i][0] = dp_ix[i][0];
-        ptr_m[i][0] = Some(State::Ix);
-        dp_iy[i][0] = inf;
-    }
-
-    // Initialize first row: only horizontal moves (deletions, i.e. gap in A)
-    for j in 1..=m {
-        if j == 1 {
-            dp_iy[0][j] = gap_open_d + gap_extend_d;
-            ptr_iy[0][j] = Some(State::M);
-        } else {
-            dp_iy[0][j] = dp_iy[0][j - 1] + gap_extend_d;
-            ptr_iy[0][j] = Some(State::Iy);
-        }
-        dp_m[0][j] = dp_iy[0][j];
-        ptr_m[0][j] = Some(State::Iy);
-        dp_ix[0][j] = inf;
-    }
-
-    // Fill in the DP matrices.
-    for i in 1..=n {
-        for j in 1..=m {
-            let sub_cost = if a_bytes[i - 1] == b_bytes[j - 1] { 0 } else { mismatch };
-
-            // Compute M: coming diagonally from any state.
-            let cand_m = dp_m[i - 1][j - 1] + sub_cost;
-            let cand_ix = dp_ix[i - 1][j - 1] + sub_cost;
-            let cand_iy = dp_iy[i - 1][j - 1] + sub_cost;
-            if cand_m <= cand_ix && cand_m <= cand_iy {
-                dp_m[i][j] = cand_m;
-                ptr_m[i][j] = Some(State::M);
-            } else if cand_ix <= cand_iy {
-                dp_m[i][j] = cand_ix;
-                ptr_m[i][j] = Some(State::Ix);
-            } else {
-                dp_m[i][j] = cand_iy;
-                ptr_m[i][j] = Some(State::Iy);
-            }
-
-            // Compute Ix: vertical gap (insertion, consuming A).
-            let cand_from_m = dp_m[i - 1][j] + gap_open_i + gap_extend_i;
-            let cand_from_ix = dp_ix[i - 1][j] + gap_extend_i;
-            if cand_from_m <= cand_from_ix {
-                dp_ix[i][j] = cand_from_m;
-                ptr_ix[i][j] = Some(State::M);
-            } else {
-                dp_ix[i][j] = cand_from_ix;
-                ptr_ix[i][j] = Some(State::Ix);
-            }
-
-            // Compute Iy: horizontal gap (deletion, consuming B).
-            let cand_from_m = dp_m[i][j - 1] + gap_open_d + gap_extend_d;
-            let cand_from_iy = dp_iy[i][j - 1] + gap_extend_d;
-            if cand_from_m <= cand_from_iy {
-                dp_iy[i][j] = cand_from_m;
-                ptr_iy[i][j] = Some(State::M);
-            } else {
-                dp_iy[i][j] = cand_from_iy;
-                ptr_iy[i][j] = Some(State::Iy);
-            }
-        }
-    }
-
-    // Traceback: choose the best ending state.
-    let mut i = n;
-    let mut j = m;
-    let (mut current_state, _final_score) = if dp_m[n][m] <= dp_ix[n][m] && dp_m[n][m] <= dp_iy[n][m] {
-        (State::M, dp_m[n][m])
-    } else if dp_ix[n][m] <= dp_iy[n][m] {
-        (State::Ix, dp_ix[n][m])
-    } else {
-        (State::Iy, dp_iy[n][m])
-    };
-
-    let mut ops_rev = Vec::new();
-    while i > 0 || j > 0 {
-        if i == 0 {
-            // Must be a deletion.
-            ops_rev.push('D');
-            j -= 1;
-            continue;
-        } else if j == 0 {
-            // Must be an insertion.
-            ops_rev.push('I');
-            i -= 1;
-            continue;
-        }
-        match current_state {
-            State::M => {
-                let prev = ptr_m[i][j].unwrap();
-                // Diagonal move: match if bases are equal, else mismatch.
-                let op = if a_bytes[i - 1] == b_bytes[j - 1] { '=' } else { 'X' };
-                ops_rev.push(op);
-                i -= 1;
-                j -= 1;
-                current_state = prev;
-            }
-            State::Ix => {
-                let prev = ptr_ix[i][j].unwrap();
-                ops_rev.push('I'); // Insertion (vertical move, consuming A)
-                i -= 1;
-                current_state = prev;
-            }
-            State::Iy => {
-                let prev = ptr_iy[i][j].unwrap();
-                ops_rev.push('D'); // Deletion (horizontal move, consuming B)
-                j -= 1;
-                current_state = prev;
-            }
-        }
-    }
-    ops_rev.reverse();
-
-    // Compress consecutive operations.
-    let mut cigar = Vec::new();
-    if !ops_rev.is_empty() {
-        let mut count = 1;
-        let mut last = ops_rev[0];
-        for &op in ops_rev.iter().skip(1) {
-            if op == last {
-                count += 1;
-            } else {
-                cigar.push((count, last));
-                last = op;
-                count = 1;
-            }
-        }
-        cigar.push((count, last));
-    }
-    cigar
-}
-
 fn align_segment_dual_gap_affine_wfa(
     a: &str, 
     b: &str,
@@ -935,3 +650,498 @@ fn align_segment_dual_gap_affine_wfa(
         }
     }
 }
+
+/// A helper that performs alignment on a segment using heuristic settings.
+/// Here we create a new aligner, set its heuristic (here using WFAdaptive with example parameters),
+/// and then perform the alignment.
+fn align_segment_with_heuristic(
+    a: &str,
+    b: &str,
+    mismatch: i32,
+    gap_open_i: i32,
+    gap_extend_i: i32,
+    gap_open_d: i32,
+    gap_extend_d: i32,
+) -> Vec<(usize, char)> {
+    let mut aligner = AffineWavefronts::default();
+    aligner.set_alignment_scope(AlignmentScope::Alignment);
+    aligner.set_alignment_span(AlignmentSpan::End2End);
+    aligner.set_memory_mode(MemoryMode::High);
+    // Set a heuristic strategy – here we choose WFAdaptive with example parameters.
+    aligner.set_heuristic(&HeuristicStrategy::WFAdaptive {
+        min_wavefront_length: 10,
+        max_distance_threshold: 100,
+        score_steps: 50,
+    });
+    aligner.set_penalties(0, mismatch, gap_open_i, gap_extend_i);
+    let status = aligner.align(b.as_bytes(), a.as_bytes());
+    match status {
+        AlignmentStatus::Completed => {
+            cigar_u8_to_cigar_ops(aligner.cigar())
+        },
+        s => {
+            eprintln!("Heuristic alignment failed with status: {:?}", s);
+            Vec::new()
+        }
+    }
+}
+
+// /// A simple Needleman–Wunsch alignment that returns a CIGAR string in extended format.
+// /// Here we use unit cost for a mismatch and gap. With inverted gap logic:
+// /// - Insertion ('I') now consumes an A–base (vertical move).
+// /// - Deletion ('D') now consumes a B–base (horizontal move).
+// fn align_segment(a: &str, b: &str) -> Vec<(usize, char)> {
+//     let a_bytes = a.as_bytes();
+//     let b_bytes = b.as_bytes();
+//     let n = a_bytes.len();
+//     let m = b_bytes.len();
+
+//     // Create DP table.
+//     let mut dp = vec![vec![0; m + 1]; n + 1];
+//     for i in 0..=n {
+//         dp[i][0] = i;
+//     }
+//     for j in 0..=m {
+//         dp[0][j] = j;
+//     }
+//     for i in 1..=n {
+//         for j in 1..=m {
+//             let cost = if a_bytes[i - 1] == b_bytes[j - 1] { 0 } else { 1 };
+//             dp[i][j] = min(
+//                 min(dp[i - 1][j - 1] + cost, dp[i - 1][j] + 1),
+//                 dp[i][j - 1] + 1,
+//             );
+//         }
+//     }
+
+//     // Traceback to recover operations.
+//     let mut i = n;
+//     let mut j = m;
+//     let mut ops_rev = Vec::new();
+//     while i > 0 || j > 0 {
+//         if i > 0 && j > 0 {
+//             let cost = if a_bytes[i - 1] == b_bytes[j - 1] { 0 } else { 1 };
+//             if dp[i][j] == dp[i - 1][j - 1] + cost {
+//                 // Use '=' for a match and 'X' for a mismatch.
+//                 ops_rev.push(if cost == 0 { '=' } else { 'X' });
+//                 i -= 1;
+//                 j -= 1;
+//                 continue;
+//             }
+//         }
+//         // Inverted gap logic:
+//         // Vertical move (i-1, j) is now an insertion (consuming A).
+//         if i > 0 && dp[i][j] == dp[i - 1][j] + 1 {
+//             ops_rev.push('I');
+//             i -= 1;
+//         }
+//         // Horizontal move (i, j-1) is now a deletion (consuming B).
+//         else if j > 0 && dp[i][j] == dp[i][j - 1] + 1 {
+//             ops_rev.push('D');
+//             j -= 1;
+//         }
+//     }
+//     ops_rev.reverse();
+
+//     // Compress consecutive identical operations into (length, op) pairs.
+//     let mut cigar = Vec::new();
+//     if !ops_rev.is_empty() {
+//         let mut count = 1;
+//         let mut last = ops_rev[0];
+//         for &op in ops_rev.iter().skip(1) {
+//             if op == last {
+//                 count += 1;
+//             } else {
+//                 cigar.push((count, last));
+//                 last = op;
+//                 count = 1;
+//             }
+//         }
+//         cigar.push((count, last));
+//     }
+//     cigar
+// }
+
+// /// align_segment_gap_affine performs global alignment using affine gap penalties.
+// /// It returns a vector of (length, op) pairs representing the CIGAR string.
+// ///  
+// /// The scoring is:
+// ///   - Match: 0
+// ///   - Mismatch: mismatch
+// ///   - Gap open: gap_open
+// ///   - Gap extend: gap_extend
+// ///
+// /// With the inverted logic:
+// /// - Ix (gap in B) now produces an 'I' (insertion; consumes A).
+// /// - Iy (gap in A) now produces a 'D' (deletion; consumes B).
+// fn align_segment_gap_affine(
+//     a: &str,
+//     b: &str,
+//     mismatch: i32,
+//     gap_open: i32,
+//     gap_extend: i32,
+// ) -> Vec<(usize, char)> {
+//     let a_bytes = a.as_bytes();
+//     let b_bytes = b.as_bytes();
+//     let n = a_bytes.len();
+//     let m = b_bytes.len();
+//     let inf = i32::MAX / 2;
+
+//     // Three matrices: M (match/mismatch), Ix (gap in B), Iy (gap in A)
+//     let mut dp_m = vec![vec![inf; m + 1]; n + 1];
+//     let mut dp_ix = vec![vec![inf; m + 1]; n + 1];
+//     let mut dp_iy = vec![vec![inf; m + 1]; n + 1];
+
+//     #[derive(Clone, Copy, Debug)]
+//     enum State {
+//         M,
+//         Ix,
+//         Iy,
+//     }
+//     let mut ptr_m = vec![vec![None; m + 1]; n + 1];
+//     let mut ptr_ix = vec![vec![None; m + 1]; n + 1];
+//     let mut ptr_iy = vec![vec![None; m + 1]; n + 1];
+
+//     // Initialization.
+//     dp_m[0][0] = 0;
+//     dp_ix[0][0] = inf;
+//     dp_iy[0][0] = inf;
+//     ptr_m[0][0] = None;
+
+//     for i in 0..=n {
+//         dp_m[i][0] = i as i32;
+//     }
+//     for j in 0..=m {
+//         dp_m[0][j] = j as i32;
+//     }
+//     for i in 1..=n {
+//         if i == 1 {
+//             dp_ix[i][0] = gap_open;
+//             ptr_ix[i][0] = Some(State::M);
+//         } else {
+//             dp_ix[i][0] = dp_ix[i - 1][0] + gap_extend;
+//             ptr_ix[i][0] = Some(State::Ix);
+//         }
+//         dp_m[i][0] = dp_ix[i][0];
+//         ptr_m[i][0] = Some(State::Ix);
+//         dp_iy[i][0] = inf;
+//     }
+//     for j in 1..=m {
+//         if j == 1 {
+//             dp_iy[0][j] = gap_open;
+//             ptr_iy[0][j] = Some(State::M);
+//         } else {
+//             dp_iy[0][j] = dp_iy[0][j - 1] + gap_extend;
+//             ptr_iy[0][j] = Some(State::Iy);
+//         }
+//         dp_m[0][j] = dp_iy[0][j];
+//         ptr_m[0][j] = Some(State::Iy);
+//         dp_ix[0][j] = inf;
+//     }
+
+//     // Fill in the DP matrices.
+//     for i in 1..=n {
+//         for j in 1..=m {
+//             let sub_cost = if a_bytes[i - 1] == b_bytes[j - 1] { 0 } else { mismatch };
+
+//             // M: coming diagonally from M, Ix, or Iy.
+//             let cand_m = dp_m[i - 1][j - 1] + sub_cost;
+//             let cand_ix = dp_ix[i - 1][j - 1] + sub_cost;
+//             let cand_iy = dp_iy[i - 1][j - 1] + sub_cost;
+//             if cand_m <= cand_ix && cand_m <= cand_iy {
+//                 dp_m[i][j] = cand_m;
+//                 ptr_m[i][j] = Some(State::M);
+//             } else if cand_ix <= cand_iy {
+//                 dp_m[i][j] = cand_ix;
+//                 ptr_m[i][j] = Some(State::Ix);
+//             } else {
+//                 dp_m[i][j] = cand_iy;
+//                 ptr_m[i][j] = Some(State::Iy);
+//             }
+
+//             // Ix: gap in B (vertical move, now yielding an 'I').
+//             let cand_from_m = dp_m[i - 1][j] + gap_open + gap_extend;
+//             let cand_from_ix = dp_ix[i - 1][j] + gap_extend;
+//             if cand_from_m <= cand_from_ix {
+//                 dp_ix[i][j] = cand_from_m;
+//                 ptr_ix[i][j] = Some(State::M);
+//             } else {
+//                 dp_ix[i][j] = cand_from_ix;
+//                 ptr_ix[i][j] = Some(State::Ix);
+//             }
+
+//             // Iy: gap in A (horizontal move, now yielding a 'D').
+//             let cand_from_m = dp_m[i][j - 1] + gap_open + gap_extend;
+//             let cand_from_iy = dp_iy[i][j - 1] + gap_extend;
+//             if cand_from_m <= cand_from_iy {
+//                 dp_iy[i][j] = cand_from_m;
+//                 ptr_iy[i][j] = Some(State::M);
+//             } else {
+//                 dp_iy[i][j] = cand_from_iy;
+//                 ptr_iy[i][j] = Some(State::Iy);
+//             }
+//         }
+//     }
+
+//     // Traceback: choose the best ending state.
+//     let mut i = n;
+//     let mut j = m;
+//     let (mut current_state, _final_score) = if dp_m[n][m] <= dp_ix[n][m] && dp_m[n][m] <= dp_iy[n][m] {
+//         (State::M, dp_m[n][m])
+//     } else if dp_ix[n][m] <= dp_iy[n][m] {
+//         (State::Ix, dp_ix[n][m])
+//     } else {
+//         (State::Iy, dp_iy[n][m])
+//     };
+
+//     let mut ops_rev = Vec::new();
+//     while i > 0 || j > 0 {
+//         if i == 0 {
+//             // Only deletion possible.
+//             ops_rev.push('D');
+//             j -= 1;
+//             continue;
+//         } else if j == 0 {
+//             // Only insertion possible.
+//             ops_rev.push('I');
+//             i -= 1;
+//             continue;
+//         }
+//         match current_state {
+//             State::M => {
+//                 let prev = ptr_m[i][j].unwrap();
+//                 let op = if a_bytes[i - 1] == b_bytes[j - 1] { '=' } else { 'X' };
+//                 ops_rev.push(op);
+//                 i -= 1;
+//                 j -= 1;
+//                 current_state = prev;
+//             }
+//             State::Ix => {
+//                 let prev = ptr_ix[i][j].unwrap();
+//                 ops_rev.push('I'); // now 'I' (vertical move, consuming A)
+//                 i -= 1;
+//                 current_state = prev;
+//             }
+//             State::Iy => {
+//                 let prev = ptr_iy[i][j].unwrap();
+//                 ops_rev.push('D'); // now 'D' (horizontal move, consuming B)
+//                 j -= 1;
+//                 current_state = prev;
+//             }
+//         }
+//     }
+//     ops_rev.reverse();
+
+//     // Compress consecutive operations.
+//     let mut cigar = Vec::new();
+//     if !ops_rev.is_empty() {
+//         let mut count = 1;
+//         let mut last = ops_rev[0];
+//         for &op in ops_rev.iter().skip(1) {
+//             if op == last {
+//                 count += 1;
+//             } else {
+//                 cigar.push((count, last));
+//                 last = op;
+//                 count = 1;
+//             }
+//         }
+//         cigar.push((count, last));
+//     }
+//     cigar
+// }
+
+// /// Enum for traceback state.
+// #[derive(Clone, Copy, Debug)]
+// enum State {
+//     M,  // Match/mismatch
+//     Ix, // Insertion (gap in B; vertical move, consumes A)
+//     Iy, // Deletion (gap in A; horizontal move, consumes B)
+// }
+
+// /// align_segment_dual_gap_affine performs global alignment with affine gap penalties,
+// /// where the gap penalties for insertions (Ix) and deletions (Iy) are specified separately.
+// /// 
+// /// Parameters:
+// /// - `a`: first sequence
+// /// - `b`: second sequence
+// /// - `mismatch`: cost for a mismatch (substitution)
+// /// - `gap_open_i`: gap opening penalty for an insertion (vertical gap, consuming A)
+// /// - `gap_extend_i`: gap extension penalty for an insertion
+// /// - `gap_open_d`: gap opening penalty for a deletion (horizontal gap, consuming B)
+// /// - `gap_extend_d`: gap extension penalty for a deletion
+// ///
+// /// Returns a vector of (length, op) pairs (e.g. [(10, '='), (2, 'X'), (5, 'I'), …])
+// /// representing the CIGAR string for the alignment. In our inverted logic, an 'I'
+// /// denotes an insertion (consuming A) and a 'D' denotes a deletion (consuming B).
+// fn align_segment_dual_gap_affine(
+//     a: &str,
+//     b: &str,
+//     mismatch: i32,
+//     gap_open_i: i32,
+//     gap_extend_i: i32,
+//     gap_open_d: i32,
+//     gap_extend_d: i32,
+// ) -> Vec<(usize, char)> {
+//     let a_bytes = a.as_bytes();
+//     let b_bytes = b.as_bytes();
+//     let n = a_bytes.len();
+//     let m = b_bytes.len();
+//     let inf = i32::MAX / 2;
+
+//     // Create DP matrices for three states: M (match/mismatch), Ix (insertion), Iy (deletion)
+//     let mut dp_m = vec![vec![inf; m + 1]; n + 1];
+//     let mut dp_ix = vec![vec![inf; m + 1]; n + 1];
+//     let mut dp_iy = vec![vec![inf; m + 1]; n + 1];
+
+//     // Pointer matrices to record traceback decisions.
+//     let mut ptr_m = vec![vec![None; m + 1]; n + 1];
+//     let mut ptr_ix = vec![vec![None; m + 1]; n + 1];
+//     let mut ptr_iy = vec![vec![None; m + 1]; n + 1];
+
+//     // Initialization.
+//     dp_m[0][0] = 0;
+//     dp_ix[0][0] = inf;
+//     dp_iy[0][0] = inf;
+//     ptr_m[0][0] = None;
+
+//     // Initialize first column: only vertical moves (insertions, i.e. gap in B)
+//     for i in 1..=n {
+//         if i == 1 {
+//             dp_ix[i][0] = gap_open_i + gap_extend_i;
+//             ptr_ix[i][0] = Some(State::M);
+//         } else {
+//             dp_ix[i][0] = dp_ix[i - 1][0] + gap_extend_i;
+//             ptr_ix[i][0] = Some(State::Ix);
+//         }
+//         dp_m[i][0] = dp_ix[i][0];
+//         ptr_m[i][0] = Some(State::Ix);
+//         dp_iy[i][0] = inf;
+//     }
+
+//     // Initialize first row: only horizontal moves (deletions, i.e. gap in A)
+//     for j in 1..=m {
+//         if j == 1 {
+//             dp_iy[0][j] = gap_open_d + gap_extend_d;
+//             ptr_iy[0][j] = Some(State::M);
+//         } else {
+//             dp_iy[0][j] = dp_iy[0][j - 1] + gap_extend_d;
+//             ptr_iy[0][j] = Some(State::Iy);
+//         }
+//         dp_m[0][j] = dp_iy[0][j];
+//         ptr_m[0][j] = Some(State::Iy);
+//         dp_ix[0][j] = inf;
+//     }
+
+//     // Fill in the DP matrices.
+//     for i in 1..=n {
+//         for j in 1..=m {
+//             let sub_cost = if a_bytes[i - 1] == b_bytes[j - 1] { 0 } else { mismatch };
+
+//             // Compute M: coming diagonally from any state.
+//             let cand_m = dp_m[i - 1][j - 1] + sub_cost;
+//             let cand_ix = dp_ix[i - 1][j - 1] + sub_cost;
+//             let cand_iy = dp_iy[i - 1][j - 1] + sub_cost;
+//             if cand_m <= cand_ix && cand_m <= cand_iy {
+//                 dp_m[i][j] = cand_m;
+//                 ptr_m[i][j] = Some(State::M);
+//             } else if cand_ix <= cand_iy {
+//                 dp_m[i][j] = cand_ix;
+//                 ptr_m[i][j] = Some(State::Ix);
+//             } else {
+//                 dp_m[i][j] = cand_iy;
+//                 ptr_m[i][j] = Some(State::Iy);
+//             }
+
+//             // Compute Ix: vertical gap (insertion, consuming A).
+//             let cand_from_m = dp_m[i - 1][j] + gap_open_i + gap_extend_i;
+//             let cand_from_ix = dp_ix[i - 1][j] + gap_extend_i;
+//             if cand_from_m <= cand_from_ix {
+//                 dp_ix[i][j] = cand_from_m;
+//                 ptr_ix[i][j] = Some(State::M);
+//             } else {
+//                 dp_ix[i][j] = cand_from_ix;
+//                 ptr_ix[i][j] = Some(State::Ix);
+//             }
+
+//             // Compute Iy: horizontal gap (deletion, consuming B).
+//             let cand_from_m = dp_m[i][j - 1] + gap_open_d + gap_extend_d;
+//             let cand_from_iy = dp_iy[i][j - 1] + gap_extend_d;
+//             if cand_from_m <= cand_from_iy {
+//                 dp_iy[i][j] = cand_from_m;
+//                 ptr_iy[i][j] = Some(State::M);
+//             } else {
+//                 dp_iy[i][j] = cand_from_iy;
+//                 ptr_iy[i][j] = Some(State::Iy);
+//             }
+//         }
+//     }
+
+//     // Traceback: choose the best ending state.
+//     let mut i = n;
+//     let mut j = m;
+//     let (mut current_state, _final_score) = if dp_m[n][m] <= dp_ix[n][m] && dp_m[n][m] <= dp_iy[n][m] {
+//         (State::M, dp_m[n][m])
+//     } else if dp_ix[n][m] <= dp_iy[n][m] {
+//         (State::Ix, dp_ix[n][m])
+//     } else {
+//         (State::Iy, dp_iy[n][m])
+//     };
+
+//     let mut ops_rev = Vec::new();
+//     while i > 0 || j > 0 {
+//         if i == 0 {
+//             // Must be a deletion.
+//             ops_rev.push('D');
+//             j -= 1;
+//             continue;
+//         } else if j == 0 {
+//             // Must be an insertion.
+//             ops_rev.push('I');
+//             i -= 1;
+//             continue;
+//         }
+//         match current_state {
+//             State::M => {
+//                 let prev = ptr_m[i][j].unwrap();
+//                 // Diagonal move: match if bases are equal, else mismatch.
+//                 let op = if a_bytes[i - 1] == b_bytes[j - 1] { '=' } else { 'X' };
+//                 ops_rev.push(op);
+//                 i -= 1;
+//                 j -= 1;
+//                 current_state = prev;
+//             }
+//             State::Ix => {
+//                 let prev = ptr_ix[i][j].unwrap();
+//                 ops_rev.push('I'); // Insertion (vertical move, consuming A)
+//                 i -= 1;
+//                 current_state = prev;
+//             }
+//             State::Iy => {
+//                 let prev = ptr_iy[i][j].unwrap();
+//                 ops_rev.push('D'); // Deletion (horizontal move, consuming B)
+//                 j -= 1;
+//                 current_state = prev;
+//             }
+//         }
+//     }
+//     ops_rev.reverse();
+
+//     // Compress consecutive operations.
+//     let mut cigar = Vec::new();
+//     if !ops_rev.is_empty() {
+//         let mut count = 1;
+//         let mut last = ops_rev[0];
+//         for &op in ops_rev.iter().skip(1) {
+//             if op == last {
+//                 count += 1;
+//             } else {
+//                 cigar.push((count, last));
+//                 last = op;
+//                 count = 1;
+//             }
+//         }
+//         cigar.push((count, last));
+//     }
+//     cigar
+// }
