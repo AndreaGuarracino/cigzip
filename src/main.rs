@@ -4,6 +4,7 @@ use std::io::{BufRead, BufReader};
 use std::fs::File;
 use rust_htslib::faidx::Reader as FastaReader;
 use libwfa2::affine_wavefront::{AffineWavefronts, AlignmentSpan, AlignmentStatus, AlignmentScope, MemoryMode, HeuristicStrategy};
+use log::{debug, info, warn, error};
 
 /// Command-line arguments parsed with Clap.
 #[derive(Parser, Debug)]
@@ -29,14 +30,28 @@ struct Args {
     /// Delta value for tracepoints
     #[arg(long, default_value = "100")]
     delta: usize,
+
+    /// Verbosity level (0 = error, 1 = info, 2 = debug)
+    #[clap(short, long, default_value = "0")]
+    verbose: u8,
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Parse command-line arguments.
     let args = Args::parse();
+
+    // Initialize logger based on verbosity
+    env_logger::Builder::new()
+        .filter_level(match args.verbose {
+            0 => log::LevelFilter::Error,
+            1 => log::LevelFilter::Info,
+            _ => log::LevelFilter::Debug,
+        })
+        .init();
+
     let tokens: Vec<&str> = args.penalties.split(',').collect();
     if tokens.len() != 5 {
-        eprintln!("Error: penalties must be provided as mismatch,gap_open1,gap_ext1,gap_open2,gap_ext2");
+        error!("Error: penalties must be provided as mismatch,gap_open1,gap_ext1,gap_open2,gap_ext2");
         std::process::exit(1);
     }
     let mismatch: i32 = tokens[0].parse()?;
@@ -44,16 +59,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let gap_ext1: i32 = tokens[2].parse()?;
     let gap_open2: i32 = tokens[3].parse()?;
     let gap_ext2: i32 = tokens[4].parse()?;
-    eprintln!("Penalties: {},{},{},{},{}", mismatch, gap_open1, gap_ext1, gap_open2, gap_ext2);
+    info!("Penalties: {},{},{},{},{}", mismatch, gap_open1, gap_ext1, gap_open2, gap_ext2);
 
     let delta = args.delta;
 
     // If both a PAF file and FASTA file are provided, process each PAF record.
     if let (Some(paf_path), Some(fasta_path)) = (args.paf, args.fasta) {
-        eprintln!("Using FASTA file: {}", fasta_path);
-        eprintln!("Processing PAF file: {}", paf_path);
+        info!("Using FASTA file: {}", fasta_path);
+        info!("Processing PAF file: {}", paf_path);
 
-        // Open the FASTA file using rust-htslib.
+        // Open the FASTA file
         let fasta_reader = FastaReader::from_path(&fasta_path)
             .expect("Error reading FASTA file");
 
@@ -71,7 +86,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
             let fields: Vec<&str> = line.split('\t').collect();
             if fields.len() < 12 {
-                eprintln!("Skipping malformed PAF line {}: {}", i + 1, line);
+                warn!("Skipping malformed PAF line {}: {}", i + 1, line);
                 continue;
             }
             // Parse mandatory PAF fields.
@@ -81,6 +96,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             let query_end: usize = fields[3].parse()?;
             let strand = fields[4];
             if strand == "-" {
+                warn!("Reverse strand still not supported {}: {}", i + 1, line);
                 continue; // Still not supported
             }
             let target_name = fields[5];
@@ -91,19 +107,19 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             // Find the cg:Z: field (the CIGAR string).
             let cg_field = fields.iter().find(|&&s| s.starts_with("cg:Z:"));
             if cg_field.is_none() {
-                eprintln!("Skipping line {}: no cg field found", i + 1);
+                warn!("Skipping line {}: no cg field found", i + 1);
                 continue;
             }
             let paf_cigar = cg_field.unwrap().strip_prefix("cg:Z:").unwrap();
 
             // Print PAF row
-            // eprintln!("{}", line);
-            // eprintln!("Line {}: Query: {}:{}-{}", i + 1, query_name, query_start, query_end);
-            // eprintln!("Line {}: Target: {}:{}-{}", i + 1, target_name, target_start, target_end);
+            // debug!("{}", line);
+            // debug!("Line {}: Query: {}:{}-{}", i + 1, query_name, query_start, query_end);
+            // debug!("Line {}: Target: {}:{}-{}", i + 1, target_name, target_start, target_end);
 
             // Convert CIGAR to tracepoints using query (A) and target (B) coordinates.
-            let tracepoints = cigar_to_tracepoints(paf_cigar, query_start, query_end, delta);
-            let tracepoints_variable = cigar_to_tracepoints_variable(paf_cigar, 64);
+            //let tracepoints = cigar_to_tracepoints(paf_cigar, query_start, query_end, delta);
+            let tracepoints_variable = cigar_to_tracepoints_variable(paf_cigar, delta);
 
             // Fetch query sequence from FASTA.
             // Note: rust-htslib uses 1-based coordinates in region strings.
@@ -114,25 +130,22 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             let target_seq_bytes = fasta_reader.fetch_seq(target_name, target_start, target_end - 1)?;
             let target_seq = String::from_utf8(target_seq_bytes)?.to_ascii_uppercase();
 
-            // eprintln!("Line {}: Query sequence: {} (len: {})", i + 1, query_seq, query_seq.len());
-            // eprintln!("Line {}: Target sequence: {} (len: {})", i + 1, target_seq, target_seq.len());
-
             // Reconstruct the CIGAR from tracepoints.
-            let recon_cigar = tracepoints_to_cigar(
-                &tracepoints,
-                &query_seq,
-                &target_seq,
-                0,
-                query_seq.len(),
-                0,
-                target_seq.len(),
-                delta,
-                mismatch,
-                gap_open1,
-                gap_ext1,
-                gap_open2,
-                gap_ext2,
-            );
+            // let recon_cigar = tracepoints_to_cigar(
+            //     &tracepoints,
+            //     &query_seq,
+            //     &target_seq,
+            //     0,
+            //     query_seq.len(),
+            //     0,
+            //     target_seq.len(),
+            //     delta,
+            //     mismatch,
+            //     gap_open1,
+            //     gap_ext1,
+            //     gap_open2,
+            //     gap_ext2,
+            // );
             let recon_cigar_variable = tracepoints_to_cigar_variable(
                 &tracepoints_variable,
                 &query_seq,
@@ -143,65 +156,78 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 gap_open1,
                 gap_ext1,
                 gap_open2,
-                gap_ext2,
-                32
+                gap_ext2
             );
 
             //let realn_cigar = align_segment_dual_gap_affine_wfa(&query_seq, &target_seq, mismatch, gap_open1, gap_ext1, gap_open2, gap_ext2);
             //let realn_cigar = cigar_ops_to_cigar_string(&realn_cigar);
 
-            if recon_cigar_variable == recon_cigar {
+            //let (query_end, query_len, target_end, target_len) = calculate_alignment_coordinates(&recon_cigar, query_start, target_start);
+            let (query_end_variable, query_len_variable, target_end_variable, target_len_variable) = calculate_alignment_coordinates(&recon_cigar_variable, query_start, target_start);
+            let (query_end_paf, query_len_paf, target_end_paf, target_len_paf) = calculate_alignment_coordinates(paf_cigar, query_start, target_start);
+
+            if (query_len_paf != query_len_variable) || (target_len_paf != target_len_variable) || (query_end_paf != query_end_variable) || (target_end_paf != target_end_variable) {
+                //info!("         recon_cigar {:?}", (query_end, query_len, target_end, target_len));
+                info!("recon_cigar_variable {:?}", (query_end_variable, query_len_variable, target_end_variable, target_len_variable));
+                info!("           paf_cigar {:?}", (query_end_paf, query_len_paf, target_end_paf, target_len_paf) );
+                error!("Line {}: seq. len. mismatch!", i + 1);
+            }
+
+            if paf_cigar == recon_cigar_variable {
                 //eprintln!("Line {}: Conversion successful.", i + 1);
             } else {
-                eprintln!("Line {}: Conversion mismatch!", i + 1);
-                //eprintln!("\t           Query seq: {:?}", query_seq);
-                //eprintln!("\t          Target seq: {:?}", target_seq);
-                eprintln!("\t                     Tracepoints: {:?}", tracepoints);
-                eprintln!("\t            Tracepoints_variable: {:?}", tracepoints_variable);
-                eprintln!("\t          CIGAR from tracepoints: {}", recon_cigar);
-                eprintln!("\t CIGAR from tracepoints_variable: {}", recon_cigar_variable);
-                eprintln!("\t              CIGAR from the PAF: {}", paf_cigar);
-                //eprintln!("\t CIGAR from realignment: {}", realn_cigar);
+                info!("Line {}: Conversion mismatch!", i + 1);
+                //info!("\t                     Tracepoints: {:?}", tracepoints);
+                info!("\t            Tracepoints_variable: {:?}", tracepoints_variable);
+                //info!("\t          CIGAR from tracepoints: {}", recon_cigar);
+                info!("\t CIGAR from tracepoints_variable: {}", recon_cigar_variable);
+                info!("\t              CIGAR from the PAF: {}", paf_cigar);
+                //info!("\t CIGAR from realignment: {}", realn_cigar);
             }
         }
     } else {
         // Fallback: run default example if no PAF/FASTA provided.
-        eprintln!("No PAF and FASTA provided, running default example.");
+        info!("No PAF and FASTA provided, running default example.");
 
-        let a_seq: String = "GAACAGAGAAATGGTGGAATTCAAATACAAAAAAACCGCAAAATTAAAAATCTTGCGGCTCTCTGAACTCATTTTCATGAGTGAATTTGGCGGAACGGACGGGACTCGAACCCGCGACCCCCTGCGTGACAGGCAGGTATTCTAACCGACTGAACTACCGCTCCGCCGTTGTGTTCCGTTGGGAACGGGCGAATATTACGGATTTGCCTCACCCTTCGTCAACGGTTTTTCTCATCTTTTGAATCGTTTGCTGCAAAAATCGCCCAAGCCGCTATTTTTAGCGCCTTTTACAGGTATTTATGCCCGCCAGAGGCAGCTTCCGCCCTTCTTCTCCACCAGATCAAGACGGGCTTCCTGAGCTGCAAGCTCTTCATCTGTCGCAAAAACAACGCGTAACTTACTTGCCTGACGTACAATGCGCTGAATTGTTGCTTCACCTTGTTGCTGCTGTGTCTCTCCTTCCATCGCAAAAGCCATCGACGTTTGACCACCGGTCATCG".to_owned();
-        let b_seq: String = "GAACAGAGAAATGGTGGAATTCAAATACAAAAAAACCGCAAAATTAAGCTCCGCCGTTGTGTTCCGTTGGGAACGGGCGAATATTACGGATTTGCCTCACCCTTCGTCAACGGTTTTTCTCATCTTTTGAATCGTTTGCTGCAAAAATCGCCCAAGCCGCTATTTTTAGCGCCTTTTACAGGTATTTATGCCCGCCAGAGGCAGCTTCCGCCCTTCTTCTCCACCAGATCAAGACGGGCTTCCTGAGCTGCAAGCTCTTCATCTGTCGCAAAAACAACGCGTAACTTACTTGCCTGACGTACAATGCGCTGAATTGTTGCTTCACCTTGTTGCTGCTGTGTCTCTCCTTCCATCGCAAAAGCCATCGACGTTTGACCACCGGTCATCG".to_owned();
+        let query_seq: String = "GAACAGAGAAATGGTGGAATTCAAATACAAAAAAACCGCAAAATTAAAAATCTTGCGGCTCTCTGAACTCATTTTCATGAGTGAATTTGGCGGAACGGACGGGACTCGAACCCGCGACCCCCTGCGTGACAGGCAGGTATTCTAACCGACTGAACTACCGCTCCGCCGTTGTGTTCCGTTGGGAACGGGCGAATATTACGGATTTGCCTCACCCTTCGTCAACGGTTTTTCTCATCTTTTGAATCGTTTGCTGCAAAAATCGCCCAAGCCGCTATTTTTAGCGCCTTTTACAGGTATTTATGCCCGCCAGAGGCAGCTTCCGCCCTTCTTCTCCACCAGATCAAGACGGGCTTCCTGAGCTGCAAGCTCTTCATCTGTCGCAAAAACAACGCGTAACTTACTTGCCTGACGTACAATGCGCTGAATTGTTGCTTCACCTTGTTGCTGCTGTGTCTCTCCTTCCATCGCAAAAGCCATCGACGTTTGACCACCGGTCATCG".to_owned();
+        let target_seq: String = "GAACAGAGAAATGGTGGAATTCAAATACAAAAAAACCGCAAAATTAACCCTTCGTCAACGGTTTTTCTCATCTTTTGAATCGTTTGCTGCAAAAATCGCCCAAGCCGCTATTTTTAGCGCCTTTTACAGGTATTTATGCCCGCCAGAGGCAGCTTCCGCCCTTCTTCTCCACCAGATCAAGACGGGCTTCCTGAGCTGCAAGCTCTTCATCTGTCGCAAAAACAACGCGTAACTTACTTGCCTGACGTACAATGCGCTGAATTGTTGCTTCACCTTGTTGCTGCTGTGTCTCTCCTTCCATCGCAAAAGCCATCGACGTTTGACCACCGGTCATCG".to_owned();
 
         let a_start = 0;
-        let a_end = a_seq.len();
+        let a_end = query_seq.len();
         let b_start = 0;
-        let b_end = b_seq.len();
+        let b_end = target_seq.len();
 
-        let paf_cigar = align_segment_dual_gap_affine_wfa(&a_seq[a_start..a_end], &b_seq[b_start..b_end],
+        let paf_cigar = align_segment_dual_gap_affine_wfa(&query_seq[a_start..a_end], &target_seq[b_start..b_end],
             mismatch, gap_open1, gap_ext1, gap_open2, gap_ext2);
         let paf_cigar = cigar_ops_to_cigar_string(&paf_cigar);
 
         let tracepoints = cigar_to_tracepoints(&paf_cigar, a_start, a_end, delta);
-        eprintln!("Tracepoints (d, b) = {:?}", tracepoints);
+        let tracepoints_variable = cigar_to_tracepoints_variable(&paf_cigar, delta);
 
-        let tracepoints_variable = cigar_to_tracepoints_variable(&paf_cigar, 64);
-
-        let recon_cigar = tracepoints_to_cigar(&tracepoints, &a_seq, &b_seq,
+        let recon_cigar = tracepoints_to_cigar(&tracepoints, &query_seq, &target_seq,
             a_start, a_end, b_start, b_end, delta, mismatch, gap_open1, gap_ext1, gap_open2, gap_ext2);
         let recon_cigar_variable = tracepoints_to_cigar_variable(
             &tracepoints_variable,
-            &a_seq,
-            &b_seq,
+            &query_seq,
+            &target_seq,
             0,
             0,
             mismatch,
             gap_open1,
             gap_ext1,
             gap_open2,
-            gap_ext2,
-            32
+            gap_ext2
         );
-        eprintln!("     Original CIGAR: {}", paf_cigar);
-        eprintln!("Reconstructed CIGAR: {}", recon_cigar);
+
+        //let realn_cigar = align_segment_dual_gap_affine_wfa(&query_seq, &target_seq, mismatch, gap_open1, gap_ext1, gap_open2, gap_ext2);
+        //let realn_cigar = cigar_ops_to_cigar_string(&realn_cigar);
+
+        info!("\t                     Tracepoints: {:?}", tracepoints);
+        info!("\t            Tracepoints_variable: {:?}", tracepoints_variable);
+        info!("\t          CIGAR from tracepoints: {}", recon_cigar);
+        info!("\t CIGAR from tracepoints_variable: {}", recon_cigar_variable);
+        info!("\t              CIGAR from the PAF: {}", paf_cigar);
+        //info!("\t CIGAR from realignment: {}", realn_cigar);
         assert!(paf_cigar == recon_cigar);
     }
 
@@ -225,6 +251,35 @@ fn is_edit(op: char) -> bool {
     op == 'X' || op == 'I' || op == 'D'
 }
 
+/// Calculate alignment coordinates from a CIGAR string and starting positions
+/// Returns (query_end, query_len, target_end, target_len)
+fn calculate_alignment_coordinates(
+    cigar: &str,
+    query_start: usize,
+    target_start: usize,
+) -> (usize, usize, usize, usize) {
+    let ops = cigar_str_to_cigar_ops(cigar);
+    
+    let mut query_len = 0;
+    let mut target_len = 0;
+    
+    // Calculate total lengths by checking which operations consume query/target bases
+    for &(len, op) in &ops {
+        if consumes_a(op) {
+            query_len += len;
+        }
+        if consumes_b(op) {
+            target_len += len;
+        }
+    }
+    
+    // Calculate end positions by adding consumed lengths to start positions
+    let query_end = query_start + query_len;
+    let target_end = target_start + target_len;
+
+    (query_end, query_len, target_end, target_len)
+}
+
 /// Convert a CIGAR string into tracepoints.
 /// Given:
 /// - `cigar`: the alignment CIGAR string in extended format.
@@ -232,6 +287,7 @@ fn is_edit(op: char) -> bool {
 /// - `b_start`, `b_end`: similarly for sequence B.
 /// - `delta`: the spacing for tracepoints.
 /// Returns a vector of (diff_count, b_bases) pairs for each A–segment.
+/// BUGGY!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
 fn cigar_to_tracepoints(
     cigar: &str,
     a_start: usize,
@@ -254,7 +310,7 @@ fn cigar_to_tracepoints(
     let mut tracepoints = Vec::new();
 
     for (mut len, op) in ops {
-        // For op that does not consume A (e.g. deletion now) we process it wholly.
+        // For op that does not consume A (e.g. deletions) we process it wholly.
         if !consumes_a(op) {
             if consumes_b(op) {
                 current_b_bases += len;
@@ -299,82 +355,93 @@ fn cigar_to_tracepoints(
     tracepoints
 }
 
-/// A tracepoint record for the variable-delta strategy.
-/// Each tracepoint holds the number of bases from sequence A,
-/// the number of bases from sequence B, and the total number of differences
-/// observed in that segment.
-#[derive(Debug, Clone)]
-pub struct VariableTracepoint {
-    pub a_len: usize,
-    pub b_len: usize,
-    pub diff: usize,
-}
-
 /// Convert a CIGAR string into variable–delta tracepoints.
-/// Instead of using fixed A–intervals, we accumulate the numbers of bases (and differences)
-/// until we reach the given diff_threshold. (If an edit operation spans the threshold,
-/// it is split.)
-///
-/// Returns a vector of VariableTracepoint records (a_len, b_len, diff).
+/// Instead of using fixed A–intervals, we accumulate bases (and differences)
+/// until we reach a diff threshold of 254. For match-like ops ('=', 'M', and 'X'),
+/// we split as needed so that the diff count never exceeds 254.
+/// For indels ('I' and 'D'), we incorporate them into the current tracepoint
+/// if they are short enough. If adding the indel would exceed the threshold,
+/// we flush the current segment. Indels are unsplittable—if an indel’s length is
+/// greater than 254, we emit a tracepoint with diff == 255.
 fn cigar_to_tracepoints_variable(
     cigar: &str,
-    diff_threshold: usize,
+    diff_threshold: usize, // expected to be 254
 ) -> Vec<(usize, usize, usize)> {
     let ops = cigar_str_to_cigar_ops(cigar);
-
     let mut tracepoints = Vec::new();
-    // current counters for this segment
+    // current segment counters:
     let mut cur_a_len = 0;
     let mut cur_b_len = 0;
     let mut cur_diff = 0;
 
-    // For each operation, process it in chunks if needed.
     for (mut len, op) in ops {
-        while len > 0 {
-            // For edit operations (X, I, D) we limit the step so that we do not
-            // exceed the diff_threshold.
-            let step = if is_edit(op) {
-                let remaining = diff_threshold.saturating_sub(cur_diff);
-                // If we have already reached the threshold, record the current tracepoint
-                // and reset counters (do not consume any part of the current op yet).
-                if remaining == 0 {
-                    tracepoints.push((cur_a_len, cur_b_len, cur_diff));
-                    cur_a_len = 0;
-                    cur_b_len = 0;
-                    cur_diff = 0;
-                    continue;
-                } else {
-                    min(len, remaining)
+        match op {
+            'X' => {
+                // X is splittable; process in chunks so that cur_diff never exceeds diff_threshold.
+                while len > 0 {
+                    let remaining = diff_threshold.saturating_sub(cur_diff);
+                    if remaining == 0 {
+                        // Flush current segment and reset counters.
+                        tracepoints.push((cur_a_len, cur_b_len, cur_diff));
+                        cur_a_len = 0;
+                        cur_b_len = 0;
+                        cur_diff = 0;
+                        continue;
+                    }
+                    let step = min(len, remaining);
+                    cur_a_len += step;
+                    cur_b_len += step;
+                    cur_diff += step;
+                    len -= step;
+                    if cur_diff == diff_threshold {
+                        tracepoints.push((cur_a_len, cur_b_len, cur_diff));
+                        cur_a_len = 0;
+                        cur_b_len = 0;
+                        cur_diff = 0;
+                    }
                 }
-            } else {
-                // For non-edit ops (e.g. deletions that do not consume A, or other ops),
-                // we can take the whole op.
-                len
-            };
-
-            // Update counters
-            if consumes_a(op) {
-                cur_a_len += step;
-            }
-            if consumes_b(op) {
-                cur_b_len += step;
-            }
-            if is_edit(op) {
-                cur_diff += step;
-            }
-            len -= step;
-
-            // If we have now reached (or exceeded) the diff threshold, record a tracepoint.
-            if cur_diff >= diff_threshold {
-                tracepoints.push((cur_a_len, cur_b_len, cur_diff));
-                // Reset the per-segment counters.
-                cur_a_len = 0;
-                cur_b_len = 0;
-                cur_diff = 0;
+            },
+            'I' | 'D' => {
+                // For indels, which are unsplittable, try to incorporate into the current tracepoint.
+                if len > diff_threshold {
+                    // If the indel is too long, flush any pending segment first.
+                    if cur_a_len > 0 || cur_b_len > 0 || cur_diff > 0 {
+                        tracepoints.push((cur_a_len, cur_b_len, cur_diff));
+                        cur_a_len = 0;
+                        cur_b_len = 0;
+                        cur_diff = 0;
+                    }
+                    // Emit a special tracepoint with diff==255.
+                    let a_consumed = if op == 'I' { len } else { 0 };
+                    let b_consumed = if op == 'D' { len } else { 0 };
+                    tracepoints.push((a_consumed, b_consumed, 255));
+                } else {
+                    // If adding this indel would push the diff over the threshold, flush first.
+                    if cur_diff + len > diff_threshold {
+                        tracepoints.push((cur_a_len, cur_b_len, cur_diff));
+                        cur_a_len = 0;
+                        cur_b_len = 0;
+                        cur_diff = 0;
+                    }
+                    // Then accumulate the entire indel.
+                    cur_a_len += if consumes_a(op) { len } else { 0 };
+                    cur_b_len += if consumes_b(op) { len } else { 0 };
+                    cur_diff += len;
+                }
+            },
+            '=' | 'M' => {
+                // For match-type ops, simply accumulate since they don't add to diff.
+                cur_a_len += if consumes_a(op) { len } else { 0 };
+                cur_b_len += if consumes_b(op) { len } else { 0 };
+            },
+            _ => {
+                // Fallback: accumulate normally.
+                cur_a_len += if consumes_a(op) { len } else { 0 };
+                cur_b_len += if consumes_b(op) { len } else { 0 };
             }
         }
     }
-    // Always record any remaining bases (even if below the threshold)
+    // Flush any remaining segment.
     if cur_a_len > 0 || cur_b_len > 0 || cur_diff > 0 {
         tracepoints.push((cur_a_len, cur_b_len, cur_diff));
     }
@@ -453,6 +520,7 @@ fn tracepoints_to_cigar(
         // current_b, current_b + b_len, b_len);
 
         // Align the two segments using affine gap penalties.
+        debug!("Tracepoint n. {}: {:?}", i, (d, b_len));
         let mut seg_cigar = align_segment_dual_gap_affine_wfa(
             a_sub,
             b_sub,
@@ -474,13 +542,9 @@ fn tracepoints_to_cigar(
 }
 
 /// Reconstruct a CIGAR string from variable-delta tracepoints.
-/// For each tracepoint (which represents a segment from the original alignment),
-/// we extract the corresponding sub–sequences from A and B. Then, depending on the
-/// diff count in that segment, we choose to align it either with the default (full)
-/// WFA alignment or with a faster heuristic version.
-///
-/// The parameter `heuristic_diff_threshold` lets you decide the cutoff (e.g. segments
-/// with fewer differences can be aligned using a heuristic).
+/// For each tracepoint, if the diff value is 255 (indicating a long indel),
+/// we simply generate an insertion or deletion op by inspecting the saved A and B bases.
+/// Otherwise, we realign the corresponding segments using either heuristic or full WFA alignment.
 fn tracepoints_to_cigar_variable(
     tracepoints: &[(usize, usize, usize)],
     a_seq: &str,
@@ -492,34 +556,35 @@ fn tracepoints_to_cigar_variable(
     gap_extend_i: i32,
     gap_open_d: i32,
     gap_extend_d: i32,
-    heuristic_diff_threshold: usize,
 ) -> String {
     let mut cigar_ops = Vec::new();
     let mut current_a = a_start;
     let mut current_b = b_start;
 
-    for (a_len, b_len, diff) in tracepoints {
-        let a_end = current_a + a_len;
-        let b_end = current_b + b_len;
-
-        let a_sub = &a_seq[current_a..a_end];
-        let b_sub = &b_seq[current_b..b_end];
-
-        // If the number of differences in this segment is below the threshold,
-        // use a heuristic alignment (for faster computation); otherwise use the
-        // standard (full) WFA alignment.
-        let seg_ops = if *diff < heuristic_diff_threshold {
-            align_segment_with_heuristic(
-                a_sub,
-                b_sub,
-                mismatch,
-                gap_open_i,
-                gap_extend_i,
-                gap_open_d,
-                gap_extend_d,
-            )
+    for &(a_len, b_len, diff) in tracepoints {
+        if diff == 255 {
+            // Special case: long indel.
+            if a_len > 0 && b_len == 0 {
+                // This is an insertion.
+                cigar_ops.push((a_len, 'I'));
+                current_a += a_len;
+            } else if b_len > 0 && a_len == 0 {
+                // This is a deletion.
+                cigar_ops.push((b_len, 'D'));
+                current_b += b_len;
+            } else {
+                panic!(
+                    "Invalid tracepoint with diff==255: a_len={}, b_len={}",
+                    a_len, b_len
+                );
+            }
         } else {
-            align_segment_dual_gap_affine_wfa(
+            let a_end = current_a + a_len;
+            let b_end = current_b + b_len;
+            let a_sub = &a_seq[current_a..a_end];
+            let b_sub = &b_seq[current_b..b_end];
+
+            let seg_ops = align_segment_dual_gap_affine_wfa(
                 a_sub,
                 b_sub,
                 mismatch,
@@ -527,11 +592,11 @@ fn tracepoints_to_cigar_variable(
                 gap_extend_i,
                 gap_open_d,
                 gap_extend_d,
-            )
-        };
-        cigar_ops.extend(seg_ops);
-        current_a = a_end;
-        current_b = b_end;
+            );
+            cigar_ops.extend(seg_ops);
+            current_a = a_end;
+            current_b = b_end;
+        }
     }
     let merged = merge_cigar_ops(cigar_ops);
     cigar_ops_to_cigar_string(&merged)
@@ -637,11 +702,15 @@ fn align_segment_dual_gap_affine_wfa(
     //     (*wf_aligner).penalties.gap_extension2 = gap_extend_d;
     // }
 
-    // Do the alignment
+    // Do the alignment b vs a (it is not a typo) to have insertions/deletions in the query as Is/Ds in the CIGAR string
     let status = aligner.align(b.as_bytes(), a.as_bytes());
 
     match status {
         AlignmentStatus::Completed => {
+            debug!(" query: {:?}" , a);
+            debug!("target: {:?}" , b);
+            debug!("Tracepoint CIGAR: {:?}" , aligner.cigar());
+            debug!("Tracepoint CIGAR: {:?}" , cigar_u8_to_cigar_ops(aligner.cigar()));
             cigar_u8_to_cigar_ops(aligner.cigar())
         },
         s => {
@@ -651,40 +720,40 @@ fn align_segment_dual_gap_affine_wfa(
     }
 }
 
-/// A helper that performs alignment on a segment using heuristic settings.
-/// Here we create a new aligner, set its heuristic (here using WFAdaptive with example parameters),
-/// and then perform the alignment.
-fn align_segment_with_heuristic(
-    a: &str,
-    b: &str,
-    mismatch: i32,
-    gap_open_i: i32,
-    gap_extend_i: i32,
-    gap_open_d: i32,
-    gap_extend_d: i32,
-) -> Vec<(usize, char)> {
-    let mut aligner = AffineWavefronts::default();
-    aligner.set_alignment_scope(AlignmentScope::Alignment);
-    aligner.set_alignment_span(AlignmentSpan::End2End);
-    aligner.set_memory_mode(MemoryMode::High);
-    // Set a heuristic strategy – here we choose WFAdaptive with example parameters.
-    aligner.set_heuristic(&HeuristicStrategy::WFAdaptive {
-        min_wavefront_length: 10,
-        max_distance_threshold: 100,
-        score_steps: 50,
-    });
-    aligner.set_penalties(0, mismatch, gap_open_i, gap_extend_i);
-    let status = aligner.align(b.as_bytes(), a.as_bytes());
-    match status {
-        AlignmentStatus::Completed => {
-            cigar_u8_to_cigar_ops(aligner.cigar())
-        },
-        s => {
-            eprintln!("Heuristic alignment failed with status: {:?}", s);
-            Vec::new()
-        }
-    }
-}
+// /// A helper that performs alignment on a segment using heuristic settings.
+// /// Here we create a new aligner, set its heuristic (here using WFAdaptive with example parameters),
+// /// and then perform the alignment.
+// fn align_segment_with_heuristic(
+//     a: &str,
+//     b: &str,
+//     mismatch: i32,
+//     gap_open_i: i32,
+//     gap_extend_i: i32,
+//     gap_open_d: i32,
+//     gap_extend_d: i32,
+// ) -> Vec<(usize, char)> {
+//     let mut aligner = AffineWavefronts::default();
+//     aligner.set_alignment_scope(AlignmentScope::Alignment);
+//     aligner.set_alignment_span(AlignmentSpan::End2End);
+//     aligner.set_memory_mode(MemoryMode::High);
+//     // Set a heuristic strategy – here we choose WFAdaptive with example parameters.
+//     aligner.set_heuristic(&HeuristicStrategy::WFAdaptive {
+//         min_wavefront_length: 10,
+//         max_distance_threshold: 100,
+//         score_steps: 50,
+//     });
+//     aligner.set_penalties(0, mismatch, gap_open_i, gap_extend_i);
+//     let status = aligner.align(b.as_bytes(), a.as_bytes());
+//     match status {
+//         AlignmentStatus::Completed => {
+//             cigar_u8_to_cigar_ops(aligner.cigar())
+//         },
+//         s => {
+//             eprintln!("Heuristic alignment failed with status: {:?}", s);
+//             Vec::new()
+//         }
+//     }
+// }
 
 // /// A simple Needleman–Wunsch alignment that returns a CIGAR string in extended format.
 // /// Here we use unit cost for a mismatch and gap. With inverted gap logic:
