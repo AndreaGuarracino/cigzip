@@ -574,7 +574,7 @@ dependencies = [
 [[package]]
 name = "libwfa2"
 version = "0.1.2"
-source = "git+https://github.com/AndreaGuarracino/libwfa2#1cdec071c2e969e53ff8172721401002bcdd6f1a"
+source = "git+https://github.com/AndreaGuarracino/libwfa2?rev=0b74dcff79bb2cf454563ff7d6ae67b98fb9db3b#0b74dcff79bb2cf454563ff7d6ae67b98fb9db3b"
 dependencies = [
  "bindgen 0.70.1",
  "clang-sys",
@@ -607,9 +607,9 @@ checksum = "4ee93343901ab17bd981295f2cf0026d4ad018c7c31ba84549a4ddbb47a45104"
 
 [[package]]
 name = "log"
-version = "0.4.25"
+version = "0.4.26"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "04cbf5b083de1c7e0222a7a51dbfdba1cbe1c6ab0b15e29fff3f6c077fd9cd9f"
+checksum = "30bde2b3dc3671ae49d8e2e9f044c7c005836e7a023ee57cffa25ab82764bb9e"
 
 [[package]]
 name = "lzma-sys"
