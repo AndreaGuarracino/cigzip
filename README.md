@@ -1,9 +1,9 @@
 # Alignment-tracepoints
 
-A Rust implementation of efficient sequence alignment storage and reconstruction using tracepoints, providing a significant reduction in storage requirements while maintaining fast alignment reconstruction capabilities.
+A Rust implementation for alignment reconstruction that uses variable‐sized tracepoints to efficiently store and rebuild full CIGAR strings.
 
 ## Overview
-This project implements an efficient approach to sequence alignment storage using tracepoints. Instead of storing complete CIGAR strings, A-sequence (query) vs B-sequence (target) alignments are recorded as `(difference count, consumed bases in B-sequence)` pairs at regular intervals along the A-sequence. This approach achieves:
+This project implements an efficient approach to sequence alignment storage using variable-sized tracepoints. Instead of storing complete CIGAR strings or using fixed intervals, alignments are recorded as tracepoints that adapt their size based on the local alignment complexity. This approach achieves:
 
 Key benefits:
  - **Space Efficiency:** Significant reduction in alignment storage size.
@@ -14,21 +14,17 @@ This design is inspired by Gene Myers' original tracepoint concept and extended 
 
 ## Features
 
+- **Variable-sized Tracepoints:** Convert CIGAR strings into variable‐sized tracepoints that adapt based on a configurable diff threshold.
 - **CIGAR Operations:** Parse and generate extended format CIGAR strings (including =, X, I, D, M).
-- **Tracepoint Conversion:** Convert CIGAR strings to a compact tracepoint representation.
-- **Alignment Reconstruction:** Rebuild full CIGAR strings from tracepoint data.
-- **Multiple Alignment Algorithms:**
-   - Basic Needleman–Wunsch (unit-cost),
-   - Affine gap penalties,
-   - Dual affine gap penalties (with separate insertion and deletion costs).
+- **Efficient Storage:** Compact representation that adapts to local alignment complexity.
+- **Accurate Reconstruction:** Rebuild full CIGAR strings from tracepoint data using WFA2-lib.
 
 ## How It Works
-Tracepoints record alignment information at regular intervals (controlled by the delta parameter). For each interval:
+This implementation uses variable-sized tracepoints that accumulate bases and differences until reaching a configurable diff threshold. Longer indels trigger special handling, ensuring that the reconstructed CIGAR string is accurate while minimizing storage. Each tracepoint stores:
 
-The number of differences (edits) in that segment
-The number of bases consumed in sequence B
-
-This creates a compact representation that can be used to efficiently reconstruct the full alignment when needed.
+- The number of bases consumed in sequence A
+- The number of bases consumed in sequence B  
+- The number of differences in that segment
 
 ## Performance
 Using tracepoints provides significant space savings compared to storing full CIGAR strings:
@@ -54,10 +50,10 @@ cd trace_points
 cargo build --release
 ```
 
-Run the example driver to see tracepoints and alignment reconstruction in action:
+Run the example driver to see variable-sized tracepoints in action for efficient alignment reconstruction:
 
 ```bash
-cargo run --release
+cargo run --release -- --max-diff 128
 ```
 
 For more details on the API and configuration (e.g., setting delta), refer to the source code documentation.
