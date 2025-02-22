@@ -26,20 +26,6 @@ This implementation uses variable-sized tracepoints that accumulate bases and di
 - The number of bases consumed in sequence B  
 - The number of differences in that segment
 
-## Performance
-Using tracepoints provides significant space savings compared to storing full CIGAR strings:
-
-For a 10Kbp alignment with 15% error rate:
-
-Full CIGAR: ~6KB
-Tracepoints (delta=100): ~200 bytes
-
-Alignment reconstruction time is O(εΔn) where:
-
-ε = error rate
-Δ = tracepoint interval
-n = sequence length
-
 ## Quick Start
 
 To get started, clone the repository and build the project with Cargo:
