@@ -117,16 +117,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
             // Fetch query sequence from FASTA.
             let query_seq = if strand == "+" {
-                String::from_utf8(fasta_reader.fetch_seq(query_name, query_start, query_end - 1)?)?
+                String::from_utf8(fasta_reader.fetch_seq(query_name, query_start, query_end - 1)?.to_vec())?
             } else {
-                // For reverse strand, fetch the sequence and reverse complement it
+                // Second instance
                 reverse_complement(&String::from_utf8(
-                    fasta_reader.fetch_seq(query_name, query_start, query_end - 1)?
+                    fasta_reader.fetch_seq(query_name, query_start, query_end - 1)?.to_vec()
                 )?)
             };
 
-            // Fetch target sequence from FASTA.
-            let target_seq = String::from_utf8(fasta_reader.fetch_seq(target_name, target_start, target_end - 1)?)?;
+            // Third instance
+            let target_seq = String::from_utf8(fasta_reader.fetch_seq(target_name, target_start, target_end - 1)?.to_vec())?;
 
             // Reconstruct the CIGAR from tracepoints.
             let recon_cigar_variable = tracepoints_to_cigar_variable(
