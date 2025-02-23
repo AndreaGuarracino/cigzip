@@ -143,8 +143,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 gap_ext2
             );
 
-            //let realn_cigar = align_sequences_wfa(&query_seq, &target_seq, mismatch, gap_open1, gap_ext1, gap_open2, gap_ext2);
-            //let realn_cigar = cigar_ops_to_cigar_string(&realn_cigar);
+            let mut aligner = AffineWavefronts::with_penalties_affine2p(0, mismatch, gap_open1, gap_ext1, gap_open2, gap_ext2);
+            let realn_cigar = align_sequences_wfa(&query_seq, &target_seq, &mut aligner);
+            let realn_cigar = cigar_ops_to_cigar_string(&realn_cigar);
 
             let (query_end_variable, query_len_variable, target_end_variable, target_len_variable) = calculate_alignment_coordinates(&recon_cigar_variable, query_start, target_start);
             let (query_end_paf, query_len_paf, target_end_paf, target_len_paf) = calculate_alignment_coordinates(paf_cigar, query_start, target_start);
@@ -155,14 +156,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 error!("Line {}: seq. len. mismatch!", i + 1);
             }
 
-            if paf_cigar == recon_cigar_variable {
+            if realn_cigar == recon_cigar_variable {
                 //eprintln!("Line {}: Conversion successful.", i + 1);
             } else {
                 info!("Line {}: Conversion mismatch! {}", i + 1, line);
                 info!("\t            Tracepoints_variable: {:?}", tracepoints_variable);
                 info!("\t CIGAR from tracepoints_variable: {}", recon_cigar_variable);
-                info!("\t              CIGAR from the PAF: {}", paf_cigar);
-                //info!("\t CIGAR from realignment: {}", realn_cigar);
+                //info!("\t              CIGAR from the PAF: {}", paf_cigar);
+                info!("\t          CIGAR from realignment: {}", realn_cigar);
             }
         }
     } else {
@@ -407,13 +408,12 @@ fn cigar_to_tracepoints_variable(
             },
             '=' | 'M' => {
                 // For match-type ops, simply accumulate since they don't add to diff.
-                cur_a_len += if consumes_a(op) { len } else { 0 };
-                cur_b_len += if consumes_b(op) { len } else { 0 };
+                cur_a_len += len;
+                cur_b_len += len;
             },
             _ => {
-                // Fallback: accumulate normally.
-                cur_a_len += if consumes_a(op) { len } else { 0 };
-                cur_b_len += if consumes_b(op) { len } else { 0 };
+                // Fallback: error
+                panic!("Invalid CIGAR operation: {}", op);
             }
         }
     }
