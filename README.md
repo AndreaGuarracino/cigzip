@@ -28,30 +28,29 @@ This implementation uses variable-sized tracepoints that accumulate bases and di
 
 ## Building
 
-You need to build `WFA2-lib` first:
+You need to build `WFA2-lib` first, which is a submodule of this repository. To do so, run:
 
 ```shell
-git clone https://github.com/smarco/WFA2-lib
-cd WFA2-lib
+git clone --recursive https://github.com/AndreaGuarracino/trace_points
+cd trace_points/WFA2-lib
 make clean all
+cd ..
 ```
 
-and then:
+Then, you can build the project using Cargo:
 
 ```shell
 # Point to your pre-built WFA2-lib directory
-export WFA2LIB_PATH="/path/to/WFA2-lib"
+export WFA2LIB_PATH=WFA2LIB_PATH="./WFA2-lib"
 
 # Build your project
-git clone trace_points
-cd trace_points
 cargo build --release
 ```
 
 ### For GUIX's slaves
 
 ```bash
-git clone trace_points
+git clone --recursive https://github.com/AndreaGuarracino/trace_points
 cd trace_points/WFA2-lib
 guix shell -C -D -f guix.scm
 export CC=gcc; make clean all
