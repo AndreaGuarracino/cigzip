@@ -5,8 +5,9 @@ edition = "2021"
 
 [dependencies]
 clap = { version = "4.5.30", features = ["derive"] }
-rust-htslib = "0.49.0"
+rust-htslib = { version = "*", default-features = false, features = ["serde_feature"] }
 #libwfa2 = { path = "/home/guarracino/Dropbox/git/libwfa2"}
+#libwfa2 = { git = "https://github.com/AndreaGuarracino/libwfa2",, rev = "cb5adde609ba108db9ae3b8dedf609fcabb99310"}
 libwfa2 = { git = "https://github.com/AndreaGuarracino/libwfa2", branch = "bind-to-libwfa"}#, rev = "cb5adde609ba108db9ae3b8dedf609fcabb99310"}
 log = "0.4.22"
 env_logger = "0.11.5"
