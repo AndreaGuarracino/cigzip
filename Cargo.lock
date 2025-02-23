@@ -574,7 +574,7 @@ dependencies = [
 [[package]]
 name = "libwfa2"
 version = "0.1.2"
-source = "git+https://github.com/AndreaGuarracino/libwfa2?rev=cb5adde609ba108db9ae3b8dedf609fcabb99310#cb5adde609ba108db9ae3b8dedf609fcabb99310"
+source = "git+https://github.com/AndreaGuarracino/libwfa2?branch=bind-to-libwfa#a850ff50a75a1fbf083d805be42ac14429745723"
 dependencies = [
  "bindgen 0.70.1",
  "clang-sys",
