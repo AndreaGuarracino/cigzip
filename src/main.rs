@@ -1,3 +1,4 @@
+use core::panic;
 use std::cmp::min;
 use clap::Parser;
 use std::io::{BufRead, BufReader};
@@ -382,16 +383,19 @@ fn cigar_to_tracepoints_variable(
                 // For indels, which are unsplittable, try to incorporate into the current tracepoint.
                 if len > diff_threshold {
                     // If the indel is too long, flush any pending segment first.
-                    if cur_a_len > 0 || cur_b_len > 0 || cur_diff > 0 {
+                    if cur_a_len > 0 || cur_b_len > 0 {
                         tracepoints.push((cur_a_len, cur_b_len, cur_diff));
                         cur_a_len = 0;
                         cur_b_len = 0;
                         cur_diff = 0;
                     }
                     // Emit a special tracepoint with diff==diff_threshold+1.
-                    let a_consumed = if op == 'I' { len } else { 0 };
-                    let b_consumed = if op == 'D' { len } else { 0 };
-                    tracepoints.push((a_consumed, b_consumed, diff_threshold+1));
+                    if op == 'I' {
+                        tracepoints.push((len, 0, diff_threshold + 1));
+                    } else {
+                        // op == 'D'
+                        tracepoints.push((0, len, diff_threshold + 1));
+                    }
                 } else {
                     // If adding this indel would push the diff over the threshold, flush first.
                     if cur_diff + len > diff_threshold {
@@ -401,8 +405,12 @@ fn cigar_to_tracepoints_variable(
                         cur_diff = 0;
                     }
                     // Then accumulate the entire indel.
-                    cur_a_len += if consumes_a(op) { len } else { 0 };
-                    cur_b_len += if consumes_b(op) { len } else { 0 };
+                    if op == 'I' {
+                        cur_a_len += len;
+                    } else {
+                        // op == 'D'
+                        cur_b_len += len;
+                    }
                     cur_diff += len;
                 }
             },
