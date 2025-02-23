@@ -26,35 +26,43 @@ This implementation uses variable-sized tracepoints that accumulate bases and di
 - The number of bases consumed in sequence B  
 - The number of differences in that segment
 
-## Quick Start
+## Building
 
-To get started, clone the repository and build the project with Cargo:
+You need to build `WFA2-lib` first:
 
-```bash
+```shell
+git clone https://github.com/smarco/WFA2-lib
+cd WFA2-lib
+make clean all
+```
+
+and then:
+
+```shell
+# Point to your pre-built WFA2-lib directory
+export WFA2LIB_PATH="/path/to/WFA2-lib"
+
+# Build your project
 git clone trace_points
 cd trace_points
 cargo build --release
 ```
 
-Run the example driver to see variable-sized tracepoints in action for efficient alignment reconstruction:
+### For GUIX's slaves
 
 ```bash
-cargo run --release -- --max-diff 128
+git clone trace_points
+cd trace_points/WFA2-lib
+guix shell -C -D -f guix.scm
+export CC=gcc; make clean all
+exit
+cd ..
+env -i bash -c 'WFA2LIB_PATH="./WFA2-lib" PATH=/usr/local/bin:/usr/bin:/bin ~/.cargo/bin/cargo build --release'
 ```
-
-For more details on the API and configuration (e.g., setting delta), refer to the source code documentation.
-
-## Contributing
-
-Contributions are welcome! Please fork the repository and submit pull requests. For major changes, open an issue first
-to discuss what you would like to change.
-
-Please make sure to update tests as appropriate.
 
 ## License
 
 This project is licensed under the MIT License. See the [LICENSE](LICENSE) file for details.
 
 ## References
-Based on Gene Myers' tracepoint concept described in:
-[Recording Alignments with Trace Points](https://dazzlerblog.wordpress.com/2015/11/05/trace-points/).
+Inspired by Gene Myers' tracepoint concept described in [Recording Alignments with Trace Points](https://dazzlerblog.wordpress.com/2015/11/05/trace-points/).
