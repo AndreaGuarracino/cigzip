@@ -119,13 +119,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             let query_seq = if strand == "+" {
                 String::from_utf8(fasta_reader.fetch_seq(query_name, query_start, query_end - 1)?.to_vec())?
             } else {
-                // Second instance
+                // For reverse strand, fetch the sequence and reverse complement it
                 reverse_complement(&String::from_utf8(
                     fasta_reader.fetch_seq(query_name, query_start, query_end - 1)?.to_vec()
                 )?)
             };
 
-            // Third instance
+            // Fetch target sequence from FASTA.
             let target_seq = String::from_utf8(fasta_reader.fetch_seq(target_name, target_start, target_end - 1)?.to_vec())?;
 
             // Reconstruct the CIGAR from tracepoints.
