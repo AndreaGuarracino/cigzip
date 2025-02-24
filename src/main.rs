@@ -90,16 +90,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 warn!("Skipping malformed PAF line {}: {}", i + 1, line);
                 continue;
             }
-            // Parse mandatory PAF fields.
-            let query_name = fields[0];
-            let _query_len: usize = fields[1].parse().unwrap_or(0);
-            let query_start: usize = fields[2].parse()?;
-            let query_end: usize = fields[3].parse()?;
-            let strand = fields[4];
-            let target_name = fields[5];
-            let _target_len: usize = fields[6].parse().unwrap_or(0);
-            let target_start: usize = fields[7].parse()?;
-            let target_end: usize = fields[8].parse()?;
+
             // Find the cg:Z: field (the CIGAR string).
             let cg_field = fields.iter().find(|&&s| s.starts_with("cg:Z:"));
             if cg_field.is_none() {
@@ -108,8 +99,19 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
             let paf_cigar = cg_field.unwrap().strip_prefix("cg:Z:").unwrap();
 
+            // Parse mandatory PAF fields.
+            let query_name = fields[0];
+            //let query_len: usize = fields[1].parse().unwrap_or(0);
+            let query_start: usize = fields[2].parse()?;
+            let query_end: usize = fields[3].parse()?;
+            let strand = fields[4];
+            let target_name = fields[5];
+            //let target_len: usize = fields[6].parse().unwrap_or(0);
+            let target_start: usize = fields[7].parse()?;
+            let target_end: usize = fields[8].parse()?;
+            
             // Print PAF row
-            debug!("{}", line);
+            // debug!("{}", line);
             // debug!("Line {}: Query: {}:{}-{}", i + 1, query_name, query_start, query_end);
             // debug!("Line {}: Target: {}:{}-{}", i + 1, target_name, target_start, target_end);
 
@@ -144,9 +146,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 gap_ext2
             );
 
-            let mut aligner = AffineWavefronts::with_penalties_affine2p(0, mismatch, gap_open1, gap_ext1, gap_open2, gap_ext2);
-            let realn_cigar = align_sequences_wfa(&query_seq, &target_seq, &mut aligner);
-            let realn_cigar = cigar_ops_to_cigar_string(&realn_cigar);
+            //let mut aligner = AffineWavefronts::with_penalties_affine2p(0, mismatch, gap_open1, gap_ext1, gap_open2, gap_ext2);
+            //let realn_cigar = align_sequences_wfa(&query_seq, &target_seq, &mut aligner);
+            //let realn_cigar = cigar_ops_to_cigar_string(&realn_cigar);
 
             let (query_end_variable, query_len_variable, target_end_variable, target_len_variable) = calculate_alignment_coordinates(&recon_cigar_variable, query_start, target_start);
             let (query_end_paf, query_len_paf, target_end_paf, target_len_paf) = calculate_alignment_coordinates(paf_cigar, query_start, target_start);
@@ -157,15 +159,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 error!("Line {}: seq. len. mismatch!", i + 1);
             }
 
-            if realn_cigar == recon_cigar_variable {
-                //eprintln!("Line {}: Conversion successful.", i + 1);
-            } else {
-                info!("Line {}: Conversion mismatch! {}", i + 1, line);
-                info!("\t            Tracepoints_variable: {:?}", tracepoints_variable);
-                info!("\t CIGAR from tracepoints_variable: {}", recon_cigar_variable);
-                //info!("\t              CIGAR from the PAF: {}", paf_cigar);
-                info!("\t          CIGAR from realignment: {}", realn_cigar);
-            }
+            // if realn_cigar == recon_cigar_variable {
+            //     //eprintln!("Line {}: Conversion successful.", i + 1);
+            // } else {
+            //     info!("Line {}: Conversion mismatch! {}", i + 1, line);
+            //     info!("\t            Tracepoints_variable: {:?}", tracepoints_variable);
+            //     info!("\t CIGAR from tracepoints_variable: {}", recon_cigar_variable);
+            //     //info!("\t              CIGAR from the PAF: {}", paf_cigar);
+            //     info!("\t          CIGAR from realignment: {}", realn_cigar);
+            // }
         }
     } else {
         // Fallback: run default example if no PAF/FASTA provided.
@@ -389,12 +391,11 @@ fn cigar_to_tracepoints_variable(
                         cur_b_len = 0;
                         cur_diff = 0;
                     }
-                    // Emit a special tracepoint with diff==diff_threshold+1.
                     if op == 'I' {
-                        tracepoints.push((len, 0, diff_threshold + 1));
+                        tracepoints.push((len, 0, len));
                     } else {
                         // op == 'D'
-                        tracepoints.push((0, len, diff_threshold + 1));
+                        tracepoints.push((0, len, len));
                     }
                 } else {
                     // If adding this indel would push the diff over the threshold, flush first.
