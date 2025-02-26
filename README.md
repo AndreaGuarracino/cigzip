@@ -41,7 +41,7 @@ Then, you can build the project using Cargo:
 
 ```shell
 # Point to your pre-built WFA2-lib directory
-export WFA2LIB_PATH=WFA2LIB_PATH="./WFA2-lib"
+export WFA2LIB_PATH="./WFA2-lib"
 
 # Build your project
 cargo build --release

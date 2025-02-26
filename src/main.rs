@@ -4,7 +4,7 @@ use std::io::{BufRead, BufReader};
 use std::fs::File;
 use rust_htslib::faidx::Reader as FastaReader;
 
-use lib_tracepoints::{cigar_to_tracepoints, cigar_to_banded_tracepoints, cigar_from_tracepoints, cigar_from_banded_tracepoints};
+use lib_tracepoints::{cigar_to_tracepoints, cigar_to_banded_tracepoints, tracepoints_to_cigar, banded_tracepoints_to_cigar};
 use lib_wfa2::affine_wavefront::{AffineWavefronts};
 use log::{info, warn, error};
 
@@ -137,7 +137,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
 
             // Reconstruct the CIGAR from tracepoints.
-            let recon_cigar_from_tracepoints = cigar_from_tracepoints(
+            let cigar_from_tracepoints = tracepoints_to_cigar(
                 &tracepoints,
                 &query_seq,
                 &target_seq,
@@ -149,7 +149,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 gap_open2,
                 gap_ext2
             );
-            let recon_cigar_from_banded_tracepoints = cigar_from_banded_tracepoints(
+            let cigar_from_banded_tracepoints = banded_tracepoints_to_cigar(
                 &banded_tracepoints,
                 &query_seq,
                 &target_seq,
@@ -162,33 +162,33 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 gap_ext2
             );
 
-            // let (query_end_variable, query_len_variable, target_end_variable, target_len_variable) = calculate_alignment_coordinates(&recon_cigar_from_tracepoints, query_start, target_start);
-            // let (query_end_variable2, query_len_variable2, target_end_variable2, target_len_variable2) = calculate_alignment_coordinates(&recon_cigar_from_banded_tracepoints, query_start, target_start);
+            // let (query_end_variable, query_len_variable, target_end_variable, target_len_variable) = calculate_alignment_coordinates(&cigar_from_tracepoints, query_start, target_start);
+            // let (query_end_variable2, query_len_variable2, target_end_variable2, target_len_variable2) = calculate_alignment_coordinates(&cigar_from_banded_tracepoints, query_start, target_start);
             // let (query_end_paf, query_len_paf, target_end_paf, target_len_paf) = calculate_alignment_coordinates(paf_cigar, query_start, target_start);
             // if (query_len_paf != query_len_variable) || (target_len_paf != target_len_variable) || (query_end_paf != query_end_variable) || (target_end_paf != target_end_variable) {
-            //     info!("recon_cigar_from_tracepoints {:?}", (query_end_variable, query_len_variable, target_end_variable, target_len_variable));
+            //     info!("cigar_from_tracepoints {:?}", (query_end_variable, query_len_variable, target_end_variable, target_len_variable));
             //     info!("           paf_cigar {:?}", (query_end_paf, query_len_paf, target_end_paf, target_len_paf) );
             //     error!("Line {}: seq. len. mismatch!", line);
             // }
             // if (query_len_paf != query_len_variable2) || (target_len_paf != target_len_variable2) || (query_end_paf != query_end_variable2) || (target_end_paf != target_end_variable2) {
-            //     info!("recon_cigar_from_banded_tracepoints {:?}", (query_end_variable2, query_len_variable2, target_end_variable2, target_len_variable2));
+            //     info!("cigar_from_banded_tracepoints {:?}", (query_end_variable2, query_len_variable2, target_end_variable2, target_len_variable2));
             //     info!("           p af_cigar {:?}", (query_end_paf, query_len_paf, target_end_paf, target_len_paf) );
             //     error!("Line {}: seq. len. mismatch!", line);
             // }
 
-            if recon_cigar_from_tracepoints != recon_cigar_from_banded_tracepoints {
+            if cigar_from_tracepoints != cigar_from_banded_tracepoints {
                 error!("CIGAR mismatch! {}", line);
                 info!("{}", line);
                 info!("\t                   tracepoints: {:?}", tracepoints);
                 info!("\t            banded_tracepoints: {:?}", banded_tracepoints);
                 info!("\t                CIGAR from PAF: {}", paf_cigar);
-                info!("\t        CIGAR from tracepoints: {}", recon_cigar_from_tracepoints);
-                info!("\t CIGAR from banded_tracepoints: {}", recon_cigar_from_banded_tracepoints);
+                info!("\t        CIGAR from tracepoints: {}", cigar_from_tracepoints);
+                info!("\t CIGAR from banded_tracepoints: {}", cigar_from_banded_tracepoints);
                 info!("\t seqa: {}", query_seq);
                 info!("\t seqb: {}", target_seq);
                 info!("               bounds CIGAR from PAF: {:?}", get_cigar_diagonal_bounds(&paf_cigar));
-                info!("       bounds CIGAR from tracepoints: {:?}", get_cigar_diagonal_bounds(&recon_cigar_from_tracepoints));
-                info!("bounds CIGAR from banded_tracepoints: {:?}", get_cigar_diagonal_bounds(&recon_cigar_from_banded_tracepoints));
+                info!("       bounds CIGAR from tracepoints: {:?}", get_cigar_diagonal_bounds(&cigar_from_tracepoints));
+                info!("bounds CIGAR from banded_tracepoints: {:?}", get_cigar_diagonal_bounds(&cigar_from_banded_tracepoints));
             }
         }
     } else {
