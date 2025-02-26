@@ -110,15 +110,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             
             // Fetch query sequence from FASTA.
             let query_seq = if strand == "+" {
-                String::from_utf8(fasta_reader.fetch_seq(query_name, query_start, query_end - 1)?.to_vec())?
+                fasta_reader.fetch_seq(query_name, query_start, query_end - 1)?.to_vec()
             } else {
                 // For reverse strand, fetch the sequence and reverse complement it
-                reverse_complement(&String::from_utf8(
-                    fasta_reader.fetch_seq(query_name, query_start, query_end - 1)?.to_vec()
-                )?)
+                reverse_complement(&fasta_reader.fetch_seq(query_name, query_start, query_end - 1)?.to_vec())
             };
             // Fetch target sequence from FASTA.
-            let target_seq = String::from_utf8(fasta_reader.fetch_seq(target_name, target_start, target_end - 1)?.to_vec())?;
+            let target_seq = fasta_reader.fetch_seq(target_name, target_start, target_end - 1)?.to_vec();
             
             // let mut aligner = AffineWavefronts::with_penalties_affine2p(0, mismatch, gap_open1, gap_ext1, gap_open2, gap_ext2);
             // let realn_cigar = align_sequences_wfa(&query_seq, &target_seq, &mut aligner);
@@ -184,8 +182,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 info!("\t                CIGAR from PAF: {}", paf_cigar);
                 info!("\t        CIGAR from tracepoints: {}", cigar_from_tracepoints);
                 info!("\t CIGAR from banded_tracepoints: {}", cigar_from_banded_tracepoints);
-                info!("\t seqa: {}", query_seq);
-                info!("\t seqb: {}", target_seq);
+                info!("\t seqa: {:?}", String::from_utf8(query_seq));
+                info!("\t seqb: {:?}", String::from_utf8(target_seq));
                 info!("               bounds CIGAR from PAF: {:?}", get_cigar_diagonal_bounds(&paf_cigar));
                 info!("       bounds CIGAR from tracepoints: {:?}", get_cigar_diagonal_bounds(&cigar_from_tracepoints));
                 info!("bounds CIGAR from banded_tracepoints: {:?}", get_cigar_diagonal_bounds(&cigar_from_banded_tracepoints));
@@ -283,15 +281,15 @@ fn get_cigar_diagonal_bounds(cigar: &str) -> (i64, i64) {
 }
 
 /// Returns the reverse complement of a DNA sequence
-fn reverse_complement(seq: &str) -> String {
-    seq.chars()
+fn reverse_complement(seq: &[u8]) -> Vec<u8> {
+    seq.iter()
         .rev()
-        .map(|c| match c {
-            'A' => 'T',
-            'T' => 'A',
-            'G' => 'C',
-            'C' => 'G',
-            'N' => 'N',
+        .map(|&c| match c {
+            b'A' => b'T',
+            b'T' => b'A',
+            b'G' => b'C',
+            b'C' => b'G',
+            b'N' => b'N',
             _ => c  // Keep other characters unchanged
         })
         .collect()
