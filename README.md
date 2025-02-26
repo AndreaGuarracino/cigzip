@@ -31,8 +31,8 @@ This implementation uses variable-sized tracepoints that accumulate bases and di
 You need to build `WFA2-lib` first, which is a submodule of this repository. To do so, run:
 
 ```shell
-git clone --recursive https://github.com/AndreaGuarracino/trace_points
-cd trace_points/WFA2-lib
+git clone --recursive https://github.com/AndreaGuarracino/cigzip
+cd cigzip/WFA2-lib
 make clean all
 cd ..
 ```
@@ -50,8 +50,8 @@ cargo build --release
 ### For GUIX's slaves
 
 ```bash
-git clone --recursive https://github.com/AndreaGuarracino/trace_points
-cd trace_points/WFA2-lib
+git clone --recursive https://github.com/AndreaGuarracino/cigzip
+cd cigzip/WFA2-lib
 guix shell -C -D -f guix.scm
 export CC=gcc; make clean all
 exit

@@ -182,8 +182,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 info!("\t                CIGAR from PAF: {}", paf_cigar);
                 info!("\t        CIGAR from tracepoints: {}", cigar_from_tracepoints);
                 info!("\t CIGAR from banded_tracepoints: {}", cigar_from_banded_tracepoints);
-                info!("\t seqa: {:?}", String::from_utf8(query_seq));
-                info!("\t seqb: {:?}", String::from_utf8(target_seq));
+                info!("\t seqa: {}", String::from_utf8(query_seq).unwrap());
+                info!("\t seqb: {}", String::from_utf8(target_seq).unwrap());
                 info!("               bounds CIGAR from PAF: {:?}", get_cigar_diagonal_bounds(&paf_cigar));
                 info!("       bounds CIGAR from tracepoints: {:?}", get_cigar_diagonal_bounds(&cigar_from_tracepoints));
                 info!("bounds CIGAR from banded_tracepoints: {:?}", get_cigar_diagonal_bounds(&cigar_from_banded_tracepoints));
