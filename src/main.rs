@@ -101,24 +101,114 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 let cigar = &cg_field[5..]; // Direct slice instead of strip_prefix("cg:Z:")
     
                 // Convert CIGAR to tracepoints
-                let (tp_tag, tracepoints_str) = if banded {
+                let tracepoints_str = if banded {
                     let tp = cigar_to_banded_tracepoints(cigar, max_diff);
-                    ("tpb:Z:" , format_banded_tracepoints(&tp))
+                    format_banded_tracepoints(&tp)
                 } else {
                     let tp = cigar_to_tracepoints(cigar, max_diff);
-                    ("tp:Z:", format_tracepoints(&tp))
+                    format_tracepoints(&tp)
                 };
 
-                // Print the original, replacing the CIGAR string with the new tracepoints tag
-                let mut new_line = line.replace(cg_field, &format!("{}{}", tp_tag, tracepoints_str));
+                // Print the original line, replacing the CIGAR string with the new tracepoints tag
+                let new_line = line.replace(cg_field, &format!("tp:Z:{}", tracepoints_str));
                 println!("{}", new_line);
-                
             }
         },
         Args::Decompress { common, fasta, penalties } => {
             setup_logger(common.verbose);
-            info!("Running decompression with FASTA file: {}", fasta);
+            info!("Converting tracepoints to CIGAR");
+
+            // Parse penalties
+            let (mismatch, gap_open1, gap_ext1, gap_open2, gap_ext2) = parse_penalties(&penalties)?;
+
+            // Open the FASTA file
+            let fasta_reader = FastaReader::from_path(&fasta).expect("Error reading FASTA file");
+
+            info!("FASTA file: {}", fasta);
             info!("Penalties: {}", penalties);
+
+            // Open the PAF file (or use stdin if "-" is provided).
+            let reader: Box<dyn BufRead> = if common.paf == "-" {
+                Box::new(BufReader::new(std::io::stdin()))
+            } else {
+                Box::new(BufReader::new(File::open(&common.paf)?))
+            };
+
+            for line in reader.lines() {
+                let line = line?;
+                if line.trim().is_empty() || line.starts_with('#') {
+                    continue;
+                }
+                let fields: Vec<&str> = line.split('\t').collect();
+                if fields.len() < 12 {
+                    warn!("Skipping malformed PAF line: {}", line);
+                    continue;
+                }
+                let Some(tp_field) = fields.iter().find(|&&s| s.starts_with("tp:Z:")) else {
+                    warn!("Skipping tracepoints-less PAF line: {}", line);
+                    continue;
+                };
+                let tracepoints_str = &tp_field[5..]; // Direct slice instead of strip_prefix("tp:Z:")
+    
+                // Parse mandatory PAF fields.
+                let query_name = fields[0];
+                //let query_len: usize = fields[1].parse()?;
+                let query_start: usize = fields[2].parse()?;
+                let query_end: usize = fields[3].parse()?;
+                let strand = fields[4];
+                let target_name = fields[5];
+                //let target_len: usize = fields[6].parse()?;
+                let target_start: usize = fields[7].parse()?;
+                let target_end: usize = fields[8].parse()?;
+
+                // Fetch query sequence from FASTA.
+                let query_seq = if strand == "+" {
+                    fasta_reader.fetch_seq(query_name, query_start, query_end - 1)?.to_vec()
+                } else {
+                    // For reverse strand, fetch the sequence and reverse complement it
+                    reverse_complement(&fasta_reader.fetch_seq(query_name, query_start, query_end - 1)?.to_vec())
+                };
+                // Fetch target sequence from FASTA.
+                let target_seq = fasta_reader.fetch_seq(target_name, target_start, target_end - 1)?.to_vec();
+
+                // Check if the tracepoints are banded or not by checking if the first tracepoint is a tuple of 2 element or 4
+                let is_banded = tracepoints_str.split(';').next().unwrap().split(',').count() == 4;
+
+                // Convert tracepoints to CIGAR
+                let cigar = if is_banded {
+                    let tracepoints = parse_banded_tracepoints(tracepoints_str);
+                    banded_tracepoints_to_cigar(
+                        &tracepoints,
+                        &query_seq,
+                        &target_seq,
+                        0,
+                        0,
+                        mismatch,
+                        gap_open1,
+                        gap_ext1,
+                        gap_open2,
+                        gap_ext2
+                    )
+                } else {
+                    let tracepoints = parse_tracepoints(tracepoints_str);
+                    tracepoints_to_cigar(
+                        &tracepoints,
+                        &query_seq,
+                        &target_seq,
+                        0,
+                        0,
+                        mismatch,
+                        gap_open1,
+                        gap_ext1,
+                        gap_open2,
+                        gap_ext2
+                    )
+                };
+
+                // Print the original line, replacing the tracepoints tag with the CIGAR string
+                let new_line = line.replace(tp_field, &format!("cg:Z:{}", cigar));
+                println!("{}", new_line);
+            }
         },
         Args::Debug { common, fasta, penalties, max_diff } => {
             setup_logger(common.verbose);
@@ -132,16 +222,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 
 
-    // let tokens: Vec<&str> = args.penalties.split(',').collect();
-    // if tokens.len() != 5 {
-    //     error!("Error: penalties must be provided as mismatch,gap_open1,gap_ext1,gap_open2,gap_ext2");
-    //     std::process::exit(1);
-    // }
-    // let mismatch: i32 = tokens[0].parse()?;
-    // let gap_open1: i32 = tokens[1].parse()?;
-    // let gap_ext1: i32 = tokens[2].parse()?;
-    // let gap_open2: i32 = tokens[3].parse()?;
-    // let gap_ext2: i32 = tokens[4].parse()?;
+    // let (mismatch, gap_open1, gap_ext1, gap_open2, gap_ext2) = parse_penalties(&args.penalties)?;
     // info!("Penalties: {},{},{},{},{}", mismatch, gap_open1, gap_ext1, gap_open2, gap_ext2);
 
     // let max_diff = args.max_diff;
@@ -339,6 +420,44 @@ fn format_banded_tracepoints(tracepoints: &[(usize, usize, (isize, isize))]) -> 
         .map(|(a, b, (c, d))| format!("{},{},{},{}", a, b, c, d))
         .collect::<Vec<String>>()
         .join(";")
+}
+
+fn parse_penalties(penalties: &str) -> Result<(i32, i32, i32, i32, i32), Box<dyn std::error::Error>> {
+    let tokens: Vec<&str> = penalties.split(',').collect();
+    if tokens.len() != 5 {
+        error!("Error: penalties must be provided as mismatch,gap_open1,gap_ext1,gap_open2,gap_ext2");
+        std::process::exit(1);
+    }
+    
+    let mismatch: i32 = tokens[0].parse()?;
+    let gap_open1: i32 = tokens[1].parse()?;
+    let gap_ext1: i32 = tokens[2].parse()?;
+    let gap_open2: i32 = tokens[3].parse()?;
+    let gap_ext2: i32 = tokens[4].parse()?;
+    
+    Ok((mismatch, gap_open1, gap_ext1, gap_open2, gap_ext2))
+}
+
+fn parse_tracepoints(tp_str: &str) -> Vec<(usize, usize)> {
+    tp_str.split(';')
+        .filter_map(|s| {
+            let parts: Vec<&str> = s.split(',').collect();
+            Some((
+                parts[0].parse().unwrap(),
+                parts[1].parse().unwrap(),
+            ))
+        }).collect()
+}
+fn parse_banded_tracepoints(tp_str: &str) -> Vec<(usize, usize, (isize, isize))> {
+    tp_str.split(';')
+        .filter_map(|s| {
+            let parts: Vec<&str> = s.split(',').collect();
+            Some((
+                parts[0].parse().unwrap(),
+                parts[1].parse().unwrap(),
+                (parts[2].parse().unwrap(), parts[3].parse().unwrap()),
+            ))
+        }).collect()
 }
 
 fn get_cigar_diagonal_bounds(cigar: &str) -> (i64, i64) {
