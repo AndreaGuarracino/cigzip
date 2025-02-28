@@ -1,13 +1,11 @@
-use core::panic;
 use clap::Parser;
-use std::io::{BufRead, BufReader};
+use std::io::{self, BufRead, BufReader};
 use std::fs::File;
+use flate2::read::GzDecoder;
 use rust_htslib::faidx::Reader as FastaReader;
-
 use lib_tracepoints::{cigar_to_tracepoints, cigar_to_banded_tracepoints, tracepoints_to_cigar, banded_tracepoints_to_cigar};
 use lib_wfa2::affine_wavefront::{AffineWavefronts};
 use log::{info, warn, error};
-
 use rayon::prelude::*;
 
 /// Common options shared between all commands
@@ -95,17 +93,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 .build_global()?;
 
             // Open the PAF file (or use stdin if "-" is provided).
-            let reader: Box<dyn BufRead> = if common.paf == "-" {
-                Box::new(BufReader::new(std::io::stdin()))
-            } else {
-                Box::new(BufReader::new(File::open(&common.paf)?))
-            };
+            let paf_reader = get_paf_reader(&common.paf)?;
 
             // Process in chunks
             const CHUNK_SIZE: usize = 1000;
             let mut lines = Vec::with_capacity(CHUNK_SIZE);
             
-            for line_result in reader.lines() {
+            for line_result in paf_reader.lines() {
                 match line_result {
                     Ok(line) => {
                         if line.trim().is_empty() || line.starts_with('#') {
@@ -142,17 +136,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             let (mismatch, gap_open1, gap_ext1, gap_open2, gap_ext2) = parse_penalties(&penalties)?;
 
             // Open the PAF file (or use stdin if "-" is provided).
-            let reader: Box<dyn BufRead> = if common.paf == "-" {
-                Box::new(BufReader::new(std::io::stdin()))
-            } else {
-                Box::new(BufReader::new(File::open(&common.paf)?))
-            };
+            let paf_reader = get_paf_reader(&common.paf)?;
 
             // Process in chunks
             const CHUNK_SIZE: usize = 1000;
             let mut lines = Vec::with_capacity(CHUNK_SIZE);
 
-            for line_result in reader.lines() {
+            for line_result in paf_reader.lines() {
                 match line_result {
                     Ok(line) => {
                         if line.trim().is_empty() || line.starts_with('#') {
@@ -383,6 +373,19 @@ fn setup_logger(verbosity: u8) {
             _ => log::LevelFilter::Debug,
         })
         .init();
+}
+
+fn get_paf_reader(paf: &str) -> io::Result<Box<dyn BufRead>> {
+    if paf == "-" {
+        Ok(Box::new(BufReader::new(std::io::stdin())))
+    } else if paf.ends_with(".gz") || paf.ends_with(".bgz") {
+        let file = File::open(paf)?;
+        let decoder = GzDecoder::new(file);
+        Ok(Box::new(BufReader::new(decoder)))
+    } else {
+        let file = File::open(paf)?;
+        Ok(Box::new(BufReader::new(file)))
+    }
 }
 
 /// Process a chunk of lines in parallel for compression
