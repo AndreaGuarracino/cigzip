@@ -1,30 +1,28 @@
-# Alignment-tracepoints
+# cigzip
 
-A Rust implementation for alignment reconstruction that uses variable‐sized tracepoints to efficiently store and rebuild full CIGAR strings.
+A tool for compression and decompression of alignment CIGAR strings using tracepoints.
 
 ## Overview
-This project implements an efficient approach to sequence alignment storage using variable-sized tracepoints. Instead of storing complete CIGAR strings or using fixed intervals, alignments are recorded as tracepoints that adapt their size based on the local alignment complexity. This approach achieves:
 
-Key benefits:
- - **Space Efficiency:** Significant reduction in alignment storage size.
- - **Reconstruction Speed:** Fast recovery of full alignment details.
- - **Flexibility:** Adjustable tracepoint intervals (delta) to balance storage vs. runtime.
-
-This design is inspired by Gene Myers' original tracepoint concept and extended here with multiple alignment algorithms.
+`cigzip` implements an efficient approach to sequence alignment storage using variable-sized tracepoints. Instead of storing complete CIGAR strings, alignments are compressed into tracepoints that adapt to the local alignment complexity, reducing storage size while allowing for full reconstruction.
 
 ## Features
 
-- **Variable-sized Tracepoints:** Convert CIGAR strings into variable‐sized tracepoints that adapt based on a configurable diff threshold.
-- **CIGAR Operations:** Parse and generate extended format CIGAR strings (including =, X, I, D, M).
-- **Efficient Storage:** Compact representation that adapts to local alignment complexity.
-- **Accurate Reconstruction:** Rebuild full CIGAR strings from tracepoint data using WFA2-lib.
+- **Compression**: Convert CIGAR strings to tracepoints for compact storage
+- **Decompression**: Reconstruct full CIGAR strings from tracepoints
+- **Banded Tracepoints**: Tracepoint representation for faster decompression
+- **Parallel Processing**: Multi-threaded operation
+- **Configurable Parameters**: Adjust max-diff, gap penalties, and other settings
 
-## How It Works
-This implementation uses variable-sized tracepoints that accumulate bases and differences until reaching a configurable diff threshold. Longer indels trigger special handling, ensuring that the reconstructed CIGAR string is accurate while minimizing storage. Each tracepoint stores:
+## Usage
 
-- The number of bases consumed in sequence A
-- The number of bases consumed in sequence B  
-- The number of differences in that segment
+```shell
+# Compress alignments in a PAF file (convert CIGAR to tracepoints)
+cigzip compress --paf alignments.paf [--banded] [--max-diff 128] [--threads 4] > alignments.tp.paf
+
+# Decompress alignments (convert tracepoints back to CIGAR)
+cigzip decompress --paf alignments.tp.paf --fasta sequences.fa [--penalties "3,4,2,24,1"] [--threads 4] > alignments.cigar.paf
+```
 
 ## Building
 
