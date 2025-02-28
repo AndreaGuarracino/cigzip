@@ -485,7 +485,11 @@ fn process_decompress_chunk(
         // Fetch query sequence
         let query_seq = if strand == "+" {
             match fasta_reader.fetch_seq(query_name, query_start, query_end - 1) {
-                Ok(seq) => seq.to_vec(),
+                Ok(seq) => {
+                    let mut seq_vec = seq.to_vec();
+                    seq_vec.iter_mut().for_each(|byte| *byte = byte.to_ascii_uppercase());
+                    seq_vec
+                },
                 Err(e) => {
                     warn!("Failed to fetch query sequence: {}", e);
                     return;
@@ -493,7 +497,11 @@ fn process_decompress_chunk(
             }
         } else {
             match fasta_reader.fetch_seq(query_name, query_start, query_end - 1) {
-                Ok(seq) => reverse_complement(&seq.to_vec()),
+                Ok(seq) => {
+                    let mut rc = reverse_complement(&seq.to_vec());
+                    rc.iter_mut().for_each(|byte| *byte = byte.to_ascii_uppercase());
+                    rc
+                },
                 Err(e) => {
                     warn!("Failed to fetch query sequence: {}", e);
                     return;
@@ -503,7 +511,11 @@ fn process_decompress_chunk(
 
         // Fetch target sequence
         let target_seq = match fasta_reader.fetch_seq(target_name, target_start, target_end - 1) {
-            Ok(seq) => seq.to_vec(),
+            Ok(seq) => {
+                let mut seq_vec = seq.to_vec();
+                seq_vec.iter_mut().for_each(|byte| *byte = byte.to_ascii_uppercase());
+                seq_vec
+            },
             Err(e) => {
                 warn!("Failed to fetch target sequence: {}", e);
                 return;
