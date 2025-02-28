@@ -8,6 +8,8 @@ use lib_tracepoints::{cigar_to_tracepoints, cigar_to_banded_tracepoints, tracepo
 use lib_wfa2::affine_wavefront::{AffineWavefronts};
 use log::{info, warn, error};
 
+use rayon::prelude::*;
+
 /// Common options shared between all commands
 #[derive(Parser, Debug)]
 struct CommonOpts {
@@ -15,6 +17,10 @@ struct CommonOpts {
     #[arg(short = 'p', long = "paf")]
     paf: String,
 
+    /// Number of threads to use (default: 2)
+    #[arg(short = 't', long = "threads", default_value_t = 2)]
+    threads: usize,
+    
     /// Verbosity level (0 = error, 1 = info, 2 = debug)
     #[arg(short, long, default_value = "0")]
     verbose: u8,
@@ -83,6 +89,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             setup_logger(common.verbose);
             info!("Converting CIGAR to {} tracepoints", if banded { "banded" } else { "basic" });
 
+            // Set the thread pool size
+            rayon::ThreadPoolBuilder::new()
+                .num_threads(common.threads)
+                .build_global()?;
+
             // Open the PAF file (or use stdin if "-" is provided).
             let reader: Box<dyn BufRead> = if common.paf == "-" {
                 Box::new(BufReader::new(std::io::stdin()))
@@ -90,45 +101,45 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 Box::new(BufReader::new(File::open(&common.paf)?))
             };
 
-            for line in reader.lines() {
-                let line = line?;
-                if line.trim().is_empty() || line.starts_with('#') {
-                    continue;
+            // Process in chunks
+            const CHUNK_SIZE: usize = 1000;
+            let mut lines = Vec::with_capacity(CHUNK_SIZE);
+            
+            for line_result in reader.lines() {
+                match line_result {
+                    Ok(line) => {
+                        if line.trim().is_empty() || line.starts_with('#') {
+                            continue;
+                        }
+                        
+                        lines.push(line);
+                        
+                        if lines.len() >= CHUNK_SIZE {
+                            // Process current chunk in parallel
+                            process_compress_chunk(&lines, banded, max_diff);
+                            lines.clear();
+                        }
+                    },
+                    Err(e) => return Err(e.into()),
                 }
-                let fields: Vec<&str> = line.split('\t').collect();
-                if fields.len() < 12 {
-                    warn!("Skipping malformed PAF line: {}", line);
-                    continue;
-                }
-                let Some(cg_field) = fields.iter().find(|&&s| s.starts_with("cg:Z:")) else {
-                    warn!("Skipping CIGAR-less PAF line: {}", line);
-                    continue;
-                };
-                let cigar = &cg_field[5..]; // Direct slice instead of strip_prefix("cg:Z:")
-    
-                // Convert CIGAR to tracepoints
-                let tracepoints_str = if banded {
-                    let tp = cigar_to_banded_tracepoints(cigar, max_diff);
-                    format_banded_tracepoints(&tp)
-                } else {
-                    let tp = cigar_to_tracepoints(cigar, max_diff);
-                    format_tracepoints(&tp)
-                };
-
-                // Print the original line, replacing the CIGAR string with the new tracepoints tag
-                let new_line = line.replace(cg_field, &format!("tp:Z:{}", tracepoints_str));
-                println!("{}", new_line);
+            }
+            
+            // Process remaining lines
+            if !lines.is_empty() {
+                process_compress_chunk(&lines, banded, max_diff);
             }
         },
         Args::Decompress { common, fasta, penalties } => {
             setup_logger(common.verbose);
             info!("Converting tracepoints to CIGAR");
 
+            // Set the thread pool size
+            rayon::ThreadPoolBuilder::new()
+                .num_threads(common.threads)
+                .build_global()?;
+
             // Parse penalties
             let (mismatch, gap_open1, gap_ext1, gap_open2, gap_ext2) = parse_penalties(&penalties)?;
-
-            // Open the FASTA file
-            let fasta_reader = FastaReader::from_path(&fasta).expect("Error reading FASTA file");
 
             // Open the PAF file (or use stdin if "-" is provided).
             let reader: Box<dyn BufRead> = if common.paf == "-" {
@@ -137,80 +148,48 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 Box::new(BufReader::new(File::open(&common.paf)?))
             };
 
-            for line in reader.lines() {
-                let line = line?;
-                if line.trim().is_empty() || line.starts_with('#') {
-                    continue;
+            // Process in chunks
+            const CHUNK_SIZE: usize = 1000;
+            let mut lines = Vec::with_capacity(CHUNK_SIZE);
+
+            for line_result in reader.lines() {
+                match line_result {
+                    Ok(line) => {
+                        if line.trim().is_empty() || line.starts_with('#') {
+                            continue;
+                        }
+                        
+                        lines.push(line);
+                        
+                        if lines.len() >= CHUNK_SIZE {
+                            // Process current chunk in parallel
+                            process_decompress_chunk(
+                                &lines, 
+                                &fasta, 
+                                mismatch, 
+                                gap_open1, 
+                                gap_ext1, 
+                                gap_open2, 
+                                gap_ext2
+                            );
+                            lines.clear();
+                        }
+                    },
+                    Err(e) => return Err(e.into()),
                 }
-                let fields: Vec<&str> = line.split('\t').collect();
-                if fields.len() < 12 {
-                    warn!("Skipping malformed PAF line: {}", line);
-                    continue;
-                }
-                let Some(tp_field) = fields.iter().find(|&&s| s.starts_with("tp:Z:")) else {
-                    warn!("Skipping tracepoints-less PAF line: {}", line);
-                    continue;
-                };
-                let tracepoints_str = &tp_field[5..]; // Direct slice instead of strip_prefix("tp:Z:")
-    
-                // Parse mandatory PAF fields.
-                let query_name = fields[0];
-                //let query_len: usize = fields[1].parse()?;
-                let query_start: usize = fields[2].parse()?;
-                let query_end: usize = fields[3].parse()?;
-                let strand = fields[4];
-                let target_name = fields[5];
-                //let target_len: usize = fields[6].parse()?;
-                let target_start: usize = fields[7].parse()?;
-                let target_end: usize = fields[8].parse()?;
-
-                // Fetch query sequence from FASTA.
-                let query_seq = if strand == "+" {
-                    fasta_reader.fetch_seq(query_name, query_start, query_end - 1)?.to_vec()
-                } else {
-                    // For reverse strand, fetch the sequence and reverse complement it
-                    reverse_complement(&fasta_reader.fetch_seq(query_name, query_start, query_end - 1)?.to_vec())
-                };
-                // Fetch target sequence from FASTA.
-                let target_seq = fasta_reader.fetch_seq(target_name, target_start, target_end - 1)?.to_vec();
-
-                // Check if the tracepoints are banded or not by checking if the first tracepoint is a tuple of 2 element or 4
-                let is_banded = tracepoints_str.split(';').next().unwrap().split(',').count() == 4;
-
-                // Convert tracepoints to CIGAR
-                let cigar = if is_banded {
-                    let tracepoints = parse_banded_tracepoints(tracepoints_str);
-                    banded_tracepoints_to_cigar(
-                        &tracepoints,
-                        &query_seq,
-                        &target_seq,
-                        0,
-                        0,
-                        mismatch,
-                        gap_open1,
-                        gap_ext1,
-                        gap_open2,
-                        gap_ext2
-                    )
-                } else {
-                    let tracepoints = parse_tracepoints(tracepoints_str);
-                    tracepoints_to_cigar(
-                        &tracepoints,
-                        &query_seq,
-                        &target_seq,
-                        0,
-                        0,
-                        mismatch,
-                        gap_open1,
-                        gap_ext1,
-                        gap_open2,
-                        gap_ext2
-                    )
-                };
-
-                // Print the original line, replacing the tracepoints tag with the CIGAR string
-                let new_line = line.replace(tp_field, &format!("cg:Z:{}", cigar));
-                println!("{}", new_line);
+            }
+            
+            // Process remaining lines
+            if !lines.is_empty() {
+                process_decompress_chunk(
+                    &lines, 
+                    &fasta, 
+                    mismatch, 
+                    gap_open1, 
+                    gap_ext1, 
+                    gap_open2, 
+                    gap_ext2
+                );
             }
         },
         #[cfg(debug_assertions)]
@@ -404,6 +383,168 @@ fn setup_logger(verbosity: u8) {
             _ => log::LevelFilter::Debug,
         })
         .init();
+}
+
+/// Process a chunk of lines in parallel for compression
+fn process_compress_chunk(lines: &[String], banded: bool, max_diff: usize) {
+    lines.par_iter().for_each(|line| {
+        let fields: Vec<&str> = line.split('\t').collect();
+        if fields.len() < 12 {
+            warn!("Skipping malformed PAF line: {}", line);
+            return;
+        }
+        
+        let Some(cg_field) = fields.iter().find(|&&s| s.starts_with("cg:Z:")) else {
+            warn!("Skipping CIGAR-less PAF line: {}", line);
+            return;
+        };
+        let cigar = &cg_field[5..]; // Direct slice instead of strip_prefix("cg:Z:")
+        
+        // Convert CIGAR to tracepoints
+        let tracepoints_str = if banded {
+            let tp = cigar_to_banded_tracepoints(cigar, max_diff);
+            format_banded_tracepoints(&tp)
+        } else {
+            let tp = cigar_to_tracepoints(cigar, max_diff);
+            format_tracepoints(&tp)
+        };
+        
+        // Print the result
+        let new_line = line.replace(cg_field, &format!("tp:Z:{}", tracepoints_str));
+        println!("{}", new_line); // It is thread-safe by default
+    });
+}
+/// Process a chunk of lines in parallel for decompression
+fn process_decompress_chunk(
+    lines: &[String], 
+    fasta_path: &str, 
+    mismatch: i32, 
+    gap_open1: i32, 
+    gap_ext1: i32, 
+    gap_open2: i32, 
+    gap_ext2: i32
+) {
+    lines.par_iter().for_each(|line| {
+        let fields: Vec<&str> = line.split('\t').collect();
+        if fields.len() < 12 {
+            warn!("Skipping malformed PAF line: {}", line);
+            return;
+        }
+        
+        let Some(tp_field) = fields.iter().find(|&&s| s.starts_with("tp:Z:")) else {
+            warn!("Skipping tracepoints-less PAF line: {}", line);
+            return;
+        };
+        let tracepoints_str = &tp_field[5..]; // Direct slice instead of strip_prefix("tp:Z:")
+        
+        // Parse mandatory PAF fields
+        let query_name = fields[0];
+        let query_start: usize = match fields[2].parse() {
+            Ok(val) => val,
+            Err(_) => {
+                warn!("Invalid query_start in PAF line: {}", line);
+                return;
+            }
+        };
+        let query_end: usize = match fields[3].parse() {
+            Ok(val) => val,
+            Err(_) => {
+                warn!("Invalid query_end in PAF line: {}", line);
+                return;
+            }
+        };
+        let strand = fields[4];
+        let target_name = fields[5];
+        let target_start: usize = match fields[7].parse() {
+            Ok(val) => val,
+            Err(_) => {
+                warn!("Invalid target_start in PAF line: {}", line);
+                return;
+            }
+        };
+        let target_end: usize = match fields[8].parse() {
+            Ok(val) => val,
+            Err(_) => {
+                warn!("Invalid target_end in PAF line: {}", line);
+                return;
+            }
+        };
+
+        // Create a thread-local FASTA reader
+        let fasta_reader = match FastaReader::from_path(fasta_path) {
+            Ok(reader) => reader,
+            Err(e) => {
+                error!("Failed to create FASTA reader: {}", e);
+                return;
+            }
+        };
+
+        // Fetch query sequence
+        let query_seq = if strand == "+" {
+            match fasta_reader.fetch_seq(query_name, query_start, query_end - 1) {
+                Ok(seq) => seq.to_vec(),
+                Err(e) => {
+                    warn!("Failed to fetch query sequence: {}", e);
+                    return;
+                }
+            }
+        } else {
+            match fasta_reader.fetch_seq(query_name, query_start, query_end - 1) {
+                Ok(seq) => reverse_complement(&seq.to_vec()),
+                Err(e) => {
+                    warn!("Failed to fetch query sequence: {}", e);
+                    return;
+                }
+            }
+        };
+
+        // Fetch target sequence
+        let target_seq = match fasta_reader.fetch_seq(target_name, target_start, target_end - 1) {
+            Ok(seq) => seq.to_vec(),
+            Err(e) => {
+                warn!("Failed to fetch target sequence: {}", e);
+                return;
+            }
+        };
+
+        // Check if the tracepoints are banded or not
+        let is_banded = tracepoints_str.split(';').next().unwrap().split(',').count() == 4;
+        
+        // Convert tracepoints to CIGAR
+        let cigar = if is_banded {
+            let tracepoints = parse_banded_tracepoints(tracepoints_str);
+            banded_tracepoints_to_cigar(
+                &tracepoints,
+                &query_seq,
+                &target_seq,
+                0,
+                0,
+                mismatch,
+                gap_open1,
+                gap_ext1,
+                gap_open2,
+                gap_ext2
+            )
+        } else {
+            let tracepoints = parse_tracepoints(tracepoints_str);
+            tracepoints_to_cigar(
+                &tracepoints,
+                &query_seq,
+                &target_seq,
+                0,
+                0,
+                mismatch,
+                gap_open1,
+                gap_ext1,
+                gap_open2,
+                gap_ext2
+            )
+        };
+
+        // Print the original line, replacing the tracepoints tag with the CIGAR string
+        let new_line = line.replace(tp_field, &format!("cg:Z:{}", cigar));
+        println!("{}", new_line);
+    });
 }
 
 fn format_tracepoints(tracepoints: &[(usize, usize)]) -> String {
