@@ -3,9 +3,9 @@ use std::io::{self, BufRead, BufReader};
 use std::fs::File;
 use flate2::read::GzDecoder;
 use rust_htslib::faidx::Reader as FastaReader;
-use lib_tracepoints::{cigar_to_tracepoints, cigar_to_banded_tracepoints, tracepoints_to_cigar, banded_tracepoints_to_cigar};
+use lib_tracepoints::{cigar_to_tracepoints, cigar_to_banded_tracepoints, tracepoints_to_cigar, banded_tracepoints_to_cigar, align_sequences_wfa, cigar_ops_to_cigar_string};
 use lib_wfa2::affine_wavefront::{AffineWavefronts};
-use log::{info, warn, error};
+use log::{info, error};
 use rayon::prelude::*;
 
 /// Common options shared between all commands
@@ -191,33 +191,29 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             if let (Some(paf), Some(fasta)) = (paf, fasta) {
                 info!("PAF file: {}", paf);
                 info!("FASTA file: {}", fasta);
-                info!("Penalties: {}", penalties);
 
                 // Open the FASTA file
                 let fasta_reader = FastaReader::from_path(&fasta).expect("Error reading FASTA file");
 
                 // Open the PAF file (or use stdin if "-" is provided).
-                let reader: Box<dyn BufRead> = if paf == "-" {
-                    Box::new(BufReader::new(std::io::stdin()))
-                } else {
-                    Box::new(BufReader::new(File::open(&paf)?))
-                };
+                let paf_reader = get_paf_reader(&paf)?;
 
-                for line in reader.lines() {
+                for line in paf_reader.lines() {
                     let line = line?;
                     if line.trim().is_empty() || line.starts_with('#') {
                         continue;
                     }
                     let fields: Vec<&str> = line.split('\t').collect();
                     if fields.len() < 12 {
-                        warn!("Skipping malformed PAF line: {}", line);
-                        continue;
+                        error!("{}", message_with_truncate_paf_file("Skipping malformed PAF line", &line));
+                        std::process::exit(1);
                     }
+                    
                     let Some(cg_field) = fields.iter().find(|&&s| s.starts_with("cg:Z:")) else {
-                        warn!("Skipping CIGAR-less PAF line: {}", line);
-                        continue;
+                        error!("{}", message_with_truncate_paf_file("Skipping CIGAR-less PAF line", &line));
+                        std::process::exit(1);
                     };
-                    let paf_cigar = &cg_field[5..]; // Direct slice instead of strip_prefix("cg:Z:")
+                    let _paf_cigar = &cg_field[5..]; // Direct slice instead of strip_prefix("cg:Z:")
 
                     // Parse mandatory PAF fields.
                     let query_name = fields[0];
@@ -230,20 +226,50 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     let target_start: usize = fields[7].parse()?;
                     let target_end: usize = fields[8].parse()?;
                     
-                    // Fetch query sequence from FASTA.
+                    // Fetch query sequence
                     let query_seq = if strand == "+" {
-                        fasta_reader.fetch_seq(query_name, query_start, query_end - 1)?.to_vec()
+                        match fasta_reader.fetch_seq(query_name, query_start, query_end - 1) {
+                            Ok(seq) => {
+                                let mut seq_vec = seq.to_vec();
+                                seq_vec.iter_mut().for_each(|byte| *byte = byte.to_ascii_uppercase());
+                                seq_vec
+                            },
+                            Err(e) => {
+                                error!("Failed to fetch query sequence: {}", e);
+                                std::process::exit(1);
+                            }
+                        }
                     } else {
-                        // For reverse strand, fetch the sequence and reverse complement it
-                        reverse_complement(&fasta_reader.fetch_seq(query_name, query_start, query_end - 1)?.to_vec())
+                        match fasta_reader.fetch_seq(query_name, query_start, query_end - 1) {
+                            Ok(seq) => {
+                                let mut rc = reverse_complement(&seq.to_vec());
+                                rc.iter_mut().for_each(|byte| *byte = byte.to_ascii_uppercase());
+                                rc
+                            },
+                            Err(e) => {
+                                error!("Failed to fetch query sequence: {}", e);
+                                std::process::exit(1);
+                            }
+                        }
                     };
-                    // Fetch target sequence from FASTA.
-                    let target_seq = fasta_reader.fetch_seq(target_name, target_start, target_end - 1)?.to_vec();
-                    
-                    // let mut aligner = AffineWavefronts::with_penalties_affine2p(0, mismatch, gap_open1, gap_ext1, gap_open2, gap_ext2);
-                    // let realn_cigar = align_sequences_wfa(&query_seq, &target_seq, &mut aligner);
-                    // let realn_cigar = cigar_ops_to_cigar_string(&realn_cigar);
-                    // let paf_cigar = &realn_cigar;
+
+                    // Fetch target sequence
+                    let target_seq = match fasta_reader.fetch_seq(target_name, target_start, target_end - 1) {
+                        Ok(seq) => {
+                            let mut seq_vec = seq.to_vec();
+                            seq_vec.iter_mut().for_each(|byte| *byte = byte.to_ascii_uppercase());
+                            seq_vec
+                        },
+                        Err(e) => {
+                            error!("Failed to fetch target sequence: {}", e);
+                            std::process::exit(1);
+                        }
+                    };
+
+                    let mut aligner = AffineWavefronts::with_penalties_affine2p(0, mismatch, gap_open1, gap_ext1, gap_open2, gap_ext2);
+                    let realn_cigar = align_sequences_wfa(&query_seq, &target_seq, &mut aligner);
+                    let realn_cigar = cigar_ops_to_cigar_string(&realn_cigar);
+                    let paf_cigar = &realn_cigar;
 
                     // Convert CIGAR to tracepoints using query (A) and target (B) coordinates.
                     let tracepoints = cigar_to_tracepoints(paf_cigar, max_diff);
@@ -254,6 +280,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         error!("Tracepoints mismatch! {}", line);
                         error!("\t       tracepoints: {:?}", tracepoints);
                         error!("\tbanded_tracepoints: {:?}", banded_tracepoints);
+                        std::process::exit(1);
                     }
 
                     // Reconstruct the CIGAR from tracepoints.
@@ -298,28 +325,34 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
                     if cigar_from_tracepoints != cigar_from_banded_tracepoints {
                         error!("CIGAR mismatch! {}", line);
-                        info!("{}", line);
-                        info!("\t                   tracepoints: {:?}", tracepoints);
-                        info!("\t            banded_tracepoints: {:?}", banded_tracepoints);
-                        info!("\t                CIGAR from PAF: {}", paf_cigar);
-                        info!("\t        CIGAR from tracepoints: {}", cigar_from_tracepoints);
-                        info!("\t CIGAR from banded_tracepoints: {}", cigar_from_banded_tracepoints);
-                        info!("\t seqa: {}", String::from_utf8(query_seq).unwrap());
-                        info!("\t seqb: {}", String::from_utf8(target_seq).unwrap());
-                        info!("               bounds CIGAR from PAF: {:?}", get_cigar_diagonal_bounds(&paf_cigar));
-                        info!("       bounds CIGAR from tracepoints: {:?}", get_cigar_diagonal_bounds(&cigar_from_tracepoints));
-                        info!("bounds CIGAR from banded_tracepoints: {:?}", get_cigar_diagonal_bounds(&cigar_from_banded_tracepoints));
+                        error!("\t                   tracepoints: {:?}", tracepoints);
+                        error!("\t            banded_tracepoints: {:?}", banded_tracepoints);
+                        error!("\t                CIGAR from PAF: {}", paf_cigar);
+                        error!("\t        CIGAR from tracepoints: {}", cigar_from_tracepoints);
+                        error!("\t CIGAR from banded_tracepoints: {}", cigar_from_banded_tracepoints);
+                        error!("\t seqa: {}", String::from_utf8(query_seq).unwrap());
+                        error!("\t seqb: {}", String::from_utf8(target_seq).unwrap());
+                        error!("               bounds CIGAR from PAF: {:?}", get_cigar_diagonal_bounds(&paf_cigar));
+                        error!("       bounds CIGAR from tracepoints: {:?}", get_cigar_diagonal_bounds(&cigar_from_tracepoints));
+                        error!("bounds CIGAR from banded_tracepoints: {:?}", get_cigar_diagonal_bounds(&cigar_from_banded_tracepoints));
+
+                        let (deviation, d_min, d_max, max_gap) = compute_deviation(&cigar_from_tracepoints);
+                        error!("               deviation CIGAR from PAF: {:?}", compute_deviation(&paf_cigar));
+                        error!("       deviation CIGAR from tracepoints: {:?}", (deviation, d_min, d_max, max_gap));
+                        error!("deviation CIGAR from banded_tracepoints: {:?}", compute_deviation(&cigar_from_banded_tracepoints));
+                        error!("=> Try using --wfa-heuristic=banded-static --wfa-heuristic-parameters=-{},{}\n", std::cmp::max(max_gap, -d_min), std::cmp::max(max_gap, d_max));
+                        std::process::exit(1);
                     }
                 }
             } else {
                 // Fallback: run default example if no PAF/FASTA provided.
                 info!("No PAF and FASTA provided, running default example.");
 
-                let a = get_cigar_diagonal_bounds("514M1D366M1X104M1X92M1X197M1X261M3I664M1X126M1X17M1X572M1X525M1X234M5D320M1X584M1X221M1X64M1X231M1X971M1X586M1X324M1X305M1X344M1X38M1X14M1X109M1X283M1X211M1X1011M1X77M1X33M1X136M1X1190M1X779M1X302M1X420M1X539M1X317M1X2M1X782M1X425M1X496M1X35M1X723M1X146M1X77M1X454M1X16M2D8M1X146M2X14M1X208M158I15M1X6M1X4M2X5M1X2M1X3M2X3M2X1M1X22M1I2M1X6M2X2M1X1M1X7M3X6M2X1M1X4M1X10M2X25M1D6M5D10M1X1M2I4M2X1M235D1M");
+                let a = get_cigar_diagonal_bounds("1I5=1I10=4I11=1X3=3I25=1I3=1I16=1D6=2X3=1D7=1I8=3I19=7I32=1X1=15I2=1X15=2X11=1D3X10=1X3=1X7=1D14=1X15=1X1=1X2=1X8=1I14=1X5=1X15=1X3=5I50=1X1=1X11=1X5=1X18=1X6=2X11=1D4=1X16=1X5=1X2=1D4=1D1X6=1X2=1X19=2X2=11D4=1X4=1X20=1X2=2I8=1X29=1I1=1X22=1X6=3X8=1D2=1X16=1D20=1X41=1X5=1X22=1X2=1X31=1X28=1X7=1X2=1X32=1X10=1X12=1X37=1X17=2X8=1X1=1X7=1X4=3X13=1I22=1X4=1X7=1X19=1X12=1X21=1X3=1X2=1X2=1X11=1X26=1D4=1X3=1X6=1X5=1X3=1X3=2X1=1X29=2D12=1X15=1X1=1X44=1X1=1X3=1X10=1X14=1X1=1X7=1X4=1X1=1X4=1X12=1X3=1X2=1X1=1X12=1X20=1X1=1X4=2I1X1=1X53=1X5=1X8=1X12=1X20=1X4=4D2X4=1X3=1X21=1X2=1D1X2=1X1=1D1X1=1X2=1X1=3X1=1X1=1X1=1X1=1X1=1I2=1X1=1X2=1X1=2X2=2X1=9I1=1X2=5X1=2X1=1X3=1X1=1X5=1I1=2X1=1X5=2I3X2=1X2=2X2=1X2=1D1=1X7=2X1=1X1=3X1=3X1=1X1=1X1=1I4=9I1X3=1X1=1X1=1X2=2X2=1D1X8=1X6=8D4=2X2=7X3=3X2=1X1=3D4=1X1=2X4=1X1=1D1=1X1=3X1=2X2=3X1=1X2=3X1=4X2=3X1=2X1=2X1=1I3=1I5=4I1X6=5D4=1X2=3D3=1X2=9D4=1D1X2=2X2=4D2X1=2X6=2I4=3X4=1X1=2X1=4X2=1D1X3=1X3=2X2=1X1=2D2X1=1X1=1X1=1X1=1X3=1X3=1X1=1X1=11X2=1X5=2D3=1X2=2X2=4X3=1I2=3I1X4=3X1=1X1=1X4=1X2=9I6=3X1=1X3=1X1=4I1X3=3X3=1X1=1X2=9I2=1X2=2I3=1X2=1D1X1=2X6=2X1=3I2=1X1=2X2=2X1=2X2=3X1=3X1=1X2=2X3=2X1=3D3X4=2X2=2X1=2D1X1=1X1=1X2=3X1=2X1=1I3X4=2X1=1X1=3X2=4X1=2X3=2X1=1X1=5X1=1X1=5X3=1I2X4=2X2=3I4=1X2=1X2=1I2X4=1X3=5I1=1X1=2X4=2X1=2X1=1X3=5X2=1D5=4X1=3X1=4X1I2=1X1=1X1=1X1=1X2=1X3=1D1=1X2=1X1=1X1=3X4=1X1=1D2=2D4X2=2X4=1X1=2D1=1X2=5D1=1X3=1X2=2X2=1X2=5D1=2X1=1X3=2X1=2X2=2X2=3X2=1X2=1I1X1=1X3=1X2=2X1=3I2=3I4=1X3=1X1=1X2=5I3=1X1=2X1I5=1X2=1X3I1=1X4=2I2=2X1=1X1=1X2=2X1=1X1=3X1=1X3=1X2=4D1X2=3X1=2X1=1X4=2X1=2I1X3=1X2=1X2=3D1=1X1=1X1=1X2=3X1=1X3=4D2=2X2=3X5=3D1X3=4D2=2X4=1D7=2I1=2X3=7D3=5D2=1X2=1X3=1X2=3X1=4X4=2X2=2I1X1=1X3=3X2=1X1=1X2=2I1=2X1=2X3=1X2=2D1=2X3=1I1=1X1=1X3=2X1=2X1=1X3=2I4=4I1X4=1X4=2D1=1X1=3X2=1X1=2D1=1X1=2X4=4D1=2X2=2X1=6X5=2X1=3X2=2D2=2X2=5D2X2=1X4=1I1X1=1X4=2D1=1X1=2X1=1X1=1X2=2X1=1X2=4D2=1X3=3X1=2X3=2X1=1X3=9D3=3X2=2X1=4X2=2X1=3I1=4X1=3X2=1X2=2X1=5X1=2X1=3X3=2X2=2X2=2X1=1X1=2X1=5I4=3X2=3X1=1X1=3X1=1X1=1X2=1X1=1X2=2X1=2X2=2X2=2X1=1X5=3I3X2=2X1=1X1=2X1=1X1=5X2=1X2=1X2=1X1=3X1=4X4=6D2=5D1=1X2=4X3=2X1=2X2=1D2=1X1=1X1=1I3=2X4=2X3=2I1=1X2=1X2=1X1=1X2=1X1=2X2=1X1=1X1=1X1=3X1=1X2=2I6=1I3=2X1=1X1=2X3=1X1=6X5=11D2=3D3=2X3=1D5=1X1=1X1=2I4X2=1X1=2X1=1I1=1X5=1X1=1X2=1X2=4X1=1I1X1=1X5=1X1=1D2=1X1=1X2=2X2=1X2=1I1X4=2I1=1X3=1D3=5I1X1=1X4=1X1=1X1=1X3=4I1X4=3X2=1I1=1X1=1X5=1X1=1X1=5D1X2=1X3=3X1=1X1=1X2=1I4=3X1=3X4=1D1X1=1X1=1X2=1X1=6D3=2X1=1X1=1X1=2X1=2X1=2I6=1X1=1I2=1I2=1X1=1X2=1X1=1X1=2X1=1I1X2=1X1=1X1=2X1=3X5=5X1=4X3=3I1=3X5=4I2=4X2=1X4=1X2=1D1X2=1X1=4X1=1X1=1X7=1I1=1X5=3X4=2X1=1X1=3X1=1X3=2I4=1X1=5X4=1X2=11D1=1X2=1X1=1X1=1X1=1X4=2X2=1X2=2X2=1X2=1X1=6D2=2X1=2X3=1X3=3D1=2X1=1X3=1I2=1X1=1X2=4X4=4X2=2X3=2I1=1X1=1X3=1X2=1I1=1X1=1X1=1X1=1X2=2X1=2D1=1X1=1X1=1X2=1X1=2X3=1X2=1I2X3=1X1=2D1X1=5X5=1X1=3X1=1X2=2X4=1X1=2X4=3I3=1D2=1X3=1X1=2X1=8D2=1D3=1X1=1X2=2X1=2X1=2X1=1D2X4=1X1=1X1=1D1X2=1X2=2X2=1X1=1X1=1X1=1X2=1D2=2D3=1X1=1X2=2X1=1X2=2D1X1=1X1=2X1=4X1=1X4=2X3=1D2X1=1X1=2X1=4X1=3X1=1X1=1D1=1X3=1X2=10D6=1D1=4X1=1X2=2X3=1X1=4X1=1X2=2X1=3X1=1X1=1X1=3D2=1X3=1X2=1X1=1X2=5X2=2X1=1X1=3X1=5X4=1X1=1X2=3D2=3X3=4X1=1X2=2X1=2X1=3X3=3X2=2X1=1X1=1X4=1X1=1X1=2X6=4X1=2X1=1X1=2X2=1I3X3=3X3=2X3=2I2=1X4=1I1=2X5=3X1=1I1X1=2X1=1X2=2X1=1X2=1X1=2X1=1X1=1X1=3X3=1X3=1X1=3D3=4D4X5=2D1=1X1=5X2=1X2=3X2=1X1=1X3=2I5=1X1=1I2X2=1X1=3X1=1X1=1X1=3X2=1X2=5D1=1X2=3D1X3=1X3=6X4=3X1=1X1=3X2=1X1=1X3=1X1=2X3=1X1=1X2=2D1=1X1=1X1=2X1=3X2=2X2=3X1=1X1=1X2=5I2=1D1=1X5=1X3=1X3=3I3=1I1=1X2=1X1=3X1=3X1=1X3=1I2=1X2=1I2=3X2=1X1=1X2=2I1X1=1X1=1X1=2X2=7X2=2X2=1X2=4X3=7X7=4D2=1X1=1X2=2X2=1X1=1I1X1=1X2=2X3=4I1=2X2=1X3=2I5=3X2=2I3=1X1=1X1=2D3X2=3X1=1X1=1X2=2X3=2X2=1X1=4X3=2D1=1X1=1X2=4X2=1X2=1X2=1D1X1=1X2=1X4=2D1X3=4X1=1X1=2X2=2X1=2X2=1X1=2X2=1X1=2X2=1X2=2D3=1X2=2X1=1X2=1X1=1D3X4=1X2=2I1=4X2=4X3=1X4=8D1X1=2X2=2X2=2X7=1X1=1X1=1D1=1X1=1X2=5X6=8D1=1X3=2D1X4=2D3=1X1=4D2=4X3=4X1=2X1=1X1=1X1=1X1=1X3=2X1=3X1=4X1=1X1=1X3=4X2=7X1=1X3=2X1=1X2=1X2=1X2=3X1=3X3=1X1=2I1=1X1=2X1=5X1=1X1=1X1=4X4=1I4=3X1=1X2=1X1=3D1=2X2=1X3=2X1=1X2=1X1=2I1=2X1=1X4=2X1=2I1X2=2X2=1X2=2X2=1X2=2I1=1X1=1X1=1X3=1X1=1X1=4I5=1X1=1I2X1=2X4=1D1=2X1=1X1=1X1=1X1=3X4=1X1=1X1=1X1=2I4=1I2=3X3=4X2=1X1=4D2=1X1=2X1=2X1=1X2=2X2=3X4=1X1=8D3=1X1=3X2=3X2=1X4=1X2=2X2=3X1=2X1=1X2=1X2=3X1=1X2=1X1=1X1=1X1=2I3=1X1=2X3=4D2X4=4X4=1X2=3X2=3X1=2X1=2X2=1D2=1X3=1X1=2D2=1X1=2X1=6D1=2X1=2X2=3X5=2X3=1X1=6D2X2=2X1=2X5=1X1=1X2=4I1X3=2X1=3I3=4X1=1X2=2X2=1X2=1X1=1X1=4X1=2X2=1X3=1X1=1X2=5D1=1X1=1X3=2X1=3X2=2X4=3I4=1X2=1X1=4I1=2X3=1X1=1X1=6I6=13I2=1X1=1X1=1X1=1X1=2X2=2X3=1X1=1X1=5I1X1=1X2=1X3=1X1=2X1=1X1=3X3=1X3=1X1=2X2=4I1X2=1X6=5I1=1X1=1X4=1X1=1X1=3X1=1X1=3X3=3I2X2=2X3=2D2X1=1X2=7X2=3X5=9I1=1X4=1X1=1X4=1X5=1X1=4D2=2X1=2X1=2X2=1X1=1X1=1X1=3X1=2X1=1X1=1X1=4X1=1X1=1X2=2X1=2I6=3X2=1X2=2X2=3I1=1X2=4X1=1X1=1X1=2X1=1X1=1X2=1I1=1X2=2X1=4I4=4X1=2X1=1X1=2X2=2X2=4X1=1X1=2X1=1X1=1X1=2X1=3X2=2X5=1X1=1X1=1X2=1I1X2=1X1=1X1=3I1=2X2=2I1X2=2X1=2X2=2X2=1X1=1X1=1X1=7X1=1X1=2X2=1X1=1X3=5D4=1X1=3X2=1X2=2X3=3X2=2X2=1X3=2I3=1X1=1X1=1X3=2I1X1=1X1=2X1=3X1=1X4=2D2=1X1=2X3=6D1=1X1=1X1=1X3=1X1=3X1=5X2=3X1=1X3=2D6=1X1=2X3=1X2=1X1=4X1=1X1=1X2=2X1=2X3=2X1=2X2=5D3=1X3=4X1=2X1=2X1=3X2=2X1=5X2=1X2=3X1=4I1=1X2=2I3=1I4=1X1=1X1=1I3X2=2X2=1X2=3X1=3X1=3X2=2X3=1X2=3X3=4I1=1X4=1X1=1D2X1=1X1=2X1=3X2=1X1=2X2=2X1=1X3=2X4=1X2=3X1=1I1=1X2=1X2=1X2=2I2X1=1X3=1X1=4D1X2=4X2=4X5=1X2=2I2=5X3=1X2=1X2=3X3=1I2=1X2=1X1=3I2X3=2X2=3X1=1X1=2D5=3D2=2X1=2X2=1X1=1X1=1X1=9X2=1X1=3X5=2X1=1X3=2I1=2X3=1X1=1X1=2X1=1X2=3X2=2X1=1X2=2X4=10I1=1X2=1X2=1I1=1X1=1X1=2I3=3X1=1X2=2X1=1X1=2D1=3X3=1X2=1X2=3I4=3I4=2I5=2X4=1I1X5=6I1=2X3=1X1=4I1=1X1=2X2=1X2=1X1=2I2=1I2X3=1X1=2D4=1X1=1X1=1X2=2D2X4=4X1=1X1=1X1=2X1=1X2=6X2=1X1=2D2=1X1=1X3=4X2=2X1=2X1=1X1=2X1=2X1=1X3=2D2X2=1X1=1X1=1X2=1X2=2X2=3I6=1I1X1=4X1=1X3=2X2=4X3=5X2=6X2=3X3=1X3=2D2=4X1=1X1=1X1=2X1=1X1=2X2=1X3=1D2=1X1=1X1=2I3=1X2=1D3=1X2=1D3=3X2=1X1=1X1=1D1X1=3X1=1X1=1X2=2I1X1=1X1=1X1=1X2=2I1=1X4=1D2=6I1X5=2X2=1X2=2X2=1X3=3X1=3D1X3=1X1=3X1=2X1=4X1=2X4=1X5=2X3=1X1=2X1=1X2=1X1=1X1=4X1=1I1=1X1=1X1=3X3=4X2=2I2=1X2=1X1=4X5=1D2=2X1=2X1=1X3=4X1=2X4=3D1=2X1=1X3=1X2=1X1=2X2=1X1=2X1=1X1=2X1=1X3=1D2=1X1=3X1=1X2=2X1=5X1=6X2=1X2=1X2=6D2X1=1X3=1X1=1X1=1X2=1X1=3D4=1I2=2X2=3X1=1X1=1X1=1X1=1D1X3=1X3=3X2=1D1=1X3=3X1=1I2=2X1=1X1=4I2=1X2=2X2=2X1=2X1=1I3X1=2X4=2X1=2X1=2X3=1I1X1=2X1=1X3=4X1=1X4=5I1=1X1=1X1=1X3=2X3=1X2=3I1X2=3X2=2X1=1X1=1X2=1X2=2I4=6I5=2X2=1X2=1X1=1X1=1X1=3I1X1=1X3=1X2=9X1=1X2=2X1=1X2=2X1=2I5=1X1=3D1X2=2X3=2X3=1X2=2I1=1X3=1X2=3X1=1X1=1D4=2X1=1X2=4X1=1X1=3X1=3X1=3X2=3X1=1X1=2X2=4I3=1X1=1X1=1I2=1X2=2D1X2=2X2=1D1X1=2X1=1X1=1X2=1X1=4D2=1X5=1D1=1X1=4X5=2X5=3X3=2I1=2X1=1X1=1X1=3X1=6X4=4D1=1X2=2X1=1X2=1X1=1I1X1=1X1=1X1=1I2X2=1X1=1X4=1I3=3X1=3I2=1I1=1X2=1X1=1X2=2X4=2D1X3=2X1=2X2=6D1=1X2=2X2=2X5=1I1=1X1=1X1=4X5=3I2=1X2=2X1=4X1=5X1=2X1=1X1=2X1=2X1=2I2X1=1X1=1X1=1X2=1X2=1D1X6=2X2=1X2=2X1=3X1=1X7=1D3X1=3X1=2X2=1X1=1X2=2X1=1X1=2D1X2=1X3=1X1=4D1=2X4=1X1=2X1=2X1=3X1=5X2=3X1=1I1=3X1=3X1=1X4=1X3=5I1X2=1X1=1X4=4X2=2X2=1X1=1D1X2=1X1=1X1=2X1=1D1X1=1X2=3I2=2X1=6X1=1X2=1X2=1I3=2X1=3X1=1X1=1D4=2D1X1=3X2=3X3=2X2=5D3=3X2=1X1=2X1=2X1=1I3=2X2=1X1=2D1=1X1=1X1=3X2=2X2=2X1=3I1X1=1X1=3X1=1X1=1X3=3I2=3X2=1X1=2X1=1X3=3X1=1X1=3X1=2D1=4X2=1I3=2X2=1X1=1X1=3X1=1X2=1I1=2X1=2X2=2X1=1X2=5I1X1=1X2=3X4=3X1=1X1=3X2=1X1=1X2=1I2X3=1X3=1X1=1D1=1X1=2X4=1X2=1X1=5D2X1=1X2=1X1=2X4=3D1=2X2=2X2=1X1=1X3=1X2=3X1=1X1=1X1=2X1=1X2=2X4=1X1=7I1=1X3=1X3=1X2=2I1X3=2X1=1X1=1X2=1X3=3I2=2X1=2X1=2X1=1X1=1X3=4X1=2X2=3D2=1X1=3X1=1X1=3X3=1D2=1X2=1X1=1I2X1=2X1=2X1=4X5=5X1=1X2=3X1=2X1=1X1=2X3=1X3=5X2=2I1X1=1X2=1X4=2X1=3D2=2X2=1X1=2D1X2=1X2=1D2=2X4=1X3=2X1=1X2=6X4=1X1=3D1X1=3X1=1X1=1X3=3X3=1X1=1X1=1X2=2D2X1=2X2=2X2=2X2=2X4=3I1X1=1X4=1D4=3I3X6=4D2X3=2X3=2X1=1X1=1X3=4D2=1X1=1X1=1I2=2X1=4X1=1X2=1X2=4X1=4X1=2X1=1X4=3D4=1D1X1=2X2=2X1=2X2=2X2=1X2=5D4=1X1=1X2=6X1=2X3=1X1=1X2=2I2=1D1=1X4=4X2=2X1=1X1=3X2=4X1=1X1=1X1=1X1=2X1=1X1=1X2=2D1=1X3=3X1=3X1=2X2=1X1=1I2=1X2=1X1=2I1=1X3=1X1=7I2=1X2=2X1=2X1=3I6=2X2=4X3=1X1=1X1=6I3=2X2=1I1=2X3=1X1=4I3=2X4=1X2=1D1X3=1X1=2X3=5I1=1X3=1X1=1X5=1D3=1D1X2=1X1=1X3=1X1=1X1=1I1=1X2=2X1=1I4=1X1=1X1=2D2=2D2=2X1=1D1=2X1=1X1=1X7=6I1=1X3=1I3=1I1X2=1X2=3X3=1X2=2X1=2X2=8D2=1X2=1X1=1D2X1=1X1=2X4=2X2=2X1=3X3=3D1X2=1X1=2X2=5D2=1X4=3X1=1X3=5D1X1=1X2=4X3=2D1X2=1X2=3X2=1X1=1X1=1X1=2X1=1X1=1X3=2D4=2X2=2X1=3X3=1X1=1X1=1I2=6X3=1X2=1D1=1X1=5X1=1X3=1X1=1X1=4X1=4X3=2X2=1X1=1X3=1X2=3X1=3X4=2X3=5D2X1=2X1=1X2=1X1=2X2=1X2=1I1=1X1=2X3=1X2=2X1=1X3=2X2=1D1=1X1=2X1=2X2=3X1=1X2=1X1=1X3=1X1=10I1=2X4=1X1=3X2=5X1=2X2=1D1=1X1=1X1=2X1=1X1=1X2=3X2=1X3=1X2=2X1=4X2=1D7=4I1=2X1=1I1=1X2=1X2=1X1=1I1X1=3X1=1X3=2X2=3X2=2X2=2X3=2X2=2X1=2X1=1X2=1X1=2I2X4=1X1=1I3=3X3=3X1=5X1=2X3=1X2=1X4=1D1=2X1=2X2=2X1=5X4=1X1=1I1X1=1X2=1I4=9I1=1X5=3X1=1X3=1X1=3X1=1X4=3I4X1=1X1=1X5=1X1=1X3=1D1=1X1=2X3=2X2=1X1=1I1X3=1X1=3X5=1X1=1X1=1X1=1X3=5D2=1X3=2X1=1X2=1D3X2=4X4=1X1=1X1=5X3=1X1=3D2X2=1X3=1X3=1I1=3X4=3D3=2X1=1X1=2D1=2X1=1X1=1X1=1X2=1X1=3X1=2X1=4X1=2X1=1X1=2D3=1X1=2X3=1X4=1X1=1I2=3X2=2X1=1X1=2X1=3X4=1X2=2X1=3X1=1X2=3X2=1X1=1X1=6X3=3D5=2X3=4X3=7D2=1X1=2X2=3X4=1X1=1X3=2X1=2I2X5=1I1=1X2=1X2=1X1=3D3X3=6X2=2X3=2X1=2X1=2X1=1X3=1X1=3I1X2=4X3=2X4=1X2=5D5=1X1=3D2X3=2X2=1X1=2D3=1X2=1X2=3D4=2D2X1=1X8=5D1X3=2X2=2I3=1X2=4I1X3=1X1=1X2=2X1=1X4=4X2=1D2=2X1=4X1=1X1=1X2=1X1=2D2X1=3X4=1D2=2X1=2D5=6X2=1X1=3X1=2X2=2X1=1X2=5X1=1X2=3X1=2X1=2X2=1D3X5=2X1=3X1=2X4=2X1=2X1=2X3=5D2=3X1=1X3=2X2=2X1=2X1=1X1=2X2=2X3=1X1=2X1=2X1=1X1=1X1=3I3=5X2=3X3=2X1=1X4=3I1X2=7X3=1X3=1X2=2D1=1X2=1X2=2I1X1=2X3=1X5=1X2=3I4=1X2=1X3=1X2=8I1=2X1=2X1=1X5=4I8=3I5=9I5=2X1=1X1=1D1=1X1=1X2=1X1=6I1=1X3=1D3=1X3=1X1=3X1=1I2X1=4X2=1X2=2X1=2X3=2X2=1X1=2X2=1X3=1X1=1X2=1I1=1X1=1X4=5D2X2=2X1=3X1=1X1=1X2=4D3=1X2=2X1=3X1=1X1=1X2=4X4=5D3=1X3=2X1=1D2X2=1X1=7X1=1X1=5X1=2X7=3D1=1X2=1X2=3D3=6D2=1X4=6X2=2X1=4X1=2X4=1X3=3X1=4X1=2X3=3X1=1X1=1X2=2X4=1D1=1X3=1D2=1X1=2X3=4X2=3I1=1X2=4X2=3X2=3X1=3X1=1X4=1D6=2X3=1X1=2X3=2D1X2=1X2=3X1=1D1X2=1X1=2X3=5D2=1X2=1X3=1I1X2=5X2=2X1=1X2=1I2=1X1=2X1=1X1=2X1=1X2=2X2=1X1=1X1=2X1=2X1=1X2=1X1=1X2=3I1X1=3X1=1X2=1X2=1X4=1X1=3I2=1X2=1X5=2X1=7X2=1X3=3D1=1X2=1X1=2X2=1D2X3=1D1=2X1=1X2=3X2=2X2=2X1=1X1=10X3=2X1=2X1=5X4=2I2=5X1=1X4=3X1=1X5=4D1X1=1X2=1X2=1X2=2I2=1X1=1X1=1X1=1I1=1X2=4X3=1D3=1X3=7I2=1X1=1I1X3=5X2=2X2=1D2=3X2=1X2=2X1=7X2=1I1X8=1I3X1=2X5=3X1=1X3=2X1=1X3=2I5=2X1=3X3=1X3=1X1=3X4=2X1=9X1=1D1=1X1=2X1=5D6X1=1X4=1X1=2D1=1X5=4X2=2X1=1I2X2=2X1=4X1=6X3=1X2=2X2=3X5=1D4=3I1=3X4=1X1=1I3X4=1X2=2D3=2X3=7D1=3X3=12D3=3X2=1X2=2D5=7X1=1X6=2X2=5D1=3X2=1X2=1X1=2I2=1X2=2X2=3D2=2X1=1X2=2D1X1=1X1=3X2=2X5=1X1=3X1=12D1=1X1=1X4=1X1=1I5=4I1=1X4=2X2=1X1=1X2=2X1=1D2=1X3=1X1=1X2=1I1X1=3X1=8X2=1X2=7D2=2X2=1X3=2D1X1=1X1=1X1=1X1=2X1=4D2X2=1X3=1X1=4X1=3X1=1X4=2X4=1I1=2X2=2X1=2X2=2D5=5D1X2=5X4=3X1=3X3=2X2=1I1=2X2=1X1=4X2=1X4=2X1=1I2=1X2=1X1=1X1=4X1=1X4=7X1=2X1=2X1=3X4=5D1X3=1X2=1I1=1X1=1X1=2X1=2X1=1X1=1X1=1X1=3X1=2I1X1=2X1=1X2=1X3=1X4=2I1X2=2X1=3X4=1I1=1X3=1X1=2X1=1X1=3X2=2I1=5X1=3X1=1X2=2X1=1D1=1X4=3X1=2X1=1X1=5X2=1X1=2X1=2X1=3X1=2X1=1X1=2D1X2=1X2=1D3=1X1=3D3=2X2=1X1=4X1=2X2=2X1=2D1=1X3=2X1=2X2=2D6=2X1=3D3=1X1=2X2=2X3=2X2=1X2=2D2X3=2D1X1=4X1=2X1=1X2=4X1=1X1=1X1=2X2=1X2=4D2=1X7=2X1=4X2=1X2=3D1X4=1X2=1X1=2X2=2X4=1I3X1=1X3=1X1=1X1=1X3=2X3=3X1=7I2=2X3=1I1=1X1=1X1=1X3=2X2=1X1=2X1=2X1=1X1=1X2=4X2=1X1=2X4=3I2=1X2=2X1=2X1=1X2=2X3=2D1X1=5X1=1X1=1X1=3X1=1X2=1X2=3I1X1=1X4=1X1=1X1=1X5=1X1=2D1=1X2=1X2=1D2=2X2=4X2=2X1=2D2=1X2=3X1=2I3=3I2=1X6=4I1=2X1=1X2=1I1=1X1=4X3=2X2=4X1=2X2=1X1=1X1=1D4=2X3=1X1=1X1=3X2=1X1=4D1X3=2D2=1X1=3X1=2X1=1X2=1X2=5X1=1I4=1X1=2X1=1D4=1X1=3X2=5D1=1X6=1X2=5X1=1X1=1I1X2=1X4=1X1=1X4=2D1=1X2=2D1X1=1X2=3X3=1X1=4D1X1=2X5=1X1=1X1=2D2=1X1=1X2=4D4=3X2=2D1=1X3=1D2X3=1X3=3X2=2D3=1D1=1X1=2D1=1X2=3X1=2X3=1D1X2=1X4=1X1=2D1X1=1X2=1X1=1I2=1X3=2X2=1D2X2=4X2=1X2=1X2=1D1=2X2=2X1=1X1=3X4=3X1=3X1=1X1=1X1=1X1=1I4=2I1=1X3=2X1=3X1=3X4=1X1=3X1=1X2=1X2=1X2=2X1=6I3=1X1=1X1=1X1=3X1=1I6=2X1=1D4X1=2X1=1X1=1X3=2X1=3D1X8=2X2=1X2=2D1=3X1=1X3=1X2=1X2=1D1=1X3=3X1=2D4=1X3=1X2=4I1X2=1X2=1X1=2X1=6X1=1D1X1=1X2=1X4=1D1=1X1=1X3=1X1=1D1X4=5X1=1X3=1X3=5I3X1=3X2=1X2=5X1=2X3=1X1=1X1=3X3=2X1=3X1=1X1=3X1=1X1=2X3=2X1=2X2=1X1=2I1=1X4=1I1X1=1X4=1I3=1X1=1I5=2X3=4X1=1X1=1X1=3I1=2X1=1X2=3X2=1X1=2X3=1I1=2X2=1X1=1X1=1X2=1X2=1X2=4X4=1X1=1X2=2X1=1X2=1X1=1X2=4X3=2D1=4X1=1X5=2X2=9I3=2X4=3I2=1X1=2I1=1X3=1X3=2X3=1X1=1I3=1X3=2X5=1X1=9D1X2=3X1=1X4=1D1X1=1X1=1X3=5X2=1X1=2X1=1X3=1X1=6D4=3X1=1X3=1X1=1X1=1X1=1X1=2X1=4D1=1X4=2X1=1X1=1X1=2X1=1X1=2D1=1X4=1X1=1X2=4X1=2X1=1X3=2X1=1X3=8I2X1=2X3=3I1X2=2X4=1I2X3=1X1=5X2=1D1X2=1X2=4X2=2X1=4X1=1X1=1X4=3I2X1=1X1=1X1=2X1=4I1X5=1X1=2X1=1X2=2X1=1X1=2X1=2D1=1X1=1X3=2X1=2X1=1X1=1X2=2I1=2X1=1X1=1X1=1X4=2X1=2X1=3X4=2X2=6D1X3=1X1=3X2=3D1X1=2X3=1X1=1X1=6X2=1X2=2X1=1X2=2X1=2X2=2X2=2X1=1X1=4X4=2I1=2X1=1X2=2X2=1X1=3X2=2I2=1X3=1X1=2I1X1=1X1=1X1=1X1=1X3=1X5=5I1=1X4=2X1=2X2=3X3=1D2=1X1=3X1=3X1=4X1=3X4=5I2=1X2=1X2=1X1=1X2=1D4=1X2=1X4=2X1=1X1=3I2=1X1=1X3=1I1X1=4X1=1X1=3X1=3X2=1X2=3X1=2D1X1=3X7=2D2=1X1=1D2X1=1X2=1X2=2X6=1X2=5I1=1X2=2X1=2X3=2X6=3D2X2=4X2=1X1=1X2=1X1=1X3=2D1X2=2X1=1X2=2X2=3I3X1=2X3=1X1=1X1=1D3=1X2=1D1=1X1=1X1=2X1=2X2=1X4=4X1=1X2=3X1=1X3=5D1X6=1D1X1=1X1=3X2=2X2=1X4=2X1=3I1X1=3X3=1X2=2X2=1X1=2X1=1X1=2X2=2X2=2X2=2D1=1X1=1X1=1X1=5D1X2=2X2=3X1=2X2=2X1=1X4=7D4=2X1=2X2=1X2=1X1=5D1=2X1=2X1=3X2=3X1=1X1=4D2=1X3=1X1=1X1=1X1=3X1=1X1=1I3=3X1=2X1=2X2=6X1=1X5=1X1=3D1X2=1X2=1X2=6I1=1X1=1X3=2X3=2X2=1X1=2I1X1=2X5=1I3=2I2=1X3=3X2=1I1X2=2X4=2I2=1X1=1I4=1I2X3=2X1=1X1=3X1=1X2=4X1=2D2=1X1=1I1X2=1X1=1X1=1X1=1X3=1I2=1X2=3D5=1D1=2X2=2X2=4X1=5X2=1X2=7D1=2X5=2X1=1X1=1X5=1X1=3D1=1X1=1X3=3D1=2X3=1X1=2X4=1X1=4D1X2=1X1=3X2=1X3=4X2=1X2=1X1=6I2=2X1=1X3=4I1X1=2X1=3X1=2X1=1X1=1X1=1X1=1X7=2X3=3X2=5X1=2X1=2X2=2X2=2X2=2X2=11D3=4D3=1X2=1X4=8X1=1X1=3D1=2X2=1X1=2X2=1X1=1X1=1X1=1X1=1X1=1X1=3X2=1I1=1X2=2D2=1X1=5X6=1D1X1=3X3=2X4=2D4=1X2=1X2=2X2=9D1=1X1=3X1=1X4=1D2X1=1X3=1X2=1X1=2X2=2X2=1D2=1X1=2X2=3D1X1=2X1=1X2=2X3=1X2=2X4=1X4=2X1=2X1=1X2=4X2=2X1=2X2=2X1=2X1=1X1=1X1=1X1=2X1=3I2X1=5X3=1X5=7X1=1X1=2X1=1X2=1X1=1X1=1X3=2I2X2=1X1=3X3=3I2=1I4=2X1=1X3=1X1=1X4=2X1=3X1=1X1=2X1=2X2=5X1=1X1=1X1=4X1=1X3=1X1=1X1=1X1=8I1=1X1=1X1=3X6=4X1=1X2=1X3=2X1=3X2=1X1=8X3=3X1=1X1=1X3=4I1=3X3=2X2=1X1=2I2X1=1X2=2X3=1I1=1X2=1X1=1X1=1D3X3=2X1=1X2=5X1=1X1=1X1=1X1=1I2=2X2=2X2=3X2=1X1=1X1=1X1=5X1=1X2=1X1=1X2=3X2=1X2=4X3=1I2X5=4X3=2X3=1X1=1X2=1X1=5D1=1X4=1X2=1X2=1I2=1X1=2X1=2D1=1X1=2X2=4X1=2X1=1X1=6X4=5D3=1D5=2X1=1X2=2X1=1X1=2X2=1D1X3=1X1=3X2=1X1=2X3=1D1X1=1X1=2X1=2X3=3X3=4I1X1=1X1=1X3=1I1=4X3=1X1=3X4=2X1=2X1=3X1=1X1=1X1=1X3=1I1X3=7X2=2X1=1X2=1D2=1X5=1X1=9I1=1X1=1X1=3X6=1X2=1X4=1X1=1X2=4D1X1=1X4=7X1=1X3=1X1=3X3=1D2=1X1=2I3X1=1X2=1X1=9X1=1X1=1X1=4X1=2X2=1X1=3X1=1X1=4X1=1X3=2X3=1X2=5I3=2X4=2D4=3X3=1X3=2X4=1X1=4X1=2X1=2X3=8X1=3X1=2X2=1X2=1D1X2=1X1=1X1=1X4=2X1=3X2=1X1=1X3=3D1=1X4=2X2=4D4=2D1X1=1X3=3X3=1I3=6X1=1X3=1I3=5X2=1X1=2X3=1I2=1X2=1I1=1X2=1X1=1X1=1X2=1X1=1X1=2D1X1=1X1=5X2=2X2=1I2=2X2=1I7=6I1X2=1X4=1I1=1X1=2X1=1X1=4X3=1I1X1=1X1=1X1=5X3=1X1=3D1=3X3=3X1=2X2=9X9=2X1=1X1=2X1=1X3=3D1X1=1X2=3X1=1X4=3D7=7D1=1X1=1X2=1X1=1X3=1X1=1X1=1X1=2X2=1X1=1X3=6D2=1X1=1X2=3D3=1X1=2X3=2X2=1X1=1X3=1D1=1X1=5X1=1X1=1X1=1X1=3X1=1I1=1X1=3X4=2X1=1X1=1X1=1X2=1X1=1I2X2=2X1=2X1=1X1=2I1X1=4X3=1X2=2X2=2X1=3X2=9I1=1X1=1X3=2I2=3X7=6D2=1X1=4X1=1X1=1X3=2X2=1I1=1X6=1I2=2X3=2I6=2X3=6X2=4X2=1X1=1X2=1X1=1D1=3X1=1X3=1X1=3X1=1X2=4X2=2I2X3=1X1=1X1=1X2=2I1=3X6=4I1=1X1=4X1=3X2=2X3=1X1=1X3=1X3=2X1=1I2=3I2X5=1X1=2X1=2X1=1X1=3X3=2X1=17I4=1X1=1X1=1X2=1I1=4X5=1I1X1=1X1=1X3=1I1X1=2X3=3X1=1X1=1X2=4X1=1X1=1X2=1X1=1I1=1X2=1X2=4I1X2=2X1=1X3=1X2=2X2=9I1X3=5I2=2X1=1X6=1X1=2X2=1X1=1I1=2X3=1X2=2X1=1X1=4X1=1X1=1X1=1X3=1X3=1I1=1X1=1X1=2X4=2X1=4X1=3X1=2X3=5D6=1X1=2X3=1I6=2X1=1X4=2X1=1X2=2D1=1X6=1X1=2X1=1X1=3X3=3X2=4I1X3=2X2=1I4=1X1=3D1=2X2=1X4=2I2X1=1X1=1X1=1X1=1X1=6X1=1D1=2X2=1X1=4X2=3X3=1X5=1X1=2D3=1X1=1X1=1X3=2X1=3I1X1=1X3=3X2=1X1=3I2X4=1D1X2=2X3=1X1=3X1=1X1=3X3=1I1=2X1=1X1=1X1=1X1=6I1=1X1=2X2=2X1=2I3=1X4=1I2X1=1X3=1X1=4X2=1X1=2X2=9X3=1I1X5=1X1=2X6=1X1=2X1=5D1X4=2X4=3X1=3X1=2X3=2X1=2X4=4X2=1X1=3X3=1I3=1X3=2D2=2X2=2D2=1X2=2X2=3X1=1X1=1D2X3=2X1=5X2=2X2=1X1=1X1=2X1=2X1=2I2=1X1=1X2=4X1=5I1=1X1=1X2=1X5=4D1X6=1I1=1X1=1X2=3X1=1X2=1X1=3X1=4X2=1X1=1X1=1X1=2X2=1X2=2I2X6=5I3=6X1=1X2=2X3=1I3=1X4=5I3=1X3=1X4=5I1=4X6=2X1=3I3X3=1X1=4X1=2X1=3X1=1X2=3X2=1I5=3D3=3X1=1X1=3X1=1X5=1X3=2X3=2X1=1X2=3D1=2X4=3X2=2X1=1D5=1X2=1X1=2D2X3=1X3=1X2=3D1X1=2X1=2X2=1X1=1X1=1X1=2X3=1X3=1I3X1=1X3=1D2=2X1=1X1=1X2=1X2=5I1=1X2=1I1=4X3=1X1=1X3=1X1=1D1=1X3=3X4=2X1=2X2=4X3=1I2=2X1=1X2=3D1=3X1=3X2=1X4=3I4=2X1=2X2=1I3X4=3X3=3D2=2X4=1X1=2X1=1X1=1X4=1X2=1X1=3D4=1X1=2D3=1X3=1X1=1X1=1X1=2X1=1X1=3D1=1X4=2X2=3X2=1X1=3X1=2X2=2I3=1X1=1X1=1D1=1X2=2X2=3X1=2I1=1X1=2X2=1X2=3I1=1X4=1X1=1X1=2X1=1X1=1X1=7D1=1X5=1I1=1X4=2X1=1X2=1X1=1X1=5D4=1X3=1X2=1X1=1I1=1X1=1X4=8D3=2X2=8D1=1X2=3X5=8D1X1=1X3=3X1=1X1=2X1=1X1=4D1X1=3X1=1X3=3X1=1X2=2X2=1X2=1D2=2X3=1X2=1X1=1X3=2D4=1X1=2X1=3D1X2=1X7=3X3=1X1=1X2=2I4=2I1X2=1X4=3X1=1I3=1X1=1X1=4X1=2X2=1X2=4X1=3X2=1I2=4X1=2X2=1D2=1X1=1X1=3X5=2X1=3I5=1D1X6=1X4=9I2=1X1=1X1=2X1=1X3=1X2=1X1=1X3=1X1=2X1=6D5=2X1=2X1=1D3=2X1=1X2=1X1=4D3=2X1=1X2=1X1=3X1=1X1=1X2=3X1=1X2=2X1=4I3=1X3=2X1=3X1=1X1=1I2=1X1=3X1=2X1=2X5=1X1=1I1X2=1I5=3X3=1X2=1I2X3=1X1=6I1=2X77=1X3=1X5=1D14=1X28=1X201=1X41=1X26=1X125=1X59=1X26=1X98=1X11=1X5=1X5=1X23=1X11=1X8=1X8=1X35=1X26=1X176=1X5=1X104=1X24=1X43=1X147=1D52=1X21=1X46=1X39=1X39=1X384=1X1=2X3=2X3=1X7=2X1=4X4=2X2=1X33=1X17=1X79=1X66=1X20=1X53=1X4=1X18=1X11=1X32=1X38=1X21=1X7=1X8=1X2=1X5=1X5=1X2=4X5=1X5=3X3=1X2=1X3=2X12=1X1=2X2=1X2=1X14=1X29=2X1=1X7=1X9=1X5=1X2=1X8=1X1=3X4=1X8=1X2=1X14=1X8=1X30=1X16=1X1=1X12=1X1=2X5=1X2=1X8=1X26=1X11=2X6=1X3=1X6=2X18=1X102=1X76=1X158=2I43=1X34=1X23=1X9=1X23=1X2=1X67=2X1=2X59=1X14=3I36=1I13=1X36=1X41=1X290=1X133=1X53=1X4=1X58=1X52=1X29=1X30=1X47=1X62=1X47=1X172=1X75=1X17=1X12=12D15=1X47=1X32=1X119=1X5=1X19=1X161=1X1=1X138=1X4=1X42=1X9=2X118=1X50=1X42=1X50=1X18=1X25=1X4=1X28=1X1=1X164=1X81=1X21=1X25=1X21=1X8=1X21=1X11=1X20=1X6=1X5=1X22=1X76=1X42=1X140=1X92=1X20=1X7=1X3=1X62=1X70=1X30=1X31=1X80=1X118=1X14=1X145=1X53=1X137=1X76=1X97=1X30=1X2=1X29=1X341=1X140=1X8=1X755=1X197=1X185=1X876=1X5=1X244=2X110=1X383=1X347=1X40=1X121=1X17=1X119=1X24=1X22=1X41=1X76=1X209=1X40=2X18=1X20=1X8=1X55=1X89=1X54=1X24=1X145=1X26=1X409=1X42=1X6=1X28=1X3=1X7=1X60=1X158=1X43=1I11=1X46=1X67=1X134=1X20=1X4=6D1X16=1X264=1X152=1X83=1X38=1X23=1X236=1X11=1X437=1X8=1X2=1X29=1X17=1X80=1X409=1X39=1X116=1X111=1X28=1X71=1X166=1X18=1X173=1X145=1X149=1X108=1X50=1X7=1I113=1X191=1X440=1X357=1X88=4D48=1X805=1X104=1X471=1X134=1X17=1X16=1X12=1X51=1X12=1X4=1X369=1X12=1X393=1X139=1X157=1X12=1X29=1X23=1X475=1X420=1X53=1X14=1X189=1X178=1X458=1X178=1X470=1X114=1X65=1X83=1X156=1X43=1X198=1X218=1X79=1X405=1X452=1X72=1X153=1X171=1X38=1X87=1X217=1X406=1X687=1X316=2D17=1D84=1X214=1X51=1X182=1X6=1X181=1X50=1X92=1X116=1X272=2D1489=1X704=1X21=1X24=1X48=1X14=1X74=1I38=1X29=1X74=1X420=1X424=1X121=1X297=1X346=1X35=1X17=2X175=1X25=1X81=1X180=1X272=1X75=1X129=1X98=1X9=1X736=1X215=1X16=");
                 println!("from_paf {:?}", a);
 
-                let query_seq: String = "GAACAGAGAAATGGTGGAATTCAAATACAAAAAAACCGCAAAATTAAAAATCTTGCGGCTCTCTGAACTCATTTTCATGAGTGAATTTGGCGGAACGGACGGGACTCGAACCCGCGACCCCCTGCGTGACAGGCAGGTATTCTAACCGACTGAACTACCGCTCCGCCGTTGTGTTCCGTTGGGAACGGGCGAATATTACGGATTTGCCTCACCCTTCGTCAACGGTTTTTCTCATCTTTTGAATCGTTTGCTGCAAAAATCGCCCAAGCCGCTATTTTTAGCGCCTTTTACAGGTATTTATGCCCGCCAGAGGCAGCTTCCGCCCTTCTTCTCCACCAGATCAAGACGGGCTTCCTGAGCTGCAAGCTCTTCATCTGTCGCAAAAACAACGCGTAACTTACTTGCCTGACGTACAATGCGCTGAATTGTTGCTTCACCTTGTTGCTGCTGTGTCTCTCCTTCCATCGCAAAAGCCATCGACGTTTGACCACCGGTCATCG".to_owned();
-                let target_seq: String = "GAACAGAGAAATGGTGGAATTCAAATACAAAAAAACCGCAAAATTAACCCTTCGTCAACGGTTTTTCTCATCTTTTGAATCGTTTGCTGCAAAAATCGCCCAAGCCGCTATTTTTAGCGCCTTTTACAGGTATTTATGCCCGCCAGAGGCAGCTTCCGCCCTTCTTCTCCACCAGATCAAGACGGGCTTCCTGAGCTGCAAGCTCTTCATCTGTCGCAAAAACAACGCGTAACTTACTTGCCTGACGTACAATGCGCTGAATTGTTGCTTCACCTTGTTGCTGCTGTGTCTCTCCTTCCATCGCAAAAGCCATCGACGTTTGACCACCGGTCATCG".to_owned();
+                let query_seq = b"GAACAGAGAAATGGTGGAATTCAAATACAAAAAAACCGCAAAATTAAAAATCTTGCGGCTCTCTGAACTCATTTTCATGAGTGAATTTGGCGGAACGGACGGGACTCGAACCCGCGACCCCCTGCGTGACAGGCAGGTATTCTAACCGACTGAACTACCGCTCCGCCGTTGTGTTCCGTTGGGAACGGGCGAATATTACGGATTTGCCTCACCCTTCGTCAACGGTTTTTCTCATCTTTTGAATCGTTTGCTGCAAAAATCGCCCAAGCCGCTATTTTTAGCGCCTTTTACAGGTATTTATGCCCGCCAGAGGCAGCTTCCGCCCTTCTTCTCCACCAGATCAAGACGGGCTTCCTGAGCTGCAAGCTCTTCATCTGTCGCAAAAACAACGCGTAACTTACTTGCCTGACGTACAATGCGCTGAATTGTTGCTTCACCTTGTTGCTGCTGTGTCTCTCCTTCCATCGCAAAAGCCATCGACGTTTGACCACCGGTCATCG".to_owned();
+                let target_seq = b"GAACAGAGAAATGGTGGAATTCAAATACAAAAAAACCGCAAAATTAACCCTTCGTCAACGGTTTTTCTCATCTTTTGAATCGTTTGCTGCAAAAATCGCCCAAGCCGCTATTTTTAGCGCCTTTTACAGGTATTTATGCCCGCCAGAGGCAGCTTCCGCCCTTCTTCTCCACCAGATCAAGACGGGCTTCCTGAGCTGCAAGCTCTTCATCTGTCGCAAAAACAACGCGTAACTTACTTGCCTGACGTACAATGCGCTGAATTGTTGCTTCACCTTGTTGCTGCTGTGTCTCTCCTTCCATCGCAAAAGCCATCGACGTTTGACCACCGGTCATCG".to_owned();
 
                 let a_start = 0;
                 let a_end = query_seq.len();
@@ -327,34 +360,34 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 let b_end = target_seq.len();
 
                 // Create aligner and configure settings
-                // let mut aligner = AffineWavefronts::default();
-                // let paf_cigar = align_sequences_wfa(&query_seq[a_start..a_end], &target_seq[b_start..b_end], &mut aligner);
-                // let paf_cigar = cigar_ops_to_cigar_string(&paf_cigar);
+                let mut aligner = AffineWavefronts::default();
+                let paf_cigar = align_sequences_wfa(&query_seq[a_start..a_end], &target_seq[b_start..b_end], &mut aligner);
+                let paf_cigar = cigar_ops_to_cigar_string(&paf_cigar);
 
-                // let tracepoints = cigar_to_tracepoints_variable(&paf_cigar, max_diff);
+                let tracepoints = cigar_to_tracepoints(&paf_cigar, max_diff);
 
-                // let recon_cigar_variable = tracepoints_to_cigar_variable(
-                //     &tracepoints_vartracepointsable,
-                //     &query_seq,
-                //     &target_seq,
-                //     0,
-                //     0,
-                //     mismatch,
-                //     gap_open1,
-                //     gap_ext1,
-                //     gap_open2,
-                //     gap_ext2
-                // );
+                let recon_cigar_variable = tracepoints_to_cigar(
+                    &tracepoints,
+                    &query_seq,
+                    &target_seq,
+                    0,
+                    0,
+                    mismatch,
+                    gap_open1,
+                    gap_ext1,
+                    gap_open2,
+                    gap_ext2
+                );
 
-                // //let realn_cigar = align_sequences_wfa(&query_seq, &target_seq);
-                // //let realn_cigar = cigar_ops_to_cigar_string(&realn_cigar);
+                //let realn_cigar = align_sequences_wfa(&query_seq, &target_seq);
+                //let realn_cigar = cigar_ops_to_cigar_string(&realn_cigar);
 
-                // info!("\t            tracepoints: {:?}", tracepoints);
-                // info!("\t CIGAR from tracepoints_variable: {}", recon_cigar_variable);
-                // info!("\t              CIGAR from the PAF: {}", paf_cigar);
-                // //info!("\t CIGAR from realignment: {}", realn_cigar);
+                info!("\t            tracepoints: {:?}", tracepoints);
+                info!("\t CIGAR from tracepoints_variable: {}", recon_cigar_variable);
+                info!("\t              CIGAR from the PAF: {}", paf_cigar);
+                //info!("\t CIGAR from realignment: {}", realn_cigar);
 
-                // assert!(paf_cigar == recon_cigar_variable);
+                assert!(paf_cigar == recon_cigar_variable);
             }
         },
     }
@@ -366,9 +399,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 fn setup_logger(verbosity: u8) {
     env_logger::Builder::new()
         .filter_level(match verbosity {
-            0 => log::LevelFilter::Error,
-            1 => log::LevelFilter::Info,
-            _ => log::LevelFilter::Debug,
+            0 => log::LevelFilter::Warn,    // Errors and warnings
+            1 => log::LevelFilter::Info,    // Errors, warnings, and info
+            _ => log::LevelFilter::Debug,   // Errors, warnings, info, and debug
         })
         .init();
 }
@@ -391,13 +424,13 @@ fn process_compress_chunk(lines: &[String], banded: bool, max_diff: usize) {
     lines.par_iter().for_each(|line| {
         let fields: Vec<&str> = line.split('\t').collect();
         if fields.len() < 12 {
-            warn!("Skipping malformed PAF line: {}", line);
-            return;
+            error!("{}", message_with_truncate_paf_file("Skipping malformed PAF line", line));
+            std::process::exit(1);
         }
         
         let Some(cg_field) = fields.iter().find(|&&s| s.starts_with("cg:Z:")) else {
-            warn!("Skipping CIGAR-less PAF line: {}", line);
-            return;
+            error!("{}", message_with_truncate_paf_file("Skipping CIGAR-less PAF line", line));
+            std::process::exit(1);
         };
         let cigar = &cg_field[5..]; // Direct slice instead of strip_prefix("cg:Z:")
         
@@ -428,58 +461,44 @@ fn process_decompress_chunk(
     lines.par_iter().for_each(|line| {
         let fields: Vec<&str> = line.split('\t').collect();
         if fields.len() < 12 {
-            warn!("Skipping malformed PAF line: {}", line);
-            return;
+            error!("{}", message_with_truncate_paf_file("Skipping malformed PAF line", line));
+            std::process::exit(1);
         }
         
         let Some(tp_field) = fields.iter().find(|&&s| s.starts_with("tp:Z:")) else {
-            warn!("Skipping tracepoints-less PAF line: {}", line);
-            return;
+            error!("{}", message_with_truncate_paf_file("Skipping tracepoints-less PAF line", line));
+            std::process::exit(1);
         };
         let tracepoints_str = &tp_field[5..]; // Direct slice instead of strip_prefix("tp:Z:")
         
         // Parse mandatory PAF fields
         let query_name = fields[0];
-        let query_start: usize = match fields[2].parse() {
-            Ok(val) => val,
-            Err(_) => {
-                warn!("Invalid query_start in PAF line: {}", line);
-                return;
-            }
-        };
-        let query_end: usize = match fields[3].parse() {
-            Ok(val) => val,
-            Err(_) => {
-                warn!("Invalid query_end in PAF line: {}", line);
-                return;
-            }
-        };
+        let query_start: usize = fields[2].parse().unwrap_or_else(|_| {
+            error!("{}", message_with_truncate_paf_file("Invalid query_start in PAF line", line));
+            std::process::exit(1);
+        });
+        let query_end: usize = fields[3].parse().unwrap_or_else(|_| {
+            error!("{}", message_with_truncate_paf_file("Invalid query_end in PAF line", line));
+            std::process::exit(1);
+        });
         let strand = fields[4];
         let target_name = fields[5];
-        let target_start: usize = match fields[7].parse() {
-            Ok(val) => val,
-            Err(_) => {
-                warn!("Invalid target_start in PAF line: {}", line);
-                return;
-            }
-        };
-        let target_end: usize = match fields[8].parse() {
-            Ok(val) => val,
-            Err(_) => {
-                warn!("Invalid target_end in PAF line: {}", line);
-                return;
-            }
-        };
+        //let target_len: usize = fields[6].parse()?;
+        let target_start: usize = fields[7].parse().unwrap_or_else(|_| {
+            error!("{}", message_with_truncate_paf_file("Invalid target_start in PAF line", line));
+            std::process::exit(1);
+        });
+        let target_end: usize = fields[8].parse().unwrap_or_else(|_| {
+            error!("{}", message_with_truncate_paf_file("Invalid target_end in PAF line", line));
+            std::process::exit(1);
+        });
 
         // Create a thread-local FASTA reader
-        let fasta_reader = match FastaReader::from_path(fasta_path) {
-            Ok(reader) => reader,
-            Err(e) => {
-                error!("Failed to create FASTA reader: {}", e);
-                return;
-            }
-        };
-
+        let fasta_reader = FastaReader::from_path(fasta_path).unwrap_or_else(|e| {
+            error!("Failed to create FASTA reader: {}", e);
+            std::process::exit(1);
+        });
+        
         // Fetch query sequence
         let query_seq = if strand == "+" {
             match fasta_reader.fetch_seq(query_name, query_start, query_end - 1) {
@@ -489,8 +508,8 @@ fn process_decompress_chunk(
                     seq_vec
                 },
                 Err(e) => {
-                    warn!("Failed to fetch query sequence: {}", e);
-                    return;
+                    error!("Failed to fetch query sequence: {}", e);
+                    std::process::exit(1);
                 }
             }
         } else {
@@ -501,8 +520,8 @@ fn process_decompress_chunk(
                     rc
                 },
                 Err(e) => {
-                    warn!("Failed to fetch query sequence: {}", e);
-                    return;
+                    error!("Failed to fetch query sequence: {}", e);
+                    std::process::exit(1);
                 }
             }
         };
@@ -515,8 +534,8 @@ fn process_decompress_chunk(
                 seq_vec
             },
             Err(e) => {
-                warn!("Failed to fetch target sequence: {}", e);
-                return;
+                error!("Failed to fetch target sequence: {}", e);
+                std::process::exit(1);
             }
         };
 
@@ -558,6 +577,16 @@ fn process_decompress_chunk(
         let new_line = line.replace(tp_field, &format!("cg:Z:{}", cigar));
         println!("{}", new_line);
     });
+}
+
+/// Combines a message with the first 9 columns of a PAF line.
+fn message_with_truncate_paf_file(message: &str, line: &str) -> String {
+    let truncated_line = line
+        .split('\t')
+        .take(9)
+        .collect::<Vec<&str>>()
+        .join("\t");
+    format!("{}: {} ...", message, truncated_line)
 }
 
 fn format_tracepoints(tracepoints: &[(usize, usize)]) -> String {
@@ -623,12 +652,8 @@ fn get_cigar_diagonal_bounds(cigar: &str) -> (i64, i64) {
         if c.is_digit(10) {
             num_buffer.push(c);
         } else {
-            // Get the count (or 1 if no number specified)
-            let count = if num_buffer.is_empty() {
-                1
-            } else {
-                num_buffer.parse::<i64>().unwrap()
-            };
+            // Get the count
+            let count = num_buffer.parse::<i64>().unwrap();
             num_buffer.clear();
             
             match c {
@@ -651,6 +676,47 @@ fn get_cigar_diagonal_bounds(cigar: &str) -> (i64, i64) {
     }
     
     (min_diagonal, max_diagonal)
+}
+
+fn compute_deviation(cigar: &str) -> (i64, i64, i64, i64) {
+    let mut deviation = 0;
+    let mut d_max = -10000;
+    let mut d_min = 10000;
+    let mut max_gap = 0;
+    
+    // Parse CIGAR string with numerical counts
+    let mut num_buffer = String::new();
+    
+    for c in cigar.chars() {
+        if c.is_digit(10) {
+            num_buffer.push(c);
+        } else {
+            // Get the count
+            let count = num_buffer.parse::<i64>().unwrap();
+            num_buffer.clear();
+            
+            match c {
+                'M' | '=' | 'X' => {
+                    // Matches stay on same diagonal
+                },
+                'D' => {
+                    // Deletions move down diagonal by count amount
+                    deviation -= count;
+                    max_gap = std::cmp::max(max_gap, count);
+                },
+                'I' => {
+                    deviation += count;
+                    max_gap = std::cmp::max(max_gap, count);
+                },
+                _ => panic!("Invalid CIGAR operation: {}", c)
+            }
+
+            d_max = std::cmp::max(d_max, deviation);
+            d_min = std::cmp::min(d_min, deviation);
+        }
+    }
+
+    (deviation, d_min, d_max, max_gap)
 }
 
 /// Returns the reverse complement of a DNA sequence
