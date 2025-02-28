@@ -6,6 +6,7 @@ edition = "2021"
 [dependencies]
 clap = { version = "4.5.31", features = ["derive"] }
 rust-htslib = { version = "0.46.0", default-features = false } # Don't update it, see https://github.com/rust-bio/rust-htslib/issues/434
+flate2 = "1.1.0"
 
 #lib_wfa2 = { path = "/home/guarracino/Dropbox/git/lib_wfa2"}
 lib_wfa2 = { git = "https://github.com/AndreaGuarracino/lib_wfa2", rev = "c608c436a6753d2c21c97d9f5c338efae99d042b"}
@@ -16,3 +17,5 @@ lib_tracepoints = { path = "/home/guarracino/Dropbox/git/lib_tracepoints"}
 
 log = "0.4.22"
 env_logger = "0.11.5"
+
+rayon = "1.10.0" # Parallel processing library

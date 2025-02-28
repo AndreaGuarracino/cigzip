@@ -1,12 +1,12 @@
-use core::panic;
 use clap::Parser;
-use std::io::{BufRead, BufReader};
+use std::io::{self, BufRead, BufReader};
 use std::fs::File;
+use flate2::read::GzDecoder;
 use rust_htslib::faidx::Reader as FastaReader;
-
-use lib_tracepoints::{cigar_to_tracepoints, cigar_to_banded_tracepoints, tracepoints_to_cigar, banded_tracepoints_to_cigar};
+use lib_tracepoints::{cigar_to_tracepoints, cigar_to_banded_tracepoints, tracepoints_to_cigar, banded_tracepoints_to_cigar, align_sequences_wfa, cigar_ops_to_cigar_string};
 use lib_wfa2::affine_wavefront::{AffineWavefronts};
-use log::{info, warn, error};
+use log::{info, error};
+use rayon::prelude::*;
 
 /// Common options shared between all commands
 #[derive(Parser, Debug)]
@@ -15,6 +15,10 @@ struct CommonOpts {
     #[arg(short = 'p', long = "paf")]
     paf: String,
 
+    /// Number of threads to use (default: 2)
+    #[arg(short = 't', long = "threads", default_value_t = 2)]
+    threads: usize,
+    
     /// Verbosity level (0 = error, 1 = info, 2 = debug)
     #[arg(short, long, default_value = "0")]
     verbose: u8,
@@ -83,134 +87,97 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             setup_logger(common.verbose);
             info!("Converting CIGAR to {} tracepoints", if banded { "banded" } else { "basic" });
 
+            // Set the thread pool size
+            rayon::ThreadPoolBuilder::new()
+                .num_threads(common.threads)
+                .build_global()?;
+
             // Open the PAF file (or use stdin if "-" is provided).
-            let reader: Box<dyn BufRead> = if common.paf == "-" {
-                Box::new(BufReader::new(std::io::stdin()))
-            } else {
-                Box::new(BufReader::new(File::open(&common.paf)?))
-            };
+            let paf_reader = get_paf_reader(&common.paf)?;
 
-            for line in reader.lines() {
-                let line = line?;
-                if line.trim().is_empty() || line.starts_with('#') {
-                    continue;
+            // Process in chunks
+            let chunk_size = std::cmp::max(common.threads * 100, 1000);
+            let mut lines = Vec::with_capacity(chunk_size);
+            for line_result in paf_reader.lines() {
+                match line_result {
+                    Ok(line) => {
+                        if line.trim().is_empty() || line.starts_with('#') {
+                            continue;
+                        }
+                        
+                        lines.push(line);
+                        
+                        if lines.len() >= chunk_size {
+                            // Process current chunk in parallel
+                            process_compress_chunk(&lines, banded, max_diff);
+                            lines.clear();
+                        }
+                    },
+                    Err(e) => return Err(e.into()),
                 }
-                let fields: Vec<&str> = line.split('\t').collect();
-                if fields.len() < 12 {
-                    warn!("Skipping malformed PAF line: {}", line);
-                    continue;
-                }
-                let Some(cg_field) = fields.iter().find(|&&s| s.starts_with("cg:Z:")) else {
-                    warn!("Skipping CIGAR-less PAF line: {}", line);
-                    continue;
-                };
-                let cigar = &cg_field[5..]; // Direct slice instead of strip_prefix("cg:Z:")
-    
-                // Convert CIGAR to tracepoints
-                let tracepoints_str = if banded {
-                    let tp = cigar_to_banded_tracepoints(cigar, max_diff);
-                    format_banded_tracepoints(&tp)
-                } else {
-                    let tp = cigar_to_tracepoints(cigar, max_diff);
-                    format_tracepoints(&tp)
-                };
-
-                // Print the original line, replacing the CIGAR string with the new tracepoints tag
-                let new_line = line.replace(cg_field, &format!("tp:Z:{}", tracepoints_str));
-                println!("{}", new_line);
+            }
+            
+            // Process remaining lines
+            if !lines.is_empty() {
+                process_compress_chunk(&lines, banded, max_diff);
             }
         },
         Args::Decompress { common, fasta, penalties } => {
             setup_logger(common.verbose);
             info!("Converting tracepoints to CIGAR");
 
+            // Set the thread pool size
+            rayon::ThreadPoolBuilder::new()
+                .num_threads(common.threads)
+                .build_global()?;
+
             // Parse penalties
             let (mismatch, gap_open1, gap_ext1, gap_open2, gap_ext2) = parse_penalties(&penalties)?;
 
-            // Open the FASTA file
-            let fasta_reader = FastaReader::from_path(&fasta).expect("Error reading FASTA file");
-
             // Open the PAF file (or use stdin if "-" is provided).
-            let reader: Box<dyn BufRead> = if common.paf == "-" {
-                Box::new(BufReader::new(std::io::stdin()))
-            } else {
-                Box::new(BufReader::new(File::open(&common.paf)?))
-            };
+            let paf_reader = get_paf_reader(&common.paf)?;
 
-            for line in reader.lines() {
-                let line = line?;
-                if line.trim().is_empty() || line.starts_with('#') {
-                    continue;
+            // Process in chunks
+            let chunk_size = std::cmp::max(common.threads * 100, 1000);
+            let mut lines = Vec::with_capacity(chunk_size);
+            for line_result in paf_reader.lines() {
+                match line_result {
+                    Ok(line) => {
+                        if line.trim().is_empty() || line.starts_with('#') {
+                            continue;
+                        }
+                        
+                        lines.push(line);
+                        
+                        if lines.len() >= chunk_size {
+                            // Process current chunk in parallel
+                            process_decompress_chunk(
+                                &lines, 
+                                &fasta, 
+                                mismatch, 
+                                gap_open1, 
+                                gap_ext1, 
+                                gap_open2, 
+                                gap_ext2
+                            );
+                            lines.clear();
+                        }
+                    },
+                    Err(e) => return Err(e.into()),
                 }
-                let fields: Vec<&str> = line.split('\t').collect();
-                if fields.len() < 12 {
-                    warn!("Skipping malformed PAF line: {}", line);
-                    continue;
-                }
-                let Some(tp_field) = fields.iter().find(|&&s| s.starts_with("tp:Z:")) else {
-                    warn!("Skipping tracepoints-less PAF line: {}", line);
-                    continue;
-                };
-                let tracepoints_str = &tp_field[5..]; // Direct slice instead of strip_prefix("tp:Z:")
-    
-                // Parse mandatory PAF fields.
-                let query_name = fields[0];
-                //let query_len: usize = fields[1].parse()?;
-                let query_start: usize = fields[2].parse()?;
-                let query_end: usize = fields[3].parse()?;
-                let strand = fields[4];
-                let target_name = fields[5];
-                //let target_len: usize = fields[6].parse()?;
-                let target_start: usize = fields[7].parse()?;
-                let target_end: usize = fields[8].parse()?;
-
-                // Fetch query sequence from FASTA.
-                let query_seq = if strand == "+" {
-                    fasta_reader.fetch_seq(query_name, query_start, query_end - 1)?.to_vec()
-                } else {
-                    // For reverse strand, fetch the sequence and reverse complement it
-                    reverse_complement(&fasta_reader.fetch_seq(query_name, query_start, query_end - 1)?.to_vec())
-                };
-                // Fetch target sequence from FASTA.
-                let target_seq = fasta_reader.fetch_seq(target_name, target_start, target_end - 1)?.to_vec();
-
-                // Check if the tracepoints are banded or not by checking if the first tracepoint is a tuple of 2 element or 4
-                let is_banded = tracepoints_str.split(';').next().unwrap().split(',').count() == 4;
-
-                // Convert tracepoints to CIGAR
-                let cigar = if is_banded {
-                    let tracepoints = parse_banded_tracepoints(tracepoints_str);
-                    banded_tracepoints_to_cigar(
-                        &tracepoints,
-                        &query_seq,
-                        &target_seq,
-                        0,
-                        0,
-                        mismatch,
-                        gap_open1,
-                        gap_ext1,
-                        gap_open2,
-                        gap_ext2
-                    )
-                } else {
-                    let tracepoints = parse_tracepoints(tracepoints_str);
-                    tracepoints_to_cigar(
-                        &tracepoints,
-                        &query_seq,
-                        &target_seq,
-                        0,
-                        0,
-                        mismatch,
-                        gap_open1,
-                        gap_ext1,
-                        gap_open2,
-                        gap_ext2
-                    )
-                };
-
-                // Print the original line, replacing the tracepoints tag with the CIGAR string
-                let new_line = line.replace(tp_field, &format!("cg:Z:{}", cigar));
-                println!("{}", new_line);
+            }
+            
+            // Process remaining lines
+            if !lines.is_empty() {
+                process_decompress_chunk(
+                    &lines, 
+                    &fasta, 
+                    mismatch, 
+                    gap_open1, 
+                    gap_ext1, 
+                    gap_open2, 
+                    gap_ext2
+                );
             }
         },
         #[cfg(debug_assertions)]
@@ -224,33 +191,29 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             if let (Some(paf), Some(fasta)) = (paf, fasta) {
                 info!("PAF file: {}", paf);
                 info!("FASTA file: {}", fasta);
-                info!("Penalties: {}", penalties);
 
                 // Open the FASTA file
                 let fasta_reader = FastaReader::from_path(&fasta).expect("Error reading FASTA file");
 
                 // Open the PAF file (or use stdin if "-" is provided).
-                let reader: Box<dyn BufRead> = if paf == "-" {
-                    Box::new(BufReader::new(std::io::stdin()))
-                } else {
-                    Box::new(BufReader::new(File::open(&paf)?))
-                };
+                let paf_reader = get_paf_reader(&paf)?;
 
-                for line in reader.lines() {
+                for line in paf_reader.lines() {
                     let line = line?;
                     if line.trim().is_empty() || line.starts_with('#') {
                         continue;
                     }
                     let fields: Vec<&str> = line.split('\t').collect();
                     if fields.len() < 12 {
-                        warn!("Skipping malformed PAF line: {}", line);
-                        continue;
+                        error!("{}", message_with_truncate_paf_file("Skipping malformed PAF line", &line));
+                        std::process::exit(1);
                     }
+                    
                     let Some(cg_field) = fields.iter().find(|&&s| s.starts_with("cg:Z:")) else {
-                        warn!("Skipping CIGAR-less PAF line: {}", line);
-                        continue;
+                        error!("{}", message_with_truncate_paf_file("Skipping CIGAR-less PAF line", &line));
+                        std::process::exit(1);
                     };
-                    let paf_cigar = &cg_field[5..]; // Direct slice instead of strip_prefix("cg:Z:")
+                    let _paf_cigar = &cg_field[5..]; // Direct slice instead of strip_prefix("cg:Z:")
 
                     // Parse mandatory PAF fields.
                     let query_name = fields[0];
@@ -263,20 +226,50 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     let target_start: usize = fields[7].parse()?;
                     let target_end: usize = fields[8].parse()?;
                     
-                    // Fetch query sequence from FASTA.
+                    // Fetch query sequence
                     let query_seq = if strand == "+" {
-                        fasta_reader.fetch_seq(query_name, query_start, query_end - 1)?.to_vec()
+                        match fasta_reader.fetch_seq(query_name, query_start, query_end - 1) {
+                            Ok(seq) => {
+                                let mut seq_vec = seq.to_vec();
+                                seq_vec.iter_mut().for_each(|byte| *byte = byte.to_ascii_uppercase());
+                                seq_vec
+                            },
+                            Err(e) => {
+                                error!("Failed to fetch query sequence: {}", e);
+                                std::process::exit(1);
+                            }
+                        }
                     } else {
-                        // For reverse strand, fetch the sequence and reverse complement it
-                        reverse_complement(&fasta_reader.fetch_seq(query_name, query_start, query_end - 1)?.to_vec())
+                        match fasta_reader.fetch_seq(query_name, query_start, query_end - 1) {
+                            Ok(seq) => {
+                                let mut rc = reverse_complement(&seq.to_vec());
+                                rc.iter_mut().for_each(|byte| *byte = byte.to_ascii_uppercase());
+                                rc
+                            },
+                            Err(e) => {
+                                error!("Failed to fetch query sequence: {}", e);
+                                std::process::exit(1);
+                            }
+                        }
                     };
-                    // Fetch target sequence from FASTA.
-                    let target_seq = fasta_reader.fetch_seq(target_name, target_start, target_end - 1)?.to_vec();
-                    
-                    // let mut aligner = AffineWavefronts::with_penalties_affine2p(0, mismatch, gap_open1, gap_ext1, gap_open2, gap_ext2);
-                    // let realn_cigar = align_sequences_wfa(&query_seq, &target_seq, &mut aligner);
-                    // let realn_cigar = cigar_ops_to_cigar_string(&realn_cigar);
-                    // let paf_cigar = &realn_cigar;
+
+                    // Fetch target sequence
+                    let target_seq = match fasta_reader.fetch_seq(target_name, target_start, target_end - 1) {
+                        Ok(seq) => {
+                            let mut seq_vec = seq.to_vec();
+                            seq_vec.iter_mut().for_each(|byte| *byte = byte.to_ascii_uppercase());
+                            seq_vec
+                        },
+                        Err(e) => {
+                            error!("Failed to fetch target sequence: {}", e);
+                            std::process::exit(1);
+                        }
+                    };
+
+                    let mut aligner = AffineWavefronts::with_penalties_affine2p(0, mismatch, gap_open1, gap_ext1, gap_open2, gap_ext2);
+                    let realn_cigar = align_sequences_wfa(&query_seq, &target_seq, &mut aligner);
+                    let realn_cigar = cigar_ops_to_cigar_string(&realn_cigar);
+                    let paf_cigar = &realn_cigar;
 
                     // Convert CIGAR to tracepoints using query (A) and target (B) coordinates.
                     let tracepoints = cigar_to_tracepoints(paf_cigar, max_diff);
@@ -287,6 +280,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         error!("Tracepoints mismatch! {}", line);
                         error!("\t       tracepoints: {:?}", tracepoints);
                         error!("\tbanded_tracepoints: {:?}", banded_tracepoints);
+                        std::process::exit(1);
                     }
 
                     // Reconstruct the CIGAR from tracepoints.
@@ -331,28 +325,31 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
                     if cigar_from_tracepoints != cigar_from_banded_tracepoints {
                         error!("CIGAR mismatch! {}", line);
-                        info!("{}", line);
-                        info!("\t                   tracepoints: {:?}", tracepoints);
-                        info!("\t            banded_tracepoints: {:?}", banded_tracepoints);
-                        info!("\t                CIGAR from PAF: {}", paf_cigar);
-                        info!("\t        CIGAR from tracepoints: {}", cigar_from_tracepoints);
-                        info!("\t CIGAR from banded_tracepoints: {}", cigar_from_banded_tracepoints);
-                        info!("\t seqa: {}", String::from_utf8(query_seq).unwrap());
-                        info!("\t seqb: {}", String::from_utf8(target_seq).unwrap());
-                        info!("               bounds CIGAR from PAF: {:?}", get_cigar_diagonal_bounds(&paf_cigar));
-                        info!("       bounds CIGAR from tracepoints: {:?}", get_cigar_diagonal_bounds(&cigar_from_tracepoints));
-                        info!("bounds CIGAR from banded_tracepoints: {:?}", get_cigar_diagonal_bounds(&cigar_from_banded_tracepoints));
+                        error!("\t                   tracepoints: {:?}", tracepoints);
+                        error!("\t            banded_tracepoints: {:?}", banded_tracepoints);
+                        error!("\t                CIGAR from PAF: {}", paf_cigar);
+                        error!("\t        CIGAR from tracepoints: {}", cigar_from_tracepoints);
+                        error!("\t CIGAR from banded_tracepoints: {}", cigar_from_banded_tracepoints);
+                        error!("\t seqa: {}", String::from_utf8(query_seq).unwrap());
+                        error!("\t seqb: {}", String::from_utf8(target_seq).unwrap());
+                        error!("               bounds CIGAR from PAF: {:?}", get_cigar_diagonal_bounds(&paf_cigar));
+                        error!("       bounds CIGAR from tracepoints: {:?}", get_cigar_diagonal_bounds(&cigar_from_tracepoints));
+                        error!("bounds CIGAR from banded_tracepoints: {:?}", get_cigar_diagonal_bounds(&cigar_from_banded_tracepoints));
+
+                        let (deviation, d_min, d_max, max_gap) = compute_deviation(&cigar_from_tracepoints);
+                        error!("               deviation CIGAR from PAF: {:?}", compute_deviation(&paf_cigar));
+                        error!("       deviation CIGAR from tracepoints: {:?}", (deviation, d_min, d_max, max_gap));
+                        error!("deviation CIGAR from banded_tracepoints: {:?}", compute_deviation(&cigar_from_banded_tracepoints));
+                        error!("=> Try using --wfa-heuristic=banded-static --wfa-heuristic-parameters=-{},{}\n", std::cmp::max(max_gap, -d_min), std::cmp::max(max_gap, d_max));
+                        std::process::exit(1);
                     }
                 }
             } else {
                 // Fallback: run default example if no PAF/FASTA provided.
                 info!("No PAF and FASTA provided, running default example.");
 
-                let a = get_cigar_diagonal_bounds("514M1D366M1X104M1X92M1X197M1X261M3I664M1X126M1X17M1X572M1X525M1X234M5D320M1X584M1X221M1X64M1X231M1X971M1X586M1X324M1X305M1X344M1X38M1X14M1X109M1X283M1X211M1X1011M1X77M1X33M1X136M1X1190M1X779M1X302M1X420M1X539M1X317M1X2M1X782M1X425M1X496M1X35M1X723M1X146M1X77M1X454M1X16M2D8M1X146M2X14M1X208M158I15M1X6M1X4M2X5M1X2M1X3M2X3M2X1M1X22M1I2M1X6M2X2M1X1M1X7M3X6M2X1M1X4M1X10M2X25M1D6M5D10M1X1M2I4M2X1M235D1M");
-                println!("from_paf {:?}", a);
-
-                let query_seq: String = "GAACAGAGAAATGGTGGAATTCAAATACAAAAAAACCGCAAAATTAAAAATCTTGCGGCTCTCTGAACTCATTTTCATGAGTGAATTTGGCGGAACGGACGGGACTCGAACCCGCGACCCCCTGCGTGACAGGCAGGTATTCTAACCGACTGAACTACCGCTCCGCCGTTGTGTTCCGTTGGGAACGGGCGAATATTACGGATTTGCCTCACCCTTCGTCAACGGTTTTTCTCATCTTTTGAATCGTTTGCTGCAAAAATCGCCCAAGCCGCTATTTTTAGCGCCTTTTACAGGTATTTATGCCCGCCAGAGGCAGCTTCCGCCCTTCTTCTCCACCAGATCAAGACGGGCTTCCTGAGCTGCAAGCTCTTCATCTGTCGCAAAAACAACGCGTAACTTACTTGCCTGACGTACAATGCGCTGAATTGTTGCTTCACCTTGTTGCTGCTGTGTCTCTCCTTCCATCGCAAAAGCCATCGACGTTTGACCACCGGTCATCG".to_owned();
-                let target_seq: String = "GAACAGAGAAATGGTGGAATTCAAATACAAAAAAACCGCAAAATTAACCCTTCGTCAACGGTTTTTCTCATCTTTTGAATCGTTTGCTGCAAAAATCGCCCAAGCCGCTATTTTTAGCGCCTTTTACAGGTATTTATGCCCGCCAGAGGCAGCTTCCGCCCTTCTTCTCCACCAGATCAAGACGGGCTTCCTGAGCTGCAAGCTCTTCATCTGTCGCAAAAACAACGCGTAACTTACTTGCCTGACGTACAATGCGCTGAATTGTTGCTTCACCTTGTTGCTGCTGTGTCTCTCCTTCCATCGCAAAAGCCATCGACGTTTGACCACCGGTCATCG".to_owned();
+                let query_seq = b"GAACAGAGAAATGGTGGAATTCAAATACAAAAAAACCGCAAAATTAAAAATCTTGCGGCTCTCTGAACTCATTTTCATGAGTGAATTTGGCGGAACGGACGGGACTCGAACCCGCGACCCCCTGCGTGACAGGCAGGTATTCTAACCGACTGAACTACCGCTCCGCCGTTGTGTTCCGTTGGGAACGGGCGAATATTACGGATTTGCCTCACCCTTCGTCAACGGTTTTTCTCATCTTTTGAATCGTTTGCTGCAAAAATCGCCCAAGCCGCTATTTTTAGCGCCTTTTACAGGTATTTATGCCCGCCAGAGGCAGCTTCCGCCCTTCTTCTCCACCAGATCAAGACGGGCTTCCTGAGCTGCAAGCTCTTCATCTGTCGCAAAAACAACGCGTAACTTACTTGCCTGACGTACAATGCGCTGAATTGTTGCTTCACCTTGTTGCTGCTGTGTCTCTCCTTCCATCGCAAAAGCCATCGACGTTTGACCACCGGTCATCG".to_owned();
+                let target_seq = b"GAACAGAGAAATGGTGGAATTCAAATACAAAAAAACCGCAAAATTAACCCTTCGTCAACGGTTTTTCTCATCTTTTGAATCGTTTGCTGCAAAAATCGCCCAAGCCGCTATTTTTAGCGCCTTTTACAGGTATTTATGCCCGCCAGAGGCAGCTTCCGCCCTTCTTCTCCACCAGATCAAGACGGGCTTCCTGAGCTGCAAGCTCTTCATCTGTCGCAAAAACAACGCGTAACTTACTTGCCTGACGTACAATGCGCTGAATTGTTGCTTCACCTTGTTGCTGCTGTGTCTCTCCTTCCATCGCAAAAGCCATCGACGTTTGACCACCGGTCATCG".to_owned();
 
                 let a_start = 0;
                 let a_end = query_seq.len();
@@ -360,34 +357,34 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 let b_end = target_seq.len();
 
                 // Create aligner and configure settings
-                // let mut aligner = AffineWavefronts::default();
-                // let paf_cigar = align_sequences_wfa(&query_seq[a_start..a_end], &target_seq[b_start..b_end], &mut aligner);
-                // let paf_cigar = cigar_ops_to_cigar_string(&paf_cigar);
+                let mut aligner = AffineWavefronts::default();
+                let paf_cigar = align_sequences_wfa(&query_seq[a_start..a_end], &target_seq[b_start..b_end], &mut aligner);
+                let paf_cigar = cigar_ops_to_cigar_string(&paf_cigar);
 
-                // let tracepoints = cigar_to_tracepoints_variable(&paf_cigar, max_diff);
+                let tracepoints = cigar_to_tracepoints(&paf_cigar, max_diff);
+                let recon_cigar_variable = tracepoints_to_cigar(
+                    &tracepoints,
+                    &query_seq,
+                    &target_seq,
+                    0,
+                    0,
+                    mismatch,
+                    gap_open1,
+                    gap_ext1,
+                    gap_open2,
+                    gap_ext2
+                );
 
-                // let recon_cigar_variable = tracepoints_to_cigar_variable(
-                //     &tracepoints_vartracepointsable,
-                //     &query_seq,
-                //     &target_seq,
-                //     0,
-                //     0,
-                //     mismatch,
-                //     gap_open1,
-                //     gap_ext1,
-                //     gap_open2,
-                //     gap_ext2
-                // );
+                //let realn_cigar = align_sequences_wfa(&query_seq, &target_seq);
+                //let realn_cigar = cigar_ops_to_cigar_string(&realn_cigar);
 
-                // //let realn_cigar = align_sequences_wfa(&query_seq, &target_seq);
-                // //let realn_cigar = cigar_ops_to_cigar_string(&realn_cigar);
+                info!("\t            tracepoints: {:?}", tracepoints);
+                info!("\t CIGAR from tracepoints_variable: {}", recon_cigar_variable);
+                info!("\t              CIGAR from the PAF: {}", paf_cigar);
+                println!("get_cigar_diagonal_bounds from the PAF {:?}", get_cigar_diagonal_bounds(&paf_cigar));
+                //info!("\t CIGAR from realignment: {}", realn_cigar);
 
-                // info!("\t            tracepoints: {:?}", tracepoints);
-                // info!("\t CIGAR from tracepoints_variable: {}", recon_cigar_variable);
-                // info!("\t              CIGAR from the PAF: {}", paf_cigar);
-                // //info!("\t CIGAR from realignment: {}", realn_cigar);
-
-                // assert!(paf_cigar == recon_cigar_variable);
+                assert!(paf_cigar == recon_cigar_variable);
             }
         },
     }
@@ -399,11 +396,194 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 fn setup_logger(verbosity: u8) {
     env_logger::Builder::new()
         .filter_level(match verbosity {
-            0 => log::LevelFilter::Error,
-            1 => log::LevelFilter::Info,
-            _ => log::LevelFilter::Debug,
+            0 => log::LevelFilter::Warn,    // Errors and warnings
+            1 => log::LevelFilter::Info,    // Errors, warnings, and info
+            _ => log::LevelFilter::Debug,   // Errors, warnings, info, and debug
         })
         .init();
+}
+
+fn get_paf_reader(paf: &str) -> io::Result<Box<dyn BufRead>> {
+    if paf == "-" {
+        Ok(Box::new(BufReader::new(std::io::stdin())))
+    } else if paf.ends_with(".gz") || paf.ends_with(".bgz") {
+        let file = File::open(paf)?;
+        let decoder = GzDecoder::new(file);
+        Ok(Box::new(BufReader::new(decoder)))
+    } else {
+        let file = File::open(paf)?;
+        Ok(Box::new(BufReader::new(file)))
+    }
+}
+
+/// Process a chunk of lines in parallel for compression
+fn process_compress_chunk(lines: &[String], banded: bool, max_diff: usize) {
+    lines.par_iter().for_each(|line| {
+        let fields: Vec<&str> = line.split('\t').collect();
+        if fields.len() < 12 {
+            error!("{}", message_with_truncate_paf_file("Skipping malformed PAF line", line));
+            std::process::exit(1);
+        }
+        
+        let Some(cg_field) = fields.iter().find(|&&s| s.starts_with("cg:Z:")) else {
+            error!("{}", message_with_truncate_paf_file("Skipping CIGAR-less PAF line", line));
+            std::process::exit(1);
+        };
+        let cigar = &cg_field[5..]; // Direct slice instead of strip_prefix("cg:Z:")
+        
+        // Convert CIGAR to tracepoints
+        let tracepoints_str = if banded {
+            let tp = cigar_to_banded_tracepoints(cigar, max_diff);
+            format_banded_tracepoints(&tp)
+        } else {
+            let tp = cigar_to_tracepoints(cigar, max_diff);
+            format_tracepoints(&tp)
+        };
+        
+        // Print the result
+        let new_line = line.replace(cg_field, &format!("tp:Z:{}", tracepoints_str));
+        println!("{}", new_line); // It is thread-safe by default
+    });
+}
+/// Process a chunk of lines in parallel for decompression
+fn process_decompress_chunk(
+    lines: &[String], 
+    fasta_path: &str, 
+    mismatch: i32, 
+    gap_open1: i32, 
+    gap_ext1: i32, 
+    gap_open2: i32, 
+    gap_ext2: i32
+) {
+    lines.par_iter().for_each(|line| {
+        let fields: Vec<&str> = line.split('\t').collect();
+        if fields.len() < 12 {
+            error!("{}", message_with_truncate_paf_file("Skipping malformed PAF line", line));
+            std::process::exit(1);
+        }
+        
+        let Some(tp_field) = fields.iter().find(|&&s| s.starts_with("tp:Z:")) else {
+            error!("{}", message_with_truncate_paf_file("Skipping tracepoints-less PAF line", line));
+            std::process::exit(1);
+        };
+        let tracepoints_str = &tp_field[5..]; // Direct slice instead of strip_prefix("tp:Z:")
+        
+        // Parse mandatory PAF fields
+        let query_name = fields[0];
+        let query_start: usize = fields[2].parse().unwrap_or_else(|_| {
+            error!("{}", message_with_truncate_paf_file("Invalid query_start in PAF line", line));
+            std::process::exit(1);
+        });
+        let query_end: usize = fields[3].parse().unwrap_or_else(|_| {
+            error!("{}", message_with_truncate_paf_file("Invalid query_end in PAF line", line));
+            std::process::exit(1);
+        });
+        let strand = fields[4];
+        let target_name = fields[5];
+        //let target_len: usize = fields[6].parse()?;
+        let target_start: usize = fields[7].parse().unwrap_or_else(|_| {
+            error!("{}", message_with_truncate_paf_file("Invalid target_start in PAF line", line));
+            std::process::exit(1);
+        });
+        let target_end: usize = fields[8].parse().unwrap_or_else(|_| {
+            error!("{}", message_with_truncate_paf_file("Invalid target_end in PAF line", line));
+            std::process::exit(1);
+        });
+
+        // Create a thread-local FASTA reader
+        let fasta_reader = FastaReader::from_path(fasta_path).unwrap_or_else(|e| {
+            error!("Failed to create FASTA reader: {}", e);
+            std::process::exit(1);
+        });
+        
+        // Fetch query sequence
+        let query_seq = if strand == "+" {
+            match fasta_reader.fetch_seq(query_name, query_start, query_end - 1) {
+                Ok(seq) => {
+                    let mut seq_vec = seq.to_vec();
+                    seq_vec.iter_mut().for_each(|byte| *byte = byte.to_ascii_uppercase());
+                    seq_vec
+                },
+                Err(e) => {
+                    error!("Failed to fetch query sequence: {}", e);
+                    std::process::exit(1);
+                }
+            }
+        } else {
+            match fasta_reader.fetch_seq(query_name, query_start, query_end - 1) {
+                Ok(seq) => {
+                    let mut rc = reverse_complement(&seq.to_vec());
+                    rc.iter_mut().for_each(|byte| *byte = byte.to_ascii_uppercase());
+                    rc
+                },
+                Err(e) => {
+                    error!("Failed to fetch query sequence: {}", e);
+                    std::process::exit(1);
+                }
+            }
+        };
+
+        // Fetch target sequence
+        let target_seq = match fasta_reader.fetch_seq(target_name, target_start, target_end - 1) {
+            Ok(seq) => {
+                let mut seq_vec = seq.to_vec();
+                seq_vec.iter_mut().for_each(|byte| *byte = byte.to_ascii_uppercase());
+                seq_vec
+            },
+            Err(e) => {
+                error!("Failed to fetch target sequence: {}", e);
+                std::process::exit(1);
+            }
+        };
+
+        // Check if the tracepoints are banded or not
+        let is_banded = tracepoints_str.split(';').next().unwrap().split(',').count() == 4;
+        
+        // Convert tracepoints to CIGAR
+        let cigar = if is_banded {
+            let tracepoints = parse_banded_tracepoints(tracepoints_str);
+            banded_tracepoints_to_cigar(
+                &tracepoints,
+                &query_seq,
+                &target_seq,
+                0,
+                0,
+                mismatch,
+                gap_open1,
+                gap_ext1,
+                gap_open2,
+                gap_ext2
+            )
+        } else {
+            let tracepoints = parse_tracepoints(tracepoints_str);
+            tracepoints_to_cigar(
+                &tracepoints,
+                &query_seq,
+                &target_seq,
+                0,
+                0,
+                mismatch,
+                gap_open1,
+                gap_ext1,
+                gap_open2,
+                gap_ext2
+            )
+        };
+
+        // Print the original line, replacing the tracepoints tag with the CIGAR string
+        let new_line = line.replace(tp_field, &format!("cg:Z:{}", cigar));
+        println!("{}", new_line);
+    });
+}
+
+/// Combines a message with the first 9 columns of a PAF line.
+fn message_with_truncate_paf_file(message: &str, line: &str) -> String {
+    let truncated_line = line
+        .split('\t')
+        .take(9)
+        .collect::<Vec<&str>>()
+        .join("\t");
+    format!("{}: {} ...", message, truncated_line)
 }
 
 fn format_tracepoints(tracepoints: &[(usize, usize)]) -> String {
@@ -469,12 +649,8 @@ fn get_cigar_diagonal_bounds(cigar: &str) -> (i64, i64) {
         if c.is_digit(10) {
             num_buffer.push(c);
         } else {
-            // Get the count (or 1 if no number specified)
-            let count = if num_buffer.is_empty() {
-                1
-            } else {
-                num_buffer.parse::<i64>().unwrap()
-            };
+            // Get the count
+            let count = num_buffer.parse::<i64>().unwrap();
             num_buffer.clear();
             
             match c {
@@ -497,6 +673,47 @@ fn get_cigar_diagonal_bounds(cigar: &str) -> (i64, i64) {
     }
     
     (min_diagonal, max_diagonal)
+}
+
+fn compute_deviation(cigar: &str) -> (i64, i64, i64, i64) {
+    let mut deviation = 0;
+    let mut d_max = -10000;
+    let mut d_min = 10000;
+    let mut max_gap = 0;
+    
+    // Parse CIGAR string with numerical counts
+    let mut num_buffer = String::new();
+    
+    for c in cigar.chars() {
+        if c.is_digit(10) {
+            num_buffer.push(c);
+        } else {
+            // Get the count
+            let count = num_buffer.parse::<i64>().unwrap();
+            num_buffer.clear();
+            
+            match c {
+                'M' | '=' | 'X' => {
+                    // Matches stay on same diagonal
+                },
+                'D' => {
+                    // Deletions move down diagonal by count amount
+                    deviation -= count;
+                    max_gap = std::cmp::max(max_gap, count);
+                },
+                'I' => {
+                    deviation += count;
+                    max_gap = std::cmp::max(max_gap, count);
+                },
+                _ => panic!("Invalid CIGAR operation: {}", c)
+            }
+
+            d_max = std::cmp::max(d_max, deviation);
+            d_min = std::cmp::min(d_min, deviation);
+        }
+    }
+
+    (deviation, d_min, d_max, max_gap)
 }
 
 /// Returns the reverse complement of a DNA sequence
