@@ -96,9 +96,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             let paf_reader = get_paf_reader(&common.paf)?;
 
             // Process in chunks
-            const CHUNK_SIZE: usize = 1000;
-            let mut lines = Vec::with_capacity(CHUNK_SIZE);
-            
+            let chunk_size = std::cmp::max(common.threads * 100, 1000);
+            let mut lines = Vec::with_capacity(chunk_size);
             for line_result in paf_reader.lines() {
                 match line_result {
                     Ok(line) => {
@@ -108,7 +107,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         
                         lines.push(line);
                         
-                        if lines.len() >= CHUNK_SIZE {
+                        if lines.len() >= chunk_size {
                             // Process current chunk in parallel
                             process_compress_chunk(&lines, banded, max_diff);
                             lines.clear();
@@ -139,9 +138,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             let paf_reader = get_paf_reader(&common.paf)?;
 
             // Process in chunks
-            const CHUNK_SIZE: usize = 1000;
-            let mut lines = Vec::with_capacity(CHUNK_SIZE);
-
+            let chunk_size = std::cmp::max(common.threads * 100, 1000);
+            let mut lines = Vec::with_capacity(chunk_size);
             for line_result in paf_reader.lines() {
                 match line_result {
                     Ok(line) => {
@@ -151,7 +149,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         
                         lines.push(line);
                         
-                        if lines.len() >= CHUNK_SIZE {
+                        if lines.len() >= chunk_size {
                             // Process current chunk in parallel
                             process_decompress_chunk(
                                 &lines, 
