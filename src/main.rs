@@ -37,7 +37,7 @@ enum Args {
         band: String,
         
         /// Max-diff value for tracepoints
-        #[arg(long, default_value = "128")]
+        #[arg(long, default_value = "32")]
         max_diff: usize,
     },
     /// Decompression of alignments
@@ -69,7 +69,7 @@ enum Args {
         penalties: String,
 
         /// Max-diff value for tracepoints
-        #[arg(long, default_value = "128")]
+        #[arg(long, default_value = "32")]
         max_diff: usize,
 
         /// Verbosity level (0 = error, 1 = info, 2 = debug)
