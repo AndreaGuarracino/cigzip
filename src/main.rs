@@ -15,8 +15,8 @@ struct CommonOpts {
     #[arg(short = 'p', long = "paf")]
     paf: String,
 
-    /// Number of threads to use (default: 2)
-    #[arg(short = 't', long = "threads", default_value_t = 2)]
+    /// Number of threads to use (default: 4)
+    #[arg(short = 't', long = "threads", default_value_t = 4)]
     threads: usize,
     
     /// Verbosity level (0 = error, 1 = info, 2 = debug)
@@ -251,6 +251,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             Ok(seq) => {
                                 let mut seq_vec = seq.to_vec();
                                 seq_vec.iter_mut().for_each(|byte| *byte = byte.to_ascii_uppercase());
+                                unsafe {libc::free(seq.as_ptr() as *mut std::ffi::c_void)}; // Free up memory (bug https://github.com/rust-bio/rust-htslib/issues/401#issuecomment-1704290171)
                                 seq_vec
                             },
                             Err(e) => {
@@ -263,6 +264,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             Ok(seq) => {
                                 let mut rc = reverse_complement(&seq.to_vec());
                                 rc.iter_mut().for_each(|byte| *byte = byte.to_ascii_uppercase());
+                                unsafe {libc::free(seq.as_ptr() as *mut std::ffi::c_void)}; // Free up memory (bug https://github.com/rust-bio/rust-htslib/issues/401#issuecomment-1704290171)
                                 rc
                             },
                             Err(e) => {
@@ -277,6 +279,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         Ok(seq) => {
                             let mut seq_vec = seq.to_vec();
                             seq_vec.iter_mut().for_each(|byte| *byte = byte.to_ascii_uppercase());
+                            unsafe {libc::free(seq.as_ptr() as *mut std::ffi::c_void)}; // Free up memory (bug https://github.com/rust-bio/rust-htslib/issues/401#issuecomment-1704290171)
                             seq_vec
                         },
                         Err(e) => {
