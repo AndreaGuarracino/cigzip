@@ -4,21 +4,22 @@ A tool for compression and decompression of alignment CIGAR strings using tracep
 
 ## Overview
 
-`cigzip` implements an efficient approach to sequence alignment storage using variable-sized tracepoints. Instead of storing complete CIGAR strings, alignments are compressed into tracepoints that adapt to the local alignment complexity, reducing storage size while allowing for full reconstruction.
+`cigzip` leverages an efficient approach to sequence alignment storage using tracepoints. Instead of storing complete CIGAR strings, alignments are compressed into tracepoints that adapt to the local alignment complexity, reducing storage size while allowing for full reconstruction.
 
 ## Features
 
 - **Compression**: Convert CIGAR strings to tracepoints for compact storage
 - **Decompression**: Reconstruct full CIGAR strings from tracepoints
-- **Banded Tracepoints**: Tracepoint representation for faster decompression
-- **Parallel Processing**: Multi-threaded operation
+- **Multiple Banding Strategies**: Choose between no banding, single-band, or double-band tracepoints
+- **Parallel Processing**: Multi-threaded operation with chunk-based processing
 - **Configurable Parameters**: Adjust max-diff, gap penalties, and other settings
+- **Support for Compressed Files**: Automatically handles gzipped and bgzipped PAF files
 
 ## Usage
 
 ```shell
 # Compress alignments in a PAF file (convert CIGAR to tracepoints)
-cigzip compress --paf alignments.paf [--banded] [--max-diff 128] [--threads 4] > alignments.tp.paf
+cigzip compress --paf alignments.paf [--band none|single|double] [--max-diff 128] [--threads 4] > alignments.tp.paf
 
 # Decompress alignments (convert tracepoints back to CIGAR)
 cigzip decompress --paf alignments.tp.paf --fasta sequences.fa [--penalties "3,4,2,24,1"] [--threads 4] > alignments.cigar.paf
