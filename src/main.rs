@@ -250,8 +250,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         match fasta_reader.fetch_seq(query_name, query_start, query_end - 1) {
                             Ok(seq) => {
                                 let mut seq_vec = seq.to_vec();
-                                seq_vec.iter_mut().for_each(|byte| *byte = byte.to_ascii_uppercase());
                                 unsafe {libc::free(seq.as_ptr() as *mut std::ffi::c_void)}; // Free up memory (bug https://github.com/rust-bio/rust-htslib/issues/401#issuecomment-1704290171)
+                                seq_vec.iter_mut().for_each(|byte| *byte = byte.to_ascii_uppercase());
                                 seq_vec
                             },
                             Err(e) => {
@@ -263,8 +263,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         match fasta_reader.fetch_seq(query_name, query_start, query_end - 1) {
                             Ok(seq) => {
                                 let mut rc = reverse_complement(&seq.to_vec());
-                                rc.iter_mut().for_each(|byte| *byte = byte.to_ascii_uppercase());
                                 unsafe {libc::free(seq.as_ptr() as *mut std::ffi::c_void)}; // Free up memory (bug https://github.com/rust-bio/rust-htslib/issues/401#issuecomment-1704290171)
+                                rc.iter_mut().for_each(|byte| *byte = byte.to_ascii_uppercase());
                                 rc
                             },
                             Err(e) => {
@@ -278,8 +278,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     let target_seq = match fasta_reader.fetch_seq(target_name, target_start, target_end - 1) {
                         Ok(seq) => {
                             let mut seq_vec = seq.to_vec();
-                            seq_vec.iter_mut().for_each(|byte| *byte = byte.to_ascii_uppercase());
                             unsafe {libc::free(seq.as_ptr() as *mut std::ffi::c_void)}; // Free up memory (bug https://github.com/rust-bio/rust-htslib/issues/401#issuecomment-1704290171)
+                            seq_vec.iter_mut().for_each(|byte| *byte = byte.to_ascii_uppercase());
                             seq_vec
                         },
                         Err(e) => {
@@ -535,6 +535,7 @@ fn process_decompress_chunk(
             match fasta_reader.fetch_seq(query_name, query_start, query_end - 1) {
                 Ok(seq) => {
                     let mut seq_vec = seq.to_vec();
+                    unsafe {libc::free(seq.as_ptr() as *mut std::ffi::c_void)}; // Free up memory (bug https://github.com/rust-bio/rust-htslib/issues/401#issuecomment-1704290171)
                     seq_vec.iter_mut().for_each(|byte| *byte = byte.to_ascii_uppercase());
                     seq_vec
                 },
@@ -547,6 +548,7 @@ fn process_decompress_chunk(
             match fasta_reader.fetch_seq(query_name, query_start, query_end - 1) {
                 Ok(seq) => {
                     let mut rc = reverse_complement(&seq.to_vec());
+                    unsafe {libc::free(seq.as_ptr() as *mut std::ffi::c_void)}; // Free up memory (bug https://github.com/rust-bio/rust-htslib/issues/401#issuecomment-1704290171)
                     rc.iter_mut().for_each(|byte| *byte = byte.to_ascii_uppercase());
                     rc
                 },
@@ -561,6 +563,7 @@ fn process_decompress_chunk(
         let target_seq = match fasta_reader.fetch_seq(target_name, target_start, target_end - 1) {
             Ok(seq) => {
                 let mut seq_vec = seq.to_vec();
+                unsafe {libc::free(seq.as_ptr() as *mut std::ffi::c_void)}; // Free up memory (bug https://github.com/rust-bio/rust-htslib/issues/401#issuecomment-1704290171)
                 seq_vec.iter_mut().for_each(|byte| *byte = byte.to_ascii_uppercase());
                 seq_vec
             },
