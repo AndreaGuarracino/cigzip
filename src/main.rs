@@ -1,7 +1,7 @@
 use clap::Parser;
 use std::io::{self, BufRead, BufReader};
 use std::fs::File;
-use flate2::read::GzDecoder;
+use flate2::read::MultiGzDecoder;
 use rust_htslib::faidx::Reader as FastaReader;
 use lib_tracepoints::{cigar_to_tracepoints, cigar_to_single_band_tracepoints, cigar_to_double_band_tracepoints, tracepoints_to_cigar, single_band_tracepoints_to_cigar, double_band_tracepoints_to_cigar, align_sequences_wfa, cigar_ops_to_cigar_string};
 use lib_wfa2::affine_wavefront::{AffineWavefronts};
@@ -430,7 +430,7 @@ fn get_paf_reader(paf: &str) -> io::Result<Box<dyn BufRead>> {
         Ok(Box::new(BufReader::new(std::io::stdin())))
     } else if paf.ends_with(".gz") || paf.ends_with(".bgz") {
         let file = File::open(paf)?;
-        let decoder = GzDecoder::new(file);
+        let decoder = MultiGzDecoder::new(file);
         Ok(Box::new(BufReader::new(decoder)))
     } else {
         let file = File::open(paf)?;
