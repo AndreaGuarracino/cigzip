@@ -13,9 +13,10 @@ flate2 = "1.1.0"
 lib_wfa2 = { git = "https://github.com/AndreaGuarracino/lib_wfa2", rev = "c608c436a6753d2c21c97d9f5c338efae99d042b"}
 
 #lib_tracepoints = { path = "/home/guarracino/Dropbox/git/lib_tracepoints"}
-lib_tracepoints = { git = "https://github.com/AndreaGuarracino/lib_tracepoints"} #, rev = "f416322e1e6733f1ef86bdf5715afdaf8d9b9e2b"}
+lib_tracepoints = { git = "https://github.com/AndreaGuarracino/lib_tracepoints", rev = "55b518296beb9f2842cccb9bfdc7a5edc638fa67"}
 
 log = "0.4.22"
 env_logger = "0.11.5"
 
 rayon = "1.10.0" # Parallel processing library
+libc = "0.2.170"

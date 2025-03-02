@@ -1,7 +1,7 @@
 use clap::Parser;
 use std::io::{self, BufRead, BufReader};
 use std::fs::File;
-use flate2::read::GzDecoder;
+use flate2::read::MultiGzDecoder;
 use rust_htslib::faidx::Reader as FastaReader;
 use lib_tracepoints::{cigar_to_tracepoints, cigar_to_single_band_tracepoints, cigar_to_double_band_tracepoints, tracepoints_to_cigar, single_band_tracepoints_to_cigar, double_band_tracepoints_to_cigar, align_sequences_wfa, cigar_ops_to_cigar_string};
 use lib_wfa2::affine_wavefront::{AffineWavefronts};
@@ -15,8 +15,8 @@ struct CommonOpts {
     #[arg(short = 'p', long = "paf")]
     paf: String,
 
-    /// Number of threads to use (default: 2)
-    #[arg(short = 't', long = "threads", default_value_t = 2)]
+    /// Number of threads to use (default: 4)
+    #[arg(short = 't', long = "threads", default_value_t = 4)]
     threads: usize,
     
     /// Verbosity level (0 = error, 1 = info, 2 = debug)
@@ -37,7 +37,7 @@ enum Args {
         band: String,
         
         /// Max-diff value for tracepoints
-        #[arg(long, default_value = "128")]
+        #[arg(long, default_value = "32")]
         max_diff: usize,
     },
     /// Decompression of alignments
@@ -69,7 +69,7 @@ enum Args {
         penalties: String,
 
         /// Max-diff value for tracepoints
-        #[arg(long, default_value = "128")]
+        #[arg(long, default_value = "32")]
         max_diff: usize,
 
         /// Verbosity level (0 = error, 1 = info, 2 = debug)
@@ -250,6 +250,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         match fasta_reader.fetch_seq(query_name, query_start, query_end - 1) {
                             Ok(seq) => {
                                 let mut seq_vec = seq.to_vec();
+                                unsafe {libc::free(seq.as_ptr() as *mut std::ffi::c_void)}; // Free up memory (bug https://github.com/rust-bio/rust-htslib/issues/401#issuecomment-1704290171)
                                 seq_vec.iter_mut().for_each(|byte| *byte = byte.to_ascii_uppercase());
                                 seq_vec
                             },
@@ -262,6 +263,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         match fasta_reader.fetch_seq(query_name, query_start, query_end - 1) {
                             Ok(seq) => {
                                 let mut rc = reverse_complement(&seq.to_vec());
+                                unsafe {libc::free(seq.as_ptr() as *mut std::ffi::c_void)}; // Free up memory (bug https://github.com/rust-bio/rust-htslib/issues/401#issuecomment-1704290171)
                                 rc.iter_mut().for_each(|byte| *byte = byte.to_ascii_uppercase());
                                 rc
                             },
@@ -276,6 +278,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     let target_seq = match fasta_reader.fetch_seq(target_name, target_start, target_end - 1) {
                         Ok(seq) => {
                             let mut seq_vec = seq.to_vec();
+                            unsafe {libc::free(seq.as_ptr() as *mut std::ffi::c_void)}; // Free up memory (bug https://github.com/rust-bio/rust-htslib/issues/401#issuecomment-1704290171)
                             seq_vec.iter_mut().for_each(|byte| *byte = byte.to_ascii_uppercase());
                             seq_vec
                         },
@@ -427,7 +430,7 @@ fn get_paf_reader(paf: &str) -> io::Result<Box<dyn BufRead>> {
         Ok(Box::new(BufReader::new(std::io::stdin())))
     } else if paf.ends_with(".gz") || paf.ends_with(".bgz") {
         let file = File::open(paf)?;
-        let decoder = GzDecoder::new(file);
+        let decoder = MultiGzDecoder::new(file);
         Ok(Box::new(BufReader::new(decoder)))
     } else {
         let file = File::open(paf)?;
@@ -532,6 +535,7 @@ fn process_decompress_chunk(
             match fasta_reader.fetch_seq(query_name, query_start, query_end - 1) {
                 Ok(seq) => {
                     let mut seq_vec = seq.to_vec();
+                    unsafe {libc::free(seq.as_ptr() as *mut std::ffi::c_void)}; // Free up memory (bug https://github.com/rust-bio/rust-htslib/issues/401#issuecomment-1704290171)
                     seq_vec.iter_mut().for_each(|byte| *byte = byte.to_ascii_uppercase());
                     seq_vec
                 },
@@ -544,6 +548,7 @@ fn process_decompress_chunk(
             match fasta_reader.fetch_seq(query_name, query_start, query_end - 1) {
                 Ok(seq) => {
                     let mut rc = reverse_complement(&seq.to_vec());
+                    unsafe {libc::free(seq.as_ptr() as *mut std::ffi::c_void)}; // Free up memory (bug https://github.com/rust-bio/rust-htslib/issues/401#issuecomment-1704290171)
                     rc.iter_mut().for_each(|byte| *byte = byte.to_ascii_uppercase());
                     rc
                 },
@@ -558,6 +563,7 @@ fn process_decompress_chunk(
         let target_seq = match fasta_reader.fetch_seq(target_name, target_start, target_end - 1) {
             Ok(seq) => {
                 let mut seq_vec = seq.to_vec();
+                unsafe {libc::free(seq.as_ptr() as *mut std::ffi::c_void)}; // Free up memory (bug https://github.com/rust-bio/rust-htslib/issues/401#issuecomment-1704290171)
                 seq_vec.iter_mut().for_each(|byte| *byte = byte.to_ascii_uppercase());
                 seq_vec
             },
