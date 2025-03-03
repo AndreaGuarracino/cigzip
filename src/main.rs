@@ -16,7 +16,7 @@ struct CommonOpts {
     paf: String,
 
     /// Number of threads to use (default: 4)
-    #[arg(short = 't', long = "threads", default_value_t = 4)]
+    #[arg(long = "threads", default_value_t = 4)]
     threads: usize,
     
     /// Verbosity level (0 = error, 1 = info, 2 = debug)
@@ -45,9 +45,13 @@ enum Args {
         #[clap(flatten)]
         common: CommonOpts,
         
-        /// FASTA file for sequences
-        #[arg(short = 'f', long = "fasta")]
-        fasta: String,
+        /// FASTA file for query sequences
+        #[arg(short = 'q', long = "query-fasta")]
+        query_fasta: String,
+
+        /// FASTA file for target sequences
+        #[arg(short = 't', long = "target-fasta")]
+        target_fasta: String,
         
         /// Gap penalties in the format mismatch,gap_open1,gap_ext1,gap_open2,gap_ext2
         #[arg(long, default_value = "3,4,2,24,1")]
@@ -60,9 +64,13 @@ enum Args {
         #[arg(short = 'p', long = "paf")]
         paf: Option<String>,
 
-        /// FASTA file for sequences
-        #[arg(short = 'f', long = "fasta")]
-        fasta: Option<String>,
+        /// FASTA file for query sequences
+        #[arg(short = 'q', long = "query-fasta")]
+        query_fasta: Option<String>,
+
+        /// FASTA file for target sequences
+        #[arg(short = 't', long = "target-fasta")]
+        target_fasta: Option<String>,
 
         /// Gap penalties in the format mismatch,gap_open1,gap_ext1,gap_open2,gap_ext2
         #[arg(long, default_value = "3,4,2,24,1")]
@@ -141,7 +149,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 process_compress_chunk(&lines, band_type, max_diff);
             }
         },
-        Args::Decompress { common, fasta, penalties } => {
+        Args::Decompress { common, query_fasta, target_fasta, penalties } => {
             setup_logger(common.verbose);
             info!("Converting tracepoints to CIGAR");
 
@@ -172,7 +180,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             // Process current chunk in parallel
                             process_decompress_chunk(
                                 &lines, 
-                                &fasta, 
+                                &query_fasta,
+                                &target_fasta,
                                 mismatch, 
                                 gap_open1, 
                                 gap_ext1, 
@@ -190,7 +199,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             if !lines.is_empty() {
                 process_decompress_chunk(
                     &lines, 
-                    &fasta, 
+                    &query_fasta,
+                    &target_fasta,
                     mismatch, 
                     gap_open1, 
                     gap_ext1, 
@@ -200,19 +210,21 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
         },
         #[cfg(debug_assertions)]
-        Args::Debug { paf, fasta, penalties, max_diff, verbose } => {
+        Args::Debug { paf, query_fasta, target_fasta, penalties, max_diff, verbose } => {
             setup_logger(verbose);
             info!("Debugging");
 
             let (mismatch, gap_open1, gap_ext1, gap_open2, gap_ext2) = parse_penalties(&penalties)?;
             info!("Penalties: {},{},{},{},{}", mismatch, gap_open1, gap_ext1, gap_open2, gap_ext2);
 
-            if let (Some(paf), Some(fasta)) = (paf, fasta) {
+            if let (Some(paf), Some(query_fasta), Some(target_fasta)) = (paf, query_fasta, target_fasta) {
                 info!("PAF file: {}", paf);
-                info!("FASTA file: {}", fasta);
+                info!("Query FASTA file: {}", query_fasta);
+                info!("Target FASTA file: {}", target_fasta);
 
-                // Open the FASTA file
-                let fasta_reader = FastaReader::from_path(&fasta).expect("Error reading FASTA file");
+                // Open the FASTA files
+                let query_fasta_reader = FastaReader::from_path(&query_fasta).expect("Error reading query FASTA file");
+                let target_fasta_reader = FastaReader::from_path(&target_fasta).expect("Error reading target FASTA file");
 
                 // Open the PAF file (or use stdin if "-" is provided).
                 let paf_reader = get_paf_reader(&paf)?;
@@ -245,9 +257,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     let target_start: usize = fields[7].parse()?;
                     let target_end: usize = fields[8].parse()?;
                     
-                    // Fetch query sequence
+                    // Fetch query sequence from query FASTA
                     let query_seq = if strand == "+" {
-                        match fasta_reader.fetch_seq(query_name, query_start, query_end - 1) {
+                        match query_fasta_reader.fetch_seq(query_name, query_start, query_end - 1) {
                             Ok(seq) => {
                                 let mut seq_vec = seq.to_vec();
                                 unsafe {libc::free(seq.as_ptr() as *mut std::ffi::c_void)}; // Free up memory (bug https://github.com/rust-bio/rust-htslib/issues/401#issuecomment-1704290171)
@@ -260,7 +272,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             }
                         }
                     } else {
-                        match fasta_reader.fetch_seq(query_name, query_start, query_end - 1) {
+                        match query_fasta_reader.fetch_seq(query_name, query_start, query_end - 1) {
                             Ok(seq) => {
                                 let mut rc = reverse_complement(&seq.to_vec());
                                 unsafe {libc::free(seq.as_ptr() as *mut std::ffi::c_void)}; // Free up memory (bug https://github.com/rust-bio/rust-htslib/issues/401#issuecomment-1704290171)
@@ -274,8 +286,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         }
                     };
 
-                    // Fetch target sequence
-                    let target_seq = match fasta_reader.fetch_seq(target_name, target_start, target_end - 1) {
+                    // Fetch target sequence from target FASTA
+                    let target_seq = match target_fasta_reader.fetch_seq(target_name, target_start, target_end - 1) {
                         Ok(seq) => {
                             let mut seq_vec = seq.to_vec();
                             unsafe {libc::free(seq.as_ptr() as *mut std::ffi::c_void)}; // Free up memory (bug https://github.com/rust-bio/rust-htslib/issues/401#issuecomment-1704290171)
@@ -368,7 +380,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 }
             } else {
                 // Fallback: run default example if no PAF/FASTA provided.
-                info!("No PAF and FASTA provided, running default example.");
+                info!("No PAF and FASTA files provided, running default example.");
 
                 let query_seq = b"GAACAGAGAAATGGTGGAATTCAAATACAAAAAAACCGCAAAATTAAAAATCTTGCGGCTCTCTGAACTCATTTTCATGAGTGAATTTGGCGGAACGGACGGGACTCGAACCCGCGACCCCCTGCGTGACAGGCAGGTATTCTAACCGACTGAACTACCGCTCCGCCGTTGTGTTCCGTTGGGAACGGGCGAATATTACGGATTTGCCTCACCCTTCGTCAACGGTTTTTCTCATCTTTTGAATCGTTTGCTGCAAAAATCGCCCAAGCCGCTATTTTTAGCGCCTTTTACAGGTATTTATGCCCGCCAGAGGCAGCTTCCGCCCTTCTTCTCCACCAGATCAAGACGGGCTTCCTGAGCTGCAAGCTCTTCATCTGTCGCAAAAACAACGCGTAACTTACTTGCCTGACGTACAATGCGCTGAATTGTTGCTTCACCTTGTTGCTGCTGTGTCTCTCCTTCCATCGCAAAAGCCATCGACGTTTGACCACCGGTCATCG".to_owned();
                 let target_seq = b"GAACAGAGAAATGGTGGAATTCAAATACAAAAAAACCGCAAAATTAACCCTTCGTCAACGGTTTTTCTCATCTTTTGAATCGTTTGCTGCAAAAATCGCCCAAGCCGCTATTTTTAGCGCCTTTTACAGGTATTTATGCCCGCCAGAGGCAGCTTCCGCCCTTCTTCTCCACCAGATCAAGACGGGCTTCCTGAGCTGCAAGCTCTTCATCTGTCGCAAAAACAACGCGTAACTTACTTGCCTGACGTACAATGCGCTGAATTGTTGCTTCACCTTGTTGCTGCTGTGTCTCTCCTTCCATCGCAAAAGCCATCGACGTTTGACCACCGGTCATCG".to_owned();
@@ -482,7 +494,8 @@ fn process_compress_chunk(lines: &[String], band_type: u8, max_diff: usize) {
 /// Process a chunk of lines in parallel for decompression
 fn process_decompress_chunk(
     lines: &[String], 
-    fasta_path: &str, 
+    query_fasta_path: &str,
+    target_fasta_path: &str, 
     mismatch: i32, 
     gap_open1: i32, 
     gap_ext1: i32, 
@@ -524,15 +537,20 @@ fn process_decompress_chunk(
             std::process::exit(1);
         });
 
-        // Create a thread-local FASTA reader
-        let fasta_reader = FastaReader::from_path(fasta_path).unwrap_or_else(|e| {
-            error!("Failed to create FASTA reader: {}", e);
+        // Create thread-local FASTA readers for query and target
+        let query_fasta_reader = FastaReader::from_path(query_fasta_path).unwrap_or_else(|e| {
+            error!("Failed to create query FASTA reader: {}", e);
             std::process::exit(1);
         });
         
-        // Fetch query sequence
+        let target_fasta_reader = FastaReader::from_path(target_fasta_path).unwrap_or_else(|e| {
+            error!("Failed to create target FASTA reader: {}", e);
+            std::process::exit(1);
+        });
+        
+        // Fetch query sequence from query FASTA
         let query_seq = if strand == "+" {
-            match fasta_reader.fetch_seq(query_name, query_start, query_end - 1) {
+            match query_fasta_reader.fetch_seq(query_name, query_start, query_end - 1) {
                 Ok(seq) => {
                     let mut seq_vec = seq.to_vec();
                     unsafe {libc::free(seq.as_ptr() as *mut std::ffi::c_void)}; // Free up memory (bug https://github.com/rust-bio/rust-htslib/issues/401#issuecomment-1704290171)
@@ -545,7 +563,7 @@ fn process_decompress_chunk(
                 }
             }
         } else {
-            match fasta_reader.fetch_seq(query_name, query_start, query_end - 1) {
+            match query_fasta_reader.fetch_seq(query_name, query_start, query_end - 1) {
                 Ok(seq) => {
                     let mut rc = reverse_complement(&seq.to_vec());
                     unsafe {libc::free(seq.as_ptr() as *mut std::ffi::c_void)}; // Free up memory (bug https://github.com/rust-bio/rust-htslib/issues/401#issuecomment-1704290171)
@@ -559,8 +577,8 @@ fn process_decompress_chunk(
             }
         };
 
-        // Fetch target sequence
-        let target_seq = match fasta_reader.fetch_seq(target_name, target_start, target_end - 1) {
+        // Fetch target sequence from target FASTA
+        let target_seq = match target_fasta_reader.fetch_seq(target_name, target_start, target_end - 1) {
             Ok(seq) => {
                 let mut seq_vec = seq.to_vec();
                 unsafe {libc::free(seq.as_ptr() as *mut std::ffi::c_void)}; // Free up memory (bug https://github.com/rust-bio/rust-htslib/issues/401#issuecomment-1704290171)
@@ -572,7 +590,6 @@ fn process_decompress_chunk(
                 std::process::exit(1);
             }
         };
-
 
         // Detect tracepoint format and convert to CIGAR in a single match
         let first_tracepoint = tracepoints_str.split(';').next().unwrap();
