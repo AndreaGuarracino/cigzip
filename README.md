@@ -22,8 +22,24 @@ A tool for compression and decompression of alignment CIGAR strings using tracep
 cigzip compress --paf alignments.paf [--band none|single|double] [--max-diff 128] [--threads 4] > alignments.tp.paf
 
 # Decompress alignments (convert tracepoints back to CIGAR)
-cigzip decompress --paf alignments.tp.paf --fasta sequences.fa [--penalties "3,4,2,24,1"] [--threads 4] > alignments.cigar.paf
+cigzip decompress --paf alignments.tp.paf --query-fasta query.fa --target-fasta target.fa [--penalties "3,4,2,24,1"] [--threads 4] > alignments.cigar.paf
 ```
+
+### Command Options
+
+#### Common Options
+- `--paf FILE`: PAF file containing alignments (use "-" for stdin)
+- `--threads N`: Number of threads to use (default: 4)
+- `--verbose N`: Verbosity level (0=error, 1=info, 2=debug)
+
+#### Compress-specific Options
+- `--band TYPE`: Banding strategy (none, single, or double)
+- `--max-diff N`: Max-diff value for tracepoints (default: 32)
+
+#### Decompress-specific Options
+- `--query-fasta FILE`: FASTA file containing query sequences
+- `--target-fasta FILE`: FASTA file containing target sequences
+- `--penalties STRING`: Gap penalties in format "mismatch,gap_open1,gap_ext1,gap_open2,gap_ext2" (default: "3,4,2,24,1")
 
 ## Building
 
