@@ -307,9 +307,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
                     // Convert CIGAR to tracepoints using query (A) and target (B) coordinates.
                     let tracepoints = cigar_to_tracepoints(paf_cigar, max_diff);
+                    let single_band_tracepoints = cigar_to_single_band_tracepoints(paf_cigar, max_diff);
                     let double_band_tracepoints = cigar_to_double_band_tracepoints(paf_cigar, max_diff);
 
                     // Compare tracepoints and banded_tracepoints, but only the first 2 elements of the tuple. if different, print error
+                    if tracepoints.iter().zip(single_band_tracepoints.iter()).any(|(a, b)| a.0 != b.0 || a.1 != b.1) {
+                        error!("Tracepoints mismatch! {}", line);
+                        error!("\t            tracepoints: {:?}", tracepoints);
+                        error!("\tsingle_band_tracepoints: {:?}", single_band_tracepoints);
+                        std::process::exit(1);
+                    }
                     if tracepoints.iter().zip(double_band_tracepoints.iter()).any(|(a, b)| a.0 != b.0 || a.1 != b.1) {
                         error!("Tracepoints mismatch! {}", line);
                         error!("\t            tracepoints: {:?}", tracepoints);
@@ -320,6 +327,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     // Reconstruct the CIGAR from tracepoints.
                     let cigar_from_tracepoints = tracepoints_to_cigar(
                         &tracepoints,
+                        &query_seq,
+                        &target_seq,
+                        0,
+                        0,
+                        mismatch,
+                        gap_open1,
+                        gap_ext1,
+                        gap_open2,
+                        gap_ext2
+                    );
+                    let cigar_from_single_band_tracepoints = single_band_tracepoints_to_cigar(
+                        &single_band_tracepoints,
                         &query_seq,
                         &target_seq,
                         0,
@@ -357,22 +376,26 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     //     error!("Line {}: seq. len. mismatch!", line);
                     // }
 
-                    if cigar_from_tracepoints != cigar_from_double_band_tracepoints {
+                    if cigar_from_tracepoints != cigar_from_single_band_tracepoints || cigar_from_tracepoints != cigar_from_double_band_tracepoints {
                         error!("CIGAR mismatch! {}", line);
                         error!("\t                        tracepoints: {:?}", tracepoints);
+                        error!("\t            single_band_tracepoints: {:?}", single_band_tracepoints);
                         error!("\t            double_band_tracepoints: {:?}", double_band_tracepoints);
                         error!("\t                     CIGAR from PAF: {}", paf_cigar);
                         error!("\t             CIGAR from tracepoints: {}", cigar_from_tracepoints);
+                        error!("\t CIGAR from single_band_tracepoints: {}", cigar_from_single_band_tracepoints);
                         error!("\t CIGAR from double_band_tracepoints: {}", cigar_from_double_band_tracepoints);
                         error!("\t seqa: {}", String::from_utf8(query_seq).unwrap());
                         error!("\t seqb: {}", String::from_utf8(target_seq).unwrap());
                         error!("                    bounds CIGAR from PAF: {:?}", get_cigar_diagonal_bounds(&paf_cigar));
                         error!("            bounds CIGAR from tracepoints: {:?}", get_cigar_diagonal_bounds(&cigar_from_tracepoints));
+                        error!("bounds CIGAR from single_band_tracepoints: {:?}", get_cigar_diagonal_bounds(&cigar_from_single_band_tracepoints));
                         error!("bounds CIGAR from double_band_tracepoints: {:?}", get_cigar_diagonal_bounds(&cigar_from_double_band_tracepoints));
 
                         let (deviation, d_min, d_max, max_gap) = compute_deviation(&cigar_from_tracepoints);
                         error!("                    deviation CIGAR from PAF: {:?}", compute_deviation(&paf_cigar));
                         error!("            deviation CIGAR from tracepoints: {:?}", (deviation, d_min, d_max, max_gap));
+                        error!("deviation CIGAR from single_band_tracepoints: {:?}", compute_deviation(&cigar_from_single_band_tracepoints));
                         error!("deviation CIGAR from double_band_tracepoints: {:?}", compute_deviation(&cigar_from_double_band_tracepoints));
                         error!("=> Try using --wfa-heuristic=banded-static --wfa-heuristic-parameters=-{},{}\n", std::cmp::max(max_gap, -d_min), std::cmp::max(max_gap, d_max));
                         std::process::exit(1);

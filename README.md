@@ -48,6 +48,11 @@ You need to build `WFA2-lib` first, which is a submodule of this repository. To 
 ```shell
 git clone --recursive https://github.com/AndreaGuarracino/cigzip
 cd cigzip/WFA2-lib
+
+# Temporary fix for the static-band issue (https://github.com/smarco/WFA2-lib/issues/110#issuecomment-2703867791)
+curl https://gist.githubusercontent.com/quim0/36a7f1a1c0f52d396e61eec94408cc46/raw/02b118bee2b9b3c6e690ae82f22650b07c719ad5/gistfile1.txt > fix.patch
+git apply fix.patch
+
 make clean all
 cd ..
 ```
