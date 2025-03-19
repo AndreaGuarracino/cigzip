@@ -500,26 +500,26 @@ fn process_compress_chunk(lines: &[String], band_type: u8, mixed: bool, max_diff
         
         // Convert CIGAR based on options and add type prefix
         let tracepoints_str = if mixed {
-            // Use mixed representation (type 3)
+            // Use mixed representation
             let tp = cigar_to_mixed_tracepoints(cigar, max_diff);
-            format!("D{}", format_mixed_tracepoints(&tp))
+            format!("M{}", format_mixed_tracepoints(&tp))
         } else {
             // Use standard tracepoints with optional banding
             match band_type {
                 0 => {
                     // No-band tracepoints (type 0)
                     let tp = cigar_to_tracepoints(cigar, max_diff);
-                    format!("A{}", format_tracepoints(&tp))
+                    format_tracepoints(&tp)
                 },
                 1 => {
                     // Single-band tracepoints (type 1)
                     let tp = cigar_to_single_band_tracepoints(cigar, max_diff);
-                    format!("B{}", format_single_band_tracepoints(&tp))
+                    format_single_band_tracepoints(&tp)
                 },
                 2 => {
                     // Double-band tracepoints (type 2)
                     let tp = cigar_to_double_band_tracepoints(cigar, max_diff);
-                    format!("C{}", format_double_band_tracepoints(&tp))
+                    format_double_band_tracepoints(&tp)
                 },
                 _ => unreachable!()
             }
@@ -553,10 +553,7 @@ fn process_decompress_chunk(
             error!("{}", message_with_truncate_paf_file("Skipping tracepoints-less PAF line", line));
             std::process::exit(1);
         };
-        let tracepoints_with_type = &tp_field[5..]; // Direct slice instead of strip_prefix("tp:Z:")
-        // Extract type and tracepoints string
-        let tp_type = tracepoints_with_type.chars().next().unwrap();
-        let tracepoints_str = &tracepoints_with_type[1..]; // Skip the first character
+        let tracepoints_str = &tp_field[5..]; // Direct slice instead of strip_prefix("tp:Z:")
         
         // Parse mandatory PAF fields
         let query_name = fields[0];
@@ -634,55 +631,60 @@ fn process_decompress_chunk(
             }
         };
 
-        // Convert to CIGAR based on the type prefix
-        let cigar = match tp_type {
-            'A' => {
-                // No-band tracepoints
-                let tracepoints = parse_tracepoints(tracepoints_str);
-                tracepoints_to_cigar(
-                    &tracepoints,
-                    &query_seq,
-                    &target_seq,
-                    0, 0,
-                    mismatch, gap_open1, gap_ext1, gap_open2, gap_ext2
-                )
-            },
-            'B' => {
-                // Single-band tracepoints
-                let tracepoints = parse_single_band_tracepoints(tracepoints_str);
-                single_band_tracepoints_to_cigar(
-                    &tracepoints,
-                    &query_seq,
-                    &target_seq,
-                    0, 0,
-                    mismatch, gap_open1, gap_ext1, gap_open2, gap_ext2
-                )
-            },
-            'C' => {
-                // Double-band tracepoints
-                let tracepoints = parse_double_band_tracepoints(tracepoints_str);
-                double_band_tracepoints_to_cigar(
-                    &tracepoints,
-                    &query_seq,
-                    &target_seq,
-                    0, 0,
-                    mismatch, gap_open1, gap_ext1, gap_open2, gap_ext2
-                )
-            },
-            'D' => {
-                // Mixed representation
-                let mixed_tracepoints = parse_mixed_tracepoints(tracepoints_str);
-                mixed_tracepoints_to_cigar(
-                    &mixed_tracepoints,
-                    &query_seq,
-                    &target_seq,
-                    0, 0,
-                    mismatch, gap_open1, gap_ext1, gap_open2, gap_ext2
-                )
-            },
-            _ => {
-                error!("Invalid tracepoint type '{}' in PAF line", tp_type);
-                std::process::exit(1);
+        // Check if it's a mixed representation (starts with 'M')
+        let cigar = if let Some('M') = tracepoints_str.chars().next() {
+            // Mixed representation
+            let mixed_tracepoints = parse_mixed_tracepoints(&tracepoints_str[1..]); // Skip the 'M'
+            mixed_tracepoints_to_cigar(
+                &mixed_tracepoints,
+                &query_seq,
+                &target_seq,
+                0, 0,
+                mismatch, gap_open1, gap_ext1, gap_open2, gap_ext2
+            )
+        } else {
+            // Determine band type from the format string in process_compress_chunk
+            // We need to analyze the structure of the tracepoints string
+            let first_tracepoint = tracepoints_str.split(';').next().unwrap();
+            
+            match first_tracepoint.split(',').count() {
+                2 => {
+                    // No-band tracepoints (type 0)
+                    let tracepoints = parse_tracepoints(tracepoints_str);
+                    tracepoints_to_cigar(
+                        &tracepoints,
+                        &query_seq,
+                        &target_seq,
+                        0, 0,
+                        mismatch, gap_open1, gap_ext1, gap_open2, gap_ext2
+                    )
+                },
+                3 => {
+                    // Single-band tracepoints (type 1)
+                    let tracepoints = parse_single_band_tracepoints(tracepoints_str);
+                    single_band_tracepoints_to_cigar(
+                        &tracepoints,
+                        &query_seq,
+                        &target_seq,
+                        0, 0,
+                        mismatch, gap_open1, gap_ext1, gap_open2, gap_ext2
+                    )
+                },
+                4 => {
+                    // Double-band tracepoints (type 2)
+                    let tracepoints = parse_double_band_tracepoints(tracepoints_str);
+                    double_band_tracepoints_to_cigar(
+                        &tracepoints,
+                        &query_seq,
+                        &target_seq,
+                        0, 0,
+                        mismatch, gap_open1, gap_ext1, gap_open2, gap_ext2
+                    )
+                },
+                _ => {
+                    error!("Invalid tracepoint format in PAF line: {}", tracepoints_str);
+                    std::process::exit(1);
+                }
             }
         };
 
