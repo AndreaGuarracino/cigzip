@@ -731,7 +731,7 @@ fn format_single_band_tracepoints(tracepoints: &[(usize, usize, usize)]) -> Stri
         .collect::<Vec<String>>()
         .join(";")
 }
-fn format_double_band_tracepoints(tracepoints: &[(usize, usize, (isize, isize))]) -> String {
+fn format_double_band_tracepoints(tracepoints: &[(usize, usize, (usize, usize))]) -> String {
     tracepoints.iter()
         .map(|(a, b, (c, d))| format!("{},{},{},{}", a, b, c, d))
         .collect::<Vec<String>>()
@@ -746,7 +746,7 @@ fn format_mixed_double_band_tracepoints(mixed_tracepoints: &[MixedRepresentation
         .collect::<Vec<String>>()
         .join(";")
 }
-fn format_variable_band_tracepoints(tracepoints: &[(usize, usize, Option<(isize, Option<isize>)>)]) -> String {
+fn format_variable_band_tracepoints(tracepoints: &[(usize, usize, Option<(usize, Option<usize>)>)]) -> String {
     tracepoints.iter()
         .map(|(a, b, c)| match c {
             None => format!("{},{}", a, b),
@@ -794,7 +794,7 @@ fn parse_single_band_tracepoints(tp_str: &str) -> Vec<(usize, usize, usize)> {
             ))
         }).collect()
 }
-fn parse_double_band_tracepoints(tp_str: &str) -> Vec<(usize, usize, (isize, isize))> {
+fn parse_double_band_tracepoints(tp_str: &str) -> Vec<(usize, usize, (usize, usize))> {
     tp_str.split(';')
         .filter_map(|s| {
             let parts: Vec<&str> = s.split(',').collect();
@@ -838,7 +838,7 @@ fn parse_mixed_double_band_tracepoints(tp_str: &str) -> Vec<MixedRepresentation>
         })
         .collect()
 }
-fn parse_variable_band_tracepoints(tp_str: &str) -> Vec<(usize, usize, Option<(isize, Option<isize>)>)> {
+fn parse_variable_band_tracepoints(tp_str: &str) -> Vec<(usize, usize, Option<(usize, Option<usize>)>)> {
     tp_str.split(';')
         .filter_map(|s| {
             let parts: Vec<&str> = s.split(',').collect();
