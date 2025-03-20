@@ -520,7 +520,7 @@ checksum = "bbd2bcb4c963f2ddae06a2efc7e9f3591312473c50c6685e1f298068316e66fe"
 [[package]]
 name = "lib_tracepoints"
 version = "0.1.0"
-source = "git+https://github.com/AndreaGuarracino/lib_tracepoints?rev=7f2b8897dd4dc1a956059be835a4b1fc1278f741#7f2b8897dd4dc1a956059be835a4b1fc1278f741"
+source = "git+https://github.com/AndreaGuarracino/lib_tracepoints?rev=e50dbf96e9d791321068578cc28934226af67949#e50dbf96e9d791321068578cc28934226af67949"
 dependencies = [
  "lib_wfa2",
 ]
