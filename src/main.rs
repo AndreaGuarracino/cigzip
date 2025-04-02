@@ -58,7 +58,7 @@ enum Args {
         target_fasta: String,
         
         /// Gap penalties in the format mismatch,gap_open1,gap_ext1,gap_open2,gap_ext2
-        #[arg(long, default_value = "3,4,2,24,1")]
+        #[arg(long, default_value = "5,8,2,24,1]")]
         penalties: String,
     },
     /// Run debugging mode (only available in debug builds)
@@ -77,7 +77,7 @@ enum Args {
         target_fasta: Option<String>,
 
         /// Gap penalties in the format mismatch,gap_open1,gap_ext1,gap_open2,gap_ext2
-        #[arg(long, default_value = "3,4,2,24,1")]
+        #[arg(long, default_value = "5,8,2,24,1]")]
         penalties: String,
 
         /// Max-diff value for tracepoints
