@@ -117,7 +117,7 @@ dependencies = [
  "env_logger",
  "flate2",
  "lib_tracepoints",
- "lib_wfa2 0.1.0 (git+https://github.com/AndreaGuarracino/lib_wfa2?rev=fd0c39a0cd586efc4155e48fbd95aa0dfdef5f56)",
+ "lib_wfa2",
  "libc",
  "log",
  "rayon",
@@ -539,15 +539,10 @@ checksum = "bbd2bcb4c963f2ddae06a2efc7e9f3591312473c50c6685e1f298068316e66fe"
 [[package]]
 name = "lib_tracepoints"
 version = "0.1.0"
-source = "git+https://github.com/AndreaGuarracino/lib_tracepoints?rev=e50dbf96e9d791321068578cc28934226af67949#e50dbf96e9d791321068578cc28934226af67949"
+source = "git+https://github.com/AndreaGuarracino/lib_tracepoints?rev=81947263342d1242bbf6e228747037d6250025a2#81947263342d1242bbf6e228747037d6250025a2"
 dependencies = [
- "lib_wfa2 0.1.0 (git+https://github.com/AndreaGuarracino/lib_wfa2?rev=c608c436a6753d2c21c97d9f5c338efae99d042b)",
+ "lib_wfa2",
 ]
-
-[[package]]
-name = "lib_wfa2"
-version = "0.1.0"
-source = "git+https://github.com/AndreaGuarracino/lib_wfa2?rev=c608c436a6753d2c21c97d9f5c338efae99d042b#c608c436a6753d2c21c97d9f5c338efae99d042b"
 
 [[package]]
 name = "lib_wfa2"
