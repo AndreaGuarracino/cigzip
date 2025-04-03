@@ -8,6 +8,37 @@ use lib_wfa2::affine_wavefront::{AffineWavefronts};
 use log::{info, error};
 use rayon::prelude::*;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum BandType {
+    None,
+    Single,
+    Double,
+    Variable,
+}
+
+impl BandType {
+    // Parse from string
+    fn from_str(s: &str) -> Result<Self, String> {
+        match s.to_lowercase().as_str() {
+            "none" => Ok(BandType::None),
+            "single" => Ok(BandType::Single),
+            "double" => Ok(BandType::Double),
+            "variable" => Ok(BandType::Variable),
+            _ => Err(format!("Invalid banding strategy '{}'. Supported options: none, single, double, variable", s)),
+        }
+    }
+    
+    // Get a user-friendly name for logging/display
+    fn display_name(&self) -> &'static str {
+        match self {
+            BandType::None => "no-band",
+            BandType::Single => "single-band",
+            BandType::Double => "double-band",
+            BandType::Variable => "variable-band",
+        }
+    }
+}
+
 /// Common options shared between all commands
 #[derive(Parser, Debug)]
 struct CommonOpts {
@@ -33,8 +64,8 @@ enum Args {
         common: CommonOpts,
 
         /// Banding strategy: none, single, double, variable
-        #[arg(short = 'b', long = "band", default_value = "none")]
-        band: String,
+        #[arg(short = 'b', long = "band", default_value = "none", value_parser = BandType::from_str)]
+        band: BandType,
         
         /// Use mixed representation (preserves S/H/P/N CIGAR operations)
         #[arg(short = 'm', long = "mixed", default_value_t = false)]
@@ -97,34 +128,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     match args {
         Args::Compress { common, band, mixed, max_diff } => {
             setup_logger(common.verbose);
-
-            // Validate and convert band type
-            let band_type : u8 = match band.to_lowercase().as_str() {
-                "none" => 0,
-                "single" => 1,
-                "double" => 2,
-                "variable" => 3,
-                _ => {
-                    error!("Invalid banding strategy '{}'. Supported options: none, single, double, variable", band);
-                    std::process::exit(1);
-                }
-            };
             
-            // If mixed is true, validate that band is "none"
-            if mixed && band_type != 2 {
+            // If mixed is true, validate that band is Double
+            if mixed && band != BandType::Double {
                 error!("The --mixed option can only be used with the double-band strategy. Use --band double with --mixed.");
                 std::process::exit(1);
             }
 
-            info!("Converting CIGAR to {} tracepoints", 
-                match band_type {
-                    0 => "no-band",
-                    1 => "single-band",
-                    2 => "double-band",
-                    3 => "variable-band",
-                    _ => unreachable!()
-                }
-            );
+            info!("Converting CIGAR to {} tracepoints", band.display_name());
 
             // Set the thread pool size
             rayon::ThreadPoolBuilder::new()
@@ -148,7 +159,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         
                         if lines.len() >= chunk_size {
                             // Process current chunk in parallel
-                            process_compress_chunk(&lines, band_type, mixed, max_diff);
+                            process_compress_chunk(&lines, band, mixed, max_diff);
                             lines.clear();
                         }
                     },
@@ -158,7 +169,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             
             // Process remaining lines
             if !lines.is_empty() {
-                process_compress_chunk(&lines, band_type, mixed, max_diff);
+                process_compress_chunk(&lines, band, mixed, max_diff);
             }
         },
         Args::Decompress { common, query_fasta, target_fasta, penalties } => {
@@ -486,7 +497,7 @@ fn get_paf_reader(paf: &str) -> io::Result<Box<dyn BufRead>> {
 }
 
 /// Process a chunk of lines in parallel for compression
-fn process_compress_chunk(lines: &[String], band_type: u8, mixed: bool, max_diff: usize) {
+fn process_compress_chunk(lines: &[String], band: BandType, mixed: bool, max_diff: usize) {
     lines.par_iter().for_each(|line| {
         let fields: Vec<&str> = line.split('\t').collect();
         if fields.len() < 12 {
@@ -507,28 +518,27 @@ fn process_compress_chunk(lines: &[String], band_type: u8, mixed: bool, max_diff
             format!("M{}", format_mixed_double_band_tracepoints(&tp))
         } else {
             // Use standard tracepoints with optional banding
-            match band_type {
-                0 => {
-                    // No-band tracepoints (type 0)
+            match band {
+                BandType::None => {
+                    // No-band tracepoints
                     let tp = cigar_to_tracepoints(cigar, max_diff);
                     format_tracepoints(&tp)
                 },
-                1 => {
-                    // Single-band tracepoints (type 1)
+                BandType::Single => {
+                    // Single-band tracepoints
                     let tp = cigar_to_single_band_tracepoints(cigar, max_diff);
                     format_single_band_tracepoints(&tp)
                 },
-                2 => {
-                    // Double-band tracepoints (type 2)
+                BandType::Double => {
+                    // Double-band tracepoints
                     let tp = cigar_to_double_band_tracepoints(cigar, max_diff);
                     format_double_band_tracepoints(&tp)
                 },
-                3 => {
-                    // Variable-band tracepoints (type 3)
+                BandType::Variable => {
+                    // Variable-band tracepoints
                     let tp = cigar_to_variable_band_tracepoints(cigar, max_diff);
                     format!("V{}", format_variable_band_tracepoints(&tp))
                 },
-                _ => unreachable!()
             }
         };
        
