@@ -458,10 +458,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 //let realn_cigar = align_sequences_wfa(&query_seq, &target_seq);
                 //let realn_cigar = cigar_ops_to_cigar_string(&realn_cigar);
 
-                info!("\t            tracepoints: {:?}", tracepoints);
-                info!("\t CIGAR from tracepoints_variable: {}", recon_cigar_variable);
-                info!("\t              CIGAR from the PAF: {}", paf_cigar);
-                println!("get_cigar_diagonal_bounds from the PAF {:?}", get_cigar_diagonal_bounds(&paf_cigar));
+                info!("\t                         tracepoints: {:?}", tracepoints);
+                info!("\t     CIGAR from tracepoints_variable: {}", recon_cigar_variable);
+                info!("\t                  CIGAR from the PAF: {}", paf_cigar);
+                info!("get_cigar_diagonal_bounds from the PAF: {:?}", get_cigar_diagonal_bounds(&paf_cigar));
                 //info!("\t CIGAR from realignment: {}", realn_cigar);
 
                 assert!(paf_cigar == recon_cigar_variable);
