@@ -4,7 +4,7 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-clap = { version = "4.5.35", features = ["derive"] }
+clap = { version = "4.5.37", features = ["derive"] }
 rust-htslib = { version = "0.46.0", default-features = false } # Don't update it, see https://github.com/rust-bio/rust-htslib/issues/434
 flate2 = "1.1.1"
 
@@ -18,4 +18,4 @@ log = "0.4.27"
 env_logger = "0.11.8"
 
 rayon = "1.10.0" # Parallel processing library
-libc = "0.2.171"
+libc = "0.2.172"
