@@ -94,9 +94,9 @@ checksum = "1fd0f2584146f6f2ef48085050886acf353beff7305ebd1ae69500e27c67f64b"
 
 [[package]]
 name = "cc"
-version = "1.2.19"
+version = "1.2.20"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8e3a13707ac958681c13b39b458c073d0d9bc8a22cb1b2f4c8e55eb72c13f362"
+checksum = "04da6a0d40b948dfc4fa8f5bbf402b0fc1a64a28dbf7d12ffd683550f2c1b63a"
 dependencies = [
  "jobserver",
  "libc",
@@ -539,7 +539,7 @@ checksum = "bbd2bcb4c963f2ddae06a2efc7e9f3591312473c50c6685e1f298068316e66fe"
 [[package]]
 name = "lib_tracepoints"
 version = "0.1.0"
-source = "git+https://github.com/AndreaGuarracino/lib_tracepoints?rev=81947263342d1242bbf6e228747037d6250025a2#81947263342d1242bbf6e228747037d6250025a2"
+source = "git+https://github.com/AndreaGuarracino/lib_tracepoints#48b31f791909f3e830bd324dfb3928c2829650ac"
 dependencies = [
  "lib_wfa2",
 ]
@@ -547,7 +547,7 @@ dependencies = [
 [[package]]
 name = "lib_wfa2"
 version = "0.1.0"
-source = "git+https://github.com/AndreaGuarracino/lib_wfa2?rev=fd0c39a0cd586efc4155e48fbd95aa0dfdef5f56#fd0c39a0cd586efc4155e48fbd95aa0dfdef5f56"
+source = "git+https://github.com/AndreaGuarracino/lib_wfa2#2ae5e70f98fbd8a0deb128bcd141ca0115e0c6fa"
 
 [[package]]
 name = "libc"

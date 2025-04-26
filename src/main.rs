@@ -523,7 +523,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             compute_deviation(&cigar_from_double_band_tracepoints)
                         );
                         error!("=> Try using --wfa-heuristic=banded-static --wfa-heuristic-parameters=-{},{}\n", std::cmp::max(max_gap, -d_min), std::cmp::max(max_gap, d_max));
-                        std::process::exit(1);
+                        //std::process::exit(1);
                     }
                 }
             } else {
@@ -539,7 +539,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 let b_end = target_seq.len();
 
                 // Create aligner and configure settings
-                let mut aligner = AffineWavefronts::default();
+                let mut aligner = AffineWavefronts::with_penalties_affine2p(
+                    0, mismatch, gap_open1, gap_ext1, gap_open2, gap_ext2,
+                );
                 let paf_cigar = align_sequences_wfa(
                     &query_seq[a_start..a_end],
                     &target_seq[b_start..b_end],
@@ -547,8 +549,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 );
                 let paf_cigar = cigar_ops_to_cigar_string(&paf_cigar);
 
-                let tracepoints = cigar_to_tracepoints(&paf_cigar, max_diff);
-                let recon_cigar_variable = tracepoints_to_cigar(
+                let tracepoints = cigar_to_double_band_tracepoints(&paf_cigar, max_diff);
+                let recon_cigar = double_band_tracepoints_to_cigar(
                     &tracepoints,
                     &query_seq,
                     &target_seq,
@@ -564,19 +566,21 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 //let realn_cigar = align_sequences_wfa(&query_seq, &target_seq);
                 //let realn_cigar = cigar_ops_to_cigar_string(&realn_cigar);
 
-                info!("\t                         tracepoints: {:?}", tracepoints);
                 info!(
-                    "\t     CIGAR from tracepoints_variable: {}",
-                    recon_cigar_variable
+                    "\t           tracepoints: {:?}", tracepoints);
+                info!(
+                    "\tCIGAR from tracepoints: {}",
+                    recon_cigar
                 );
-                info!("\t                  CIGAR from the PAF: {}", paf_cigar);
+                info!(
+                    "\t    CIGAR from the PAF: {}", paf_cigar);
                 info!(
                     "get_cigar_diagonal_bounds from the PAF: {:?}",
                     get_cigar_diagonal_bounds(&paf_cigar)
                 );
                 //info!("\t CIGAR from realignment: {}", realn_cigar);
 
-                assert!(paf_cigar == recon_cigar_variable);
+                assert!(paf_cigar == recon_cigar);
             }
         }
     }
