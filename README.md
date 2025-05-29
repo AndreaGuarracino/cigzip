@@ -43,7 +43,7 @@ cigzip decompress --paf alignments.tp.paf --query-fasta query.fa --target-fasta 
 
 ## Building
 
-You need to build `WFA2-lib` (commit `49c255df126ee536fe92caff7a9f7c183ec3ff29`) first, which is a submodule of this repository. To do so, run:
+You need to build `WFA2-lib` (commit `3c1734e9bb319c7782ae6845e627612ff157d1cc`) first, which is a submodule of this repository. To do so, run:
 
 ```shell
 git clone --recursive https://github.com/AndreaGuarracino/cigzip
