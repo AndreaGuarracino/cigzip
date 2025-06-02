@@ -527,6 +527,8 @@ fn process_debug_chunk(
             cigar_to_single_band_tracepoints(paf_cigar, max_diff);
         let double_band_tracepoints =
             cigar_to_double_band_tracepoints(paf_cigar, max_diff);
+        let variable_band_tracepoints =
+            cigar_to_variable_band_tracepoints(paf_cigar, max_diff);
 
         // Compare tracepoints
         if tracepoints
@@ -587,9 +589,22 @@ fn process_debug_chunk(
             gap_open2,
             gap_ext2,
         );
+        let cigar_from_variable_band_tracepoints = variable_band_tracepoints_to_cigar(
+            &variable_band_tracepoints,
+            &query_seq,
+            &target_seq,
+            0,
+            0,
+            mismatch,
+            gap_open1,
+            gap_ext1,
+            gap_open2,
+            gap_ext2,
+        );
 
         if cigar_from_tracepoints != cigar_from_single_band_tracepoints
             || cigar_from_tracepoints != cigar_from_double_band_tracepoints
+            || cigar_from_tracepoints != cigar_from_variable_band_tracepoints
         {
             error!("CIGAR mismatch! {}", line);
             error!("\t                        tracepoints: {:?}", tracepoints);
@@ -614,6 +629,10 @@ fn process_debug_chunk(
                 "\t CIGAR from double_band_tracepoints: {}",
                 cigar_from_double_band_tracepoints
             );
+            error!(
+                "\tCIGAR from variable_band_tracepoints: {}",
+                cigar_from_variable_band_tracepoints
+            );
             error!("\t seqa: {}", String::from_utf8(query_seq.clone()).unwrap());
             error!("\t seqb: {}", String::from_utf8(target_seq.clone()).unwrap());
             error!(
@@ -631,6 +650,10 @@ fn process_debug_chunk(
             error!(
                 "bounds CIGAR from double_band_tracepoints: {:?}",
                 get_cigar_diagonal_bounds(&cigar_from_double_band_tracepoints)
+            );
+            error!(
+                "bounds CIGAR from variable_band_tracepoints: {:?}",
+                get_cigar_diagonal_bounds(&cigar_from_variable_band_tracepoints)
             );
 
             let (deviation, d_min, d_max, max_gap) =
@@ -650,6 +673,10 @@ fn process_debug_chunk(
             error!(
                 "deviation CIGAR from double_band_tracepoints: {:?}",
                 compute_deviation(&cigar_from_double_band_tracepoints)
+            );
+            error!(
+                "deviation CIGAR from variable_band_tracepoints: {:?}",
+                compute_deviation(&cigar_from_variable_band_tracepoints)
             );
             error!("=> Try using --wfa-heuristic=banded-static --wfa-heuristic-parameters=-{},{}\n", std::cmp::max(max_gap, -d_min), std::cmp::max(max_gap, d_max));
         }
