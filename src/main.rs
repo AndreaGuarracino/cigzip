@@ -607,77 +607,29 @@ fn process_debug_chunk(
             || cigar_from_tracepoints != cigar_from_variable_band_tracepoints
         {
             error!("CIGAR mismatch! {}", line);
-            error!("\t                        tracepoints: {:?}", tracepoints);
-            error!(
-                "\t            single_band_tracepoints: {:?}",
-                single_band_tracepoints
-            );
-            error!(
-                "\t            double_band_tracepoints: {:?}",
-                double_band_tracepoints
-            );
-            error!("\t                     CIGAR from PAF: {}", paf_cigar);
-            error!(
-                "\t             CIGAR from tracepoints: {}",
-                cigar_from_tracepoints
-            );
-            error!(
-                "\t CIGAR from single_band_tracepoints: {}",
-                cigar_from_single_band_tracepoints
-            );
-            error!(
-                "\t CIGAR from double_band_tracepoints: {}",
-                cigar_from_double_band_tracepoints
-            );
-            error!(
-                "\tCIGAR from variable_band_tracepoints: {}",
-                cigar_from_variable_band_tracepoints
-            );
+            error!("\t                         tracepoints: {:?}", tracepoints);
+            error!("\t             single_band_tracepoints: {:?}", single_band_tracepoints);
+            error!("\t             double_band_tracepoints: {:?}", double_band_tracepoints);
+            error!("\t                      CIGAR from PAF: {}", paf_cigar);
+            error!("\t              CIGAR from tracepoints: {}", cigar_from_tracepoints);
+            error!("\t  CIGAR from single_band_tracepoints: {}", cigar_from_single_band_tracepoints);
+            error!("\t  CIGAR from double_band_tracepoints: {}", cigar_from_double_band_tracepoints);
+            error!("\tCIGAR from variable_band_tracepoints: {}", cigar_from_variable_band_tracepoints);
             error!("\t seqa: {}", String::from_utf8(query_seq.clone()).unwrap());
             error!("\t seqb: {}", String::from_utf8(target_seq.clone()).unwrap());
-            error!(
-                "                    bounds CIGAR from PAF: {:?}",
-                get_cigar_diagonal_bounds(&paf_cigar)
-            );
-            error!(
-                "            bounds CIGAR from tracepoints: {:?}",
-                get_cigar_diagonal_bounds(&cigar_from_tracepoints)
-            );
-            error!(
-                "bounds CIGAR from single_band_tracepoints: {:?}",
-                get_cigar_diagonal_bounds(&cigar_from_single_band_tracepoints)
-            );
-            error!(
-                "bounds CIGAR from double_band_tracepoints: {:?}",
-                get_cigar_diagonal_bounds(&cigar_from_double_band_tracepoints)
-            );
-            error!(
-                "bounds CIGAR from variable_band_tracepoints: {:?}",
-                get_cigar_diagonal_bounds(&cigar_from_variable_band_tracepoints)
-            );
+            error!("\t                      bounds CIGAR from PAF: {:?}", get_cigar_diagonal_bounds(&paf_cigar));
+            error!("\t              bounds CIGAR from tracepoints: {:?}", get_cigar_diagonal_bounds(&cigar_from_tracepoints));
+            error!("\  tbounds CIGAR from single_band_tracepoints: {:?}", get_cigar_diagonal_bounds(&cigar_from_single_band_tracepoints));
+            error!("\  tbounds CIGAR from double_band_tracepoints: {:?}", get_cigar_diagonal_bounds(&cigar_from_double_band_tracepoints));
+            error!("\tbounds CIGAR from variable_band_tracepoints: {:?}", get_cigar_diagonal_bounds(&cigar_from_variable_band_tracepoints));
 
             let (deviation, d_min, d_max, max_gap) =
                 compute_deviation(&cigar_from_tracepoints);
-            error!(
-                "                    deviation CIGAR from PAF: {:?}",
-                compute_deviation(&paf_cigar)
-            );
-            error!(
-                "            deviation CIGAR from tracepoints: {:?}",
-                (deviation, d_min, d_max, max_gap)
-            );
-            error!(
-                "deviation CIGAR from single_band_tracepoints: {:?}",
-                compute_deviation(&cigar_from_single_band_tracepoints)
-            );
-            error!(
-                "deviation CIGAR from double_band_tracepoints: {:?}",
-                compute_deviation(&cigar_from_double_band_tracepoints)
-            );
-            error!(
-                "deviation CIGAR from variable_band_tracepoints: {:?}",
-                compute_deviation(&cigar_from_variable_band_tracepoints)
-            );
+            error!("\t                      deviation CIGAR from PAF: {:?}", compute_deviation(&paf_cigar));
+            error!("\t              deviation CIGAR from tracepoints: {:?}", (deviation, d_min, d_max, max_gap));
+            error!("\t  deviation CIGAR from single_band_tracepoints: {:?}", compute_deviation(&cigar_from_single_band_tracepoints));
+            error!("\t  deviation CIGAR from double_band_tracepoints: {:?}", compute_deviation(&cigar_from_double_band_tracepoints));
+            error!("\tdeviation CIGAR from variable_band_tracepoints: {:?}", compute_deviation(&cigar_from_variable_band_tracepoints));
             error!("=> Try using --wfa-heuristic=banded-static --wfa-heuristic-parameters=-{},{}\n", std::cmp::max(max_gap, -d_min), std::cmp::max(max_gap, d_max));
         }
     });
