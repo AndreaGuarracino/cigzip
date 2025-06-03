@@ -610,6 +610,7 @@ fn process_debug_chunk(
             error!("\t                         tracepoints: {:?}", tracepoints);
             error!("\t             single_band_tracepoints: {:?}", single_band_tracepoints);
             error!("\t             double_band_tracepoints: {:?}", double_band_tracepoints);
+            error!("\t           variable_band_tracepoints: {:?}", variable_band_tracepoints);
             error!("\t                      CIGAR from PAF: {}", paf_cigar);
             error!("\t              CIGAR from tracepoints: {}", cigar_from_tracepoints);
             error!("\t  CIGAR from single_band_tracepoints: {}", cigar_from_single_band_tracepoints);
