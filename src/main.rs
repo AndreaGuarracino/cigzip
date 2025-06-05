@@ -13,7 +13,8 @@ use rayon::prelude::*;
 use rust_htslib::faidx::Reader as FastaReader;
 use std::fs::File;
 use std::io::{self, BufRead, BufReader};
-
+use indicatif::ProgressStyle;
+use indicatif::ProgressBar;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum BandType {
     None,
@@ -281,17 +282,50 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 info!("Query FASTA file: {}", query_fasta);
                 info!("Target FASTA file: {}", target_fasta);
 
+                // Count total lines for progress bar (if not stdin)
+                let total_lines = if paf != "-" {
+                    // Quick line count for progress estimation
+                    let counter = get_paf_reader(&paf)?;
+                    counter.lines().count()
+                } else {
+                    0 // Unknown size for stdin
+                };
+
+                // Create progress bar
+                let progress_bar = if total_lines > 0 {
+                    let pb = ProgressBar::new(total_lines as u64);
+                    pb.set_style(
+                        ProgressStyle::default_bar()
+                            .template("{spinner:.green} [{elapsed_precise}] [{bar:40.cyan/blue}] {pos}/{len} ({percent}%) {msg}")
+                            .unwrap()
+                            .progress_chars("#>-")
+                    );
+                    pb.set_message("Processing PAF lines");
+                    Some(pb)
+                } else {
+                    // For stdin, use a spinner
+                    let pb = ProgressBar::new_spinner();
+                    pb.set_style(
+                        ProgressStyle::default_spinner()
+                            .template("{spinner:.green} [{elapsed_precise}] {pos} lines processed {msg}")
+                            .unwrap()
+                    );
+                    pb.set_message("Processing PAF lines from stdin");
+                    Some(pb)
+                };
+
                 // Open the PAF file (or use stdin if "-" is provided).
                 let paf_reader = get_paf_reader(&paf)?;
 
                 // Set the thread pool size
                 rayon::ThreadPoolBuilder::new()
-                    .num_threads(threads) // You can make this configurable if needed
+                    .num_threads(threads)
                     .build_global()?;
 
                 // Process in chunks
                 let chunk_size = 1000; // Or make this configurable
                 let mut lines = Vec::with_capacity(chunk_size);
+                let mut processed_count = 0;
                 
                 for line_result in paf_reader.lines() {
                     match line_result {
@@ -301,6 +335,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             }
 
                             lines.push(line);
+                            processed_count += 1;
 
                             if lines.len() >= chunk_size {
                                 // Process current chunk in parallel
@@ -315,6 +350,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                     gap_ext2,
                                     max_diff,
                                 );
+
+                                // Update progress bar
+                                if let Some(ref pb) = progress_bar {
+                                    if total_lines > 0 {
+                                        pb.set_position(processed_count as u64);
+                                    } else {
+                                        pb.set_position(processed_count as u64);
+                                    }
+                                }
+
                                 lines.clear();
                             }
                         }
@@ -335,6 +380,19 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         gap_ext2,
                         max_diff,
                     );
+
+                    if let Some(ref pb) = progress_bar {
+                        if total_lines > 0 {
+                            pb.set_position(total_lines as u64);
+                        } else {
+                            pb.set_position(processed_count as u64);
+                        }
+                    }
+                }
+
+                // Finish progress bar
+                if let Some(ref pb) = progress_bar {
+                    pb.finish_with_message("Debug processing complete");
                 }
             } else {
                 // Fallback: run default example if no PAF/FASTA provided.
@@ -359,8 +417,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 );
                 let paf_cigar = cigar_ops_to_cigar_string(&paf_cigar);
 
-                let tracepoints = cigar_to_double_band_tracepoints(&paf_cigar, max_diff);
-                let recon_cigar = double_band_tracepoints_to_cigar(
+                let tracepoints = cigar_to_tracepoints(&paf_cigar, max_diff);
+                let single_band_tracepoints = cigar_to_single_band_tracepoints(&paf_cigar, max_diff);
+                let double_band_tracepoints = cigar_to_double_band_tracepoints(&paf_cigar, max_diff);
+                let variable_band_tracepoints = cigar_to_variable_band_tracepoints(&paf_cigar, max_diff);
+
+                let cigar_from_tracepoints = tracepoints_to_cigar(
                     &tracepoints,
                     &query_seq,
                     &target_seq,
@@ -372,25 +434,72 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     gap_open2,
                     gap_ext2,
                 );
-
-                //let realn_cigar = align_sequences_wfa(&query_seq, &target_seq);
-                //let realn_cigar = cigar_ops_to_cigar_string(&realn_cigar);
-
-                info!(
-                    "\t           tracepoints: {:?}", tracepoints);
-                info!(
-                    "\tCIGAR from tracepoints: {}",
-                    recon_cigar
+                let cigar_from_single_band_tracepoints = single_band_tracepoints_to_cigar(
+                    &single_band_tracepoints,
+                    &query_seq,
+                    &target_seq,
+                    0,
+                    0,
+                    mismatch,
+                    gap_open1,
+                    gap_ext1,
+                    gap_open2,
+                    gap_ext2,
                 );
-                info!(
-                    "\t    CIGAR from the PAF: {}", paf_cigar);
-                info!(
-                    "get_cigar_diagonal_bounds from the PAF: {:?}",
-                    get_cigar_diagonal_bounds(&paf_cigar)
+                let cigar_from_double_band_tracepoints = double_band_tracepoints_to_cigar(
+                    &double_band_tracepoints,
+                    &query_seq,
+                    &target_seq,
+                    0,
+                    0,
+                    mismatch,
+                    gap_open1,
+                    gap_ext1,
+                    gap_open2,
+                    gap_ext2,
                 );
-                //info!("\t CIGAR from realignment: {}", realn_cigar);
+                let cigar_from_variable_band_tracepoints = variable_band_tracepoints_to_cigar(
+                    &variable_band_tracepoints,
+                    &query_seq,
+                    &target_seq,
+                    0,
+                    0,
+                    mismatch,
+                    gap_open1,
+                    gap_ext1,
+                    gap_open2,
+                    gap_ext2,
+                );
 
-                assert!(paf_cigar == recon_cigar);
+                if cigar_from_tracepoints != cigar_from_single_band_tracepoints
+                    || cigar_from_tracepoints != cigar_from_double_band_tracepoints
+                    || cigar_from_tracepoints != cigar_from_variable_band_tracepoints
+                {
+                    error!("CIGAR mismatch!");
+                    error!("\t                         tracepoints: {:?}", tracepoints);
+                    error!("\t             single_band_tracepoints: {:?}", single_band_tracepoints);
+                    error!("\t             double_band_tracepoints: {:?}", double_band_tracepoints);
+                    error!("\t           variable_band_tracepoints: {:?}", variable_band_tracepoints);
+                    error!("\t                      CIGAR from PAF: {}", paf_cigar);
+                    error!("\t              CIGAR from tracepoints: {}", cigar_from_tracepoints);
+                    error!("\t  CIGAR from single_band_tracepoints: {}", cigar_from_single_band_tracepoints);
+                    error!("\t  CIGAR from double_band_tracepoints: {}", cigar_from_double_band_tracepoints);
+                    error!("\tCIGAR from variable_band_tracepoints: {}", cigar_from_variable_band_tracepoints);
+                    error!("\t                      bounds CIGAR from PAF: {:?}", get_cigar_diagonal_bounds(&paf_cigar));
+                    error!("\t              bounds CIGAR from tracepoints: {:?}", get_cigar_diagonal_bounds(&cigar_from_tracepoints));
+                    error!("\t  bounds CIGAR from single_band_tracepoints: {:?}", get_cigar_diagonal_bounds(&cigar_from_single_band_tracepoints));
+                    error!("\t  bounds CIGAR from double_band_tracepoints: {:?}", get_cigar_diagonal_bounds(&cigar_from_double_band_tracepoints));
+                    error!("\tbounds CIGAR from variable_band_tracepoints: {:?}", get_cigar_diagonal_bounds(&cigar_from_variable_band_tracepoints));
+
+                    let (deviation, d_min, d_max, max_gap) =
+                        compute_deviation(&cigar_from_tracepoints);
+                    error!("\t                      deviation CIGAR from PAF: {:?}", compute_deviation(&paf_cigar));
+                    error!("\t              deviation CIGAR from tracepoints: {:?}", (deviation, d_min, d_max, max_gap));
+                    error!("\t  deviation CIGAR from single_band_tracepoints: {:?}", compute_deviation(&cigar_from_single_band_tracepoints));
+                    error!("\t  deviation CIGAR from double_band_tracepoints: {:?}", compute_deviation(&cigar_from_double_band_tracepoints));
+                    error!("\tdeviation CIGAR from variable_band_tracepoints: {:?}", compute_deviation(&cigar_from_variable_band_tracepoints));
+                    error!("=> Try using --wfa-heuristic=banded-static --wfa-heuristic-parameters=-{},{}\n", std::cmp::max(max_gap, -d_min), std::cmp::max(max_gap, d_max));
+                }
             }
         }
     }
@@ -428,7 +537,7 @@ fn process_debug_chunk(
             );
             std::process::exit(1);
         };
-        let _paf_cigar = &cg_field[5..];
+        let paf_cigar = &cg_field[5..];
 
         // Parse mandatory PAF fields.
         let query_name = fields[0];
@@ -514,43 +623,50 @@ fn process_debug_chunk(
         };
 
         // Create thread-local aligner
-        let mut aligner = AffineWavefronts::with_penalties_affine2p(
-            0, mismatch, gap_open1, gap_ext1, gap_open2, gap_ext2,
-        );
-        let realn_cigar = align_sequences_wfa(&query_seq, &target_seq, &mut aligner);
-        let realn_cigar = cigar_ops_to_cigar_string(&realn_cigar);
-        let paf_cigar = &realn_cigar;
+        // let mut aligner = AffineWavefronts::with_penalties_affine2p(
+        //     0, mismatch, gap_open1, gap_ext1, gap_open2, gap_ext2,
+        // );
+        // let realn_cigar = align_sequences_wfa(&query_seq, &target_seq, &mut aligner);
+        // let realn_cigar = cigar_ops_to_cigar_string(&realn_cigar);
+        // let paf_cigar = &realn_cigar;
 
         // Convert CIGAR to tracepoints using query (A) and target (B) coordinates.
         let tracepoints = cigar_to_tracepoints(paf_cigar, max_diff);
-        let single_band_tracepoints =
-            cigar_to_single_band_tracepoints(paf_cigar, max_diff);
-        let double_band_tracepoints =
-            cigar_to_double_band_tracepoints(paf_cigar, max_diff);
-        let variable_band_tracepoints =
-            cigar_to_variable_band_tracepoints(paf_cigar, max_diff);
+        // let single_band_tracepoints = cigar_to_single_band_tracepoints(paf_cigar, max_diff);
+        // let double_band_tracepoints = cigar_to_double_band_tracepoints(paf_cigar, max_diff);
+        // let variable_band_tracepoints = cigar_to_variable_band_tracepoints(paf_cigar, max_diff);
 
         // Compare tracepoints
-        if tracepoints
-            .iter()
-            .zip(single_band_tracepoints.iter())
-            .any(|(a, b)| a.0 != b.0 || a.1 != b.1)
-        {
-            error!("Tracepoints mismatch! {}", line);
-            error!("\t            tracepoints: {:?}", tracepoints);
-            error!("\tsingle_band_tracepoints: {:?}", single_band_tracepoints);
-            std::process::exit(1);
-        }
-        if tracepoints
-            .iter()
-            .zip(double_band_tracepoints.iter())
-            .any(|(a, b)| a.0 != b.0 || a.1 != b.1)
-        {
-            error!("Tracepoints mismatch! {}", line);
-            error!("\t            tracepoints: {:?}", tracepoints);
-            error!("\tdouble_band_tracepoints: {:?}", double_band_tracepoints);
-            std::process::exit(1);
-        }
+        // if tracepoints
+        //     .iter()
+        //     .zip(single_band_tracepoints.iter())
+        //     .any(|(a, b)| a.0 != b.0 || a.1 != b.1)
+        // {
+        //     error!("Tracepoints mismatch! {}", line);
+        //     error!("\t            tracepoints: {:?}", tracepoints);
+        //     error!("\tsingle_band_tracepoints: {:?}", single_band_tracepoints);
+        //     std::process::exit(1);
+        // }
+        // if tracepoints
+        //     .iter()
+        //     .zip(double_band_tracepoints.iter())
+        //     .any(|(a, b)| a.0 != b.0 || a.1 != b.1)
+        // {
+        //     error!("Tracepoints mismatch! {}", line);
+        //     error!("\t            tracepoints: {:?}", tracepoints);
+        //     error!("\tdouble_band_tracepoints: {:?}", double_band_tracepoints);
+        //     std::process::exit(1);
+        // }
+        // if tracepoints
+        //     .iter()
+        //     .zip(variable_band_tracepoints.iter())
+        //     .any(|(a, b)| a.0 != b.0 || a.1 != b.1)
+        // {
+        //     error!("Tracepoints mismatch! {}", line);
+        //     error!("\t              tracepoints: {:?}", tracepoints);
+        //     error!("\tvariable_band_tracepoints: {:?}", variable_band_tracepoints);
+        //     std::process::exit(1);
+        // }
 
         // Reconstruct the CIGAR from tracepoints.
         let cigar_from_tracepoints = tracepoints_to_cigar(
@@ -565,73 +681,70 @@ fn process_debug_chunk(
             gap_open2,
             gap_ext2,
         );
-        let cigar_from_single_band_tracepoints = single_band_tracepoints_to_cigar(
-            &single_band_tracepoints,
-            &query_seq,
-            &target_seq,
-            0,
-            0,
-            mismatch,
-            gap_open1,
-            gap_ext1,
-            gap_open2,
-            gap_ext2,
-        );
-        let cigar_from_double_band_tracepoints = double_band_tracepoints_to_cigar(
-            &double_band_tracepoints,
-            &query_seq,
-            &target_seq,
-            0,
-            0,
-            mismatch,
-            gap_open1,
-            gap_ext1,
-            gap_open2,
-            gap_ext2,
-        );
-        let cigar_from_variable_band_tracepoints = variable_band_tracepoints_to_cigar(
-            &variable_band_tracepoints,
-            &query_seq,
-            &target_seq,
-            0,
-            0,
-            mismatch,
-            gap_open1,
-            gap_ext1,
-            gap_open2,
-            gap_ext2,
-        );
+        // let cigar_from_single_band_tracepoints = single_band_tracepoints_to_cigar(
+        //     &single_band_tracepoints,
+        //     &query_seq,
+        //     &target_seq,
+        //     0,
+        //     0,
+        //     mismatch,
+        //     gap_open1,
+        //     gap_ext1,
+        //     gap_open2,
+        //     gap_ext2,
+        // );
+        // let cigar_from_double_band_tracepoints = double_band_tracepoints_to_cigar(
+        //     &double_band_tracepoints,
+        //     &query_seq,
+        //     &target_seq,
+        //     0,
+        //     0,
+        //     mismatch,
+        //     gap_open1,
+        //     gap_ext1,
+        //     gap_open2,
+        //     gap_ext2,
+        // );
+        // let cigar_from_variable_band_tracepoints = variable_band_tracepoints_to_cigar(
+        //     &variable_band_tracepoints,
+        //     &query_seq,
+        //     &target_seq,
+        //     0,
+        //     0,
+        //     mismatch,
+        //     gap_open1,
+        //     gap_ext1,
+        //     gap_open2,
+        //     gap_ext2,
+        // );
 
-        if cigar_from_tracepoints != cigar_from_single_band_tracepoints
-            || cigar_from_tracepoints != cigar_from_double_band_tracepoints
-            || cigar_from_tracepoints != cigar_from_variable_band_tracepoints
+        if paf_cigar != cigar_from_tracepoints
         {
             error!("CIGAR mismatch! {}", line);
             error!("\t                         tracepoints: {:?}", tracepoints);
-            error!("\t             single_band_tracepoints: {:?}", single_band_tracepoints);
-            error!("\t             double_band_tracepoints: {:?}", double_band_tracepoints);
-            error!("\t           variable_band_tracepoints: {:?}", variable_band_tracepoints);
+            // error!("\t             single_band_tracepoints: {:?}", single_band_tracepoints);
+            // error!("\t             double_band_tracepoints: {:?}", double_band_tracepoints);
+            // error!("\t           variable_band_tracepoints: {:?}", variable_band_tracepoints);
             error!("\t                      CIGAR from PAF: {}", paf_cigar);
             error!("\t              CIGAR from tracepoints: {}", cigar_from_tracepoints);
-            error!("\t  CIGAR from single_band_tracepoints: {}", cigar_from_single_band_tracepoints);
-            error!("\t  CIGAR from double_band_tracepoints: {}", cigar_from_double_band_tracepoints);
-            error!("\tCIGAR from variable_band_tracepoints: {}", cigar_from_variable_band_tracepoints);
+            // error!("\t  CIGAR from single_band_tracepoints: {}", cigar_from_single_band_tracepoints);
+            // error!("\t  CIGAR from double_band_tracepoints: {}", cigar_from_double_band_tracepoints);
+            // error!("\tCIGAR from variable_band_tracepoints: {}", cigar_from_variable_band_tracepoints);
             error!("\t seqa: {}", String::from_utf8(query_seq.clone()).unwrap());
             error!("\t seqb: {}", String::from_utf8(target_seq.clone()).unwrap());
             error!("\t                      bounds CIGAR from PAF: {:?}", get_cigar_diagonal_bounds(&paf_cigar));
             error!("\t              bounds CIGAR from tracepoints: {:?}", get_cigar_diagonal_bounds(&cigar_from_tracepoints));
-            error!("\t  bounds CIGAR from single_band_tracepoints: {:?}", get_cigar_diagonal_bounds(&cigar_from_single_band_tracepoints));
-            error!("\t  bounds CIGAR from double_band_tracepoints: {:?}", get_cigar_diagonal_bounds(&cigar_from_double_band_tracepoints));
-            error!("\tbounds CIGAR from variable_band_tracepoints: {:?}", get_cigar_diagonal_bounds(&cigar_from_variable_band_tracepoints));
+            // error!("\t  bounds CIGAR from single_band_tracepoints: {:?}", get_cigar_diagonal_bounds(&cigar_from_single_band_tracepoints));
+            // error!("\t  bounds CIGAR from double_band_tracepoints: {:?}", get_cigar_diagonal_bounds(&cigar_from_double_band_tracepoints));
+            // error!("\tbounds CIGAR from variable_band_tracepoints: {:?}", get_cigar_diagonal_bounds(&cigar_from_variable_band_tracepoints));
 
-            let (deviation, d_min, d_max, max_gap) =
-                compute_deviation(&cigar_from_tracepoints);
+            let (deviation, d_min, d_max, max_gap) = compute_deviation(&cigar_from_tracepoints);
             error!("\t                      deviation CIGAR from PAF: {:?}", compute_deviation(&paf_cigar));
             error!("\t              deviation CIGAR from tracepoints: {:?}", (deviation, d_min, d_max, max_gap));
-            error!("\t  deviation CIGAR from single_band_tracepoints: {:?}", compute_deviation(&cigar_from_single_band_tracepoints));
-            error!("\t  deviation CIGAR from double_band_tracepoints: {:?}", compute_deviation(&cigar_from_double_band_tracepoints));
-            error!("\tdeviation CIGAR from variable_band_tracepoints: {:?}", compute_deviation(&cigar_from_variable_band_tracepoints));
-            error!("=> Try using --wfa-heuristic=banded-static --wfa-heuristic-parameters=-{},{}\n", std::cmp::max(max_gap, -d_min), std::cmp::max(max_gap, d_max));
+            // error!("\t  deviation CIGAR from single_band_tracepoints: {:?}", compute_deviation(&cigar_from_single_band_tracepoints));
+            // error!("\t  deviation CIGAR from double_band_tracepoints: {:?}", compute_deviation(&cigar_from_double_band_tracepoints));
+            // error!("\tdeviation CIGAR from variable_band_tracepoints: {:?}", compute_deviation(&cigar_from_variable_band_tracepoints));
+            // error!("=> Try using --wfa-heuristic=banded-static --wfa-heuristic-parameters=-{},{}\n", std::cmp::max(max_gap, -d_min), std::cmp::max(max_gap, d_max));
         }
     });
 }
