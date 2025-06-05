@@ -11,8 +11,8 @@ flate2 = "1.1.1"
 #lib_wfa2 = { path = "/home/guarracino/Dropbox/git/lib_wfa2"}
 lib_wfa2 = { git = "https://github.com/AndreaGuarracino/lib_wfa2"}
 
-lib_tracepoints = { path = "/home/guarracino/Dropbox/git/lib_tracepoints"}
-#lib_tracepoints = { git = "https://github.com/AndreaGuarracino/lib_tracepoints"}
+#lib_tracepoints = { path = "/home/guarracino/Dropbox/git/lib_tracepoints"}
+lib_tracepoints = { git = "https://github.com/AndreaGuarracino/lib_tracepoints"}
 
 log = "0.4.27"
 env_logger = "0.11.8"
