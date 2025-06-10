@@ -718,7 +718,10 @@ fn process_debug_chunk(
         //     gap_ext2,
         // );
 
-        if paf_cigar != cigar_from_tracepoints
+        let (matches, mismatches, insertions, inserted_bp, deletions, deleted_bp, paf_gap_compressed_id, paf_block_id) = calculate_cigar_stats(&paf_cigar);
+        let (tracepoints_matches, tracepoints_mismatches, tracepoints_insertions, tracepoints_inserted_bp, tracepoints_deletions, tracepoints_deleted_bp, tracepoints_gap_compressed_id, tracepoints_block_id) = calculate_cigar_stats(&cigar_from_tracepoints);
+
+        if paf_cigar != cigar_from_tracepoints && paf_gap_compressed_id != tracepoints_gap_compressed_id
         {
             println!("CIGAR mismatch! {}", line);
             println!("\t                         tracepoints: {:?}", tracepoints);
@@ -730,6 +733,14 @@ fn process_debug_chunk(
             // println!("\t  CIGAR from single_band_tracepoints: {}", cigar_from_single_band_tracepoints);
             // println!("\t  CIGAR from double_band_tracepoints: {}", cigar_from_double_band_tracepoints);
             // println!("\tCIGAR from variable_band_tracepoints: {}", cigar_from_variable_band_tracepoints);
+            println!("\t         cigar stats from PAF: matches: {}, mismatches: {}, insertions: {}, inserted_bp: {}, deletions: {}, deleted_bp: {}, gap_compressed_id: {:.12}, block_id: {:.12}",
+                matches, mismatches, insertions, inserted_bp, deletions, deleted_bp, paf_gap_compressed_id, paf_block_id);
+            println!("\t cigar stats from tracepoints: matches: {}, mismatches: {}, insertions: {}, inserted_bp: {}, deletions: {}, deleted_bp: {}, gap_compressed_id: {:.12}, block_id: {:.12}",
+                tracepoints_matches, tracepoints_mismatches, tracepoints_insertions, tracepoints_inserted_bp, tracepoints_deletions, tracepoints_deleted_bp, tracepoints_gap_compressed_id, tracepoints_block_id);
+            println!("\t         gap compressed identity from PAF: {:.12}", paf_gap_compressed_id);
+            println!("\t gap compressed identity from tracepoints: {:.12}", tracepoints_gap_compressed_id);
+            println!("\t block identity from PAF: {:.12}", paf_block_id);
+            println!("\t block identity from tracepoints: {:.12}", tracepoints_block_id);
             println!("\t seqa: {}", String::from_utf8(query_seq.clone()).unwrap());
             println!("\t seqb: {}", String::from_utf8(target_seq.clone()).unwrap());
             println!("\t                      bounds CIGAR from PAF: {:?}", get_cigar_diagonal_bounds(&paf_cigar));
@@ -747,6 +758,73 @@ fn process_debug_chunk(
             // println!("=> Try using --wfa-heuristic=banded-static --wfa-heuristic-parameters=-{},{}\n", std::cmp::max(max_gap, -d_min), std::cmp::max(max_gap, d_max));
         }
     });
+}
+
+/// Calculate gap compressed identity and block identity from a CIGAR string
+fn calculate_cigar_stats(cigar: &str) -> (usize, usize, usize, usize, usize, usize, f64, f64) {
+    let mut matches = 0;
+    let mut mismatches = 0;
+    let mut insertions = 0;  // Number of insertion events
+    let mut inserted_bp = 0; // Total inserted base pairs
+    let mut deletions = 0;   // Number of deletion events
+    let mut deleted_bp = 0;  // Total deleted base pairs
+    
+    // Parse CIGAR string
+    let mut num_buffer = String::new();
+    
+    for c in cigar.chars() {
+        if c.is_digit(10) {
+            num_buffer.push(c);
+        } else {
+            // Get the count
+            let len = num_buffer.parse::<usize>().unwrap_or(0);
+            num_buffer.clear();
+            
+            match c {
+                'M' => {
+                    // Assuming 'M' represents matches for simplicity (as in your code)
+                    matches += len;
+                }
+                '=' => {
+                    matches += len;
+                }
+                'X' => {
+                    mismatches += len;
+                }
+                'I' => {
+                    insertions += 1;      // One insertion event
+                    inserted_bp += len;   // Total inserted bases
+                }
+                'D' => {
+                    deletions += 1;       // One deletion event
+                    deleted_bp += len;    // Total deleted bases
+                }
+                'S' | 'H' | 'P' | 'N' => {
+                    // Skip soft clips, hard clips, padding, and skipped regions
+                }
+                _ => {
+                    // Unknown operation, skip
+                }
+            }
+        }
+    }
+    
+    // Calculate gap compressed identity
+    let gap_compressed_identity = if matches + mismatches + insertions + deletions > 0 {
+        (matches as f64) / (matches + mismatches + insertions + deletions) as f64
+    } else {
+        0.0
+    };
+    
+    // Calculate block identity
+    let edit_distance = mismatches + inserted_bp + deleted_bp;
+    let block_identity = if matches + edit_distance > 0 {
+        (matches as f64) / (matches + edit_distance) as f64
+    } else {
+        0.0
+    };
+
+    (matches, mismatches, insertions, inserted_bp, deletions, deleted_bp, gap_compressed_identity, block_identity)
 }
 
 /// Initialize logger based on verbosity
