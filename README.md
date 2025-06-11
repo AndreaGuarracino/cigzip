@@ -43,22 +43,9 @@ cigzip decompress --paf alignments.tp.paf --query-fasta query.fa --target-fasta 
 
 ## Building
 
-You need to build `WFA2-lib` (commit `3c1734e9bb319c7782ae6845e627612ff157d1cc`) first, which is a submodule of this repository. To do so, run:
-
 ```shell
-git clone --recursive https://github.com/AndreaGuarracino/cigzip
-cd cigzip/WFA2-lib
-make clean all
-cd ..
-```
-
-Then, you can build the project using Cargo:
-
-```shell
-# Point to your pre-built WFA2-lib directory
-export WFA2LIB_PATH="./WFA2-lib"
-
-# Build your project
+git clone https://github.com/AndreaGuarracino/cigzip
+cd cigzip
 cargo build --release
 ```
 
@@ -67,11 +54,7 @@ cargo build --release
 ```bash
 git clone --recursive https://github.com/AndreaGuarracino/cigzip
 cd cigzip/WFA2-lib
-guix shell -C -D -f guix.scm
-export CC=gcc; make clean all
-exit
-cd ..
-env -i bash -c 'WFA2LIB_PATH="./WFA2-lib" PATH=/usr/local/bin:/usr/bin:/bin ~/.cargo/bin/cargo build --release'
+env -i bash -c 'PATH=/usr/local/bin:/usr/bin:/bin ~/.cargo/bin/cargo build --release'
 ```
 
 ## License
