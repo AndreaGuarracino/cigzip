@@ -724,10 +724,8 @@ fn process_debug_chunk(
         if paf_cigar != cigar_from_tracepoints && paf_gap_compressed_id != tracepoints_gap_compressed_id
         {
             println!("CIGAR mismatch! {}", line);
-            println!("\t                         tracepoints: {:?}", tracepoints);
-            // println!("\t             single_band_tracepoints: {:?}", single_band_tracepoints);
-            // println!("\t             double_band_tracepoints: {:?}", double_band_tracepoints);
-            // println!("\t           variable_band_tracepoints: {:?}", variable_band_tracepoints);
+            println!("\t seqa: {}", String::from_utf8(query_seq.clone()).unwrap());
+            println!("\t seqb: {}", String::from_utf8(target_seq.clone()).unwrap());
             println!("\t                      CIGAR from PAF: {}", paf_cigar);
             println!("\t              CIGAR from tracepoints: {}", cigar_from_tracepoints);
             // println!("\t  CIGAR from single_band_tracepoints: {}", cigar_from_single_band_tracepoints);
@@ -739,10 +737,12 @@ fn process_debug_chunk(
                 tracepoints_matches, tracepoints_mismatches, tracepoints_insertions, tracepoints_inserted_bp, tracepoints_deletions, tracepoints_deleted_bp, tracepoints_gap_compressed_id, tracepoints_block_id);
             println!("\t         gap compressed identity from PAF: {:.12}", paf_gap_compressed_id);
             println!("\t gap compressed identity from tracepoints: {:.12}", tracepoints_gap_compressed_id);
-            println!("\t block identity from PAF: {:.12}", paf_block_id);
+            println!("\t         block identity from PAF: {:.12}", paf_block_id);
             println!("\t block identity from tracepoints: {:.12}", tracepoints_block_id);
-            println!("\t seqa: {}", String::from_utf8(query_seq.clone()).unwrap());
-            println!("\t seqb: {}", String::from_utf8(target_seq.clone()).unwrap());
+            println!("\t                         tracepoints: {:?}", tracepoints);
+            // println!("\t             single_band_tracepoints: {:?}", single_band_tracepoints);
+            // println!("\t             double_band_tracepoints: {:?}", double_band_tracepoints);
+            // println!("\t           variable_band_tracepoints: {:?}", variable_band_tracepoints);
             println!("\t                      bounds CIGAR from PAF: {:?}", get_cigar_diagonal_bounds(&paf_cigar));
             println!("\t              bounds CIGAR from tracepoints: {:?}", get_cigar_diagonal_bounds(&cigar_from_tracepoints));
             // println!("\t  bounds CIGAR from single_band_tracepoints: {:?}", get_cigar_diagonal_bounds(&cigar_from_single_band_tracepoints));
