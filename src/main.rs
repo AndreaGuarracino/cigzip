@@ -623,11 +623,11 @@ fn process_debug_chunk(
         };
 
         // Create thread-local aligner
-        // let mut aligner = AffineWavefronts::with_penalties_affine2p(
-        //     0, mismatch, gap_open1, gap_ext1, gap_open2, gap_ext2,
-        // );
-        // let realn_cigar = align_sequences_wfa(&query_seq, &target_seq, &mut aligner);
-        // let realn_cigar = cigar_ops_to_cigar_string(&realn_cigar);
+        let mut aligner = AffineWavefronts::with_penalties_affine2p(
+            0, mismatch, gap_open1, gap_ext1, gap_open2, gap_ext2,
+        );
+        let realn_cigar = align_sequences_wfa(&query_seq, &target_seq, &mut aligner);
+        let realn_cigar = cigar_ops_to_cigar_string(&realn_cigar);
         // let paf_cigar = &realn_cigar;
 
         // Convert CIGAR to tracepoints using query (A) and target (B) coordinates.
@@ -720,25 +720,28 @@ fn process_debug_chunk(
 
         let (matches, mismatches, insertions, inserted_bp, deletions, deleted_bp, paf_gap_compressed_id, paf_block_id) = calculate_cigar_stats(&paf_cigar);
         let (tracepoints_matches, tracepoints_mismatches, tracepoints_insertions, tracepoints_inserted_bp, tracepoints_deletions, tracepoints_deleted_bp, tracepoints_gap_compressed_id, tracepoints_block_id) = calculate_cigar_stats(&cigar_from_tracepoints);
+        let (realign_matches, realign_mismatches, realign_insertions, realign_inserted_bp, realign_deletions, realign_deleted_bp, realign_gap_compressed_id, realign_block_id) = calculate_cigar_stats(&realn_cigar);
 
-        if paf_cigar != cigar_from_tracepoints && paf_gap_compressed_id != tracepoints_gap_compressed_id
+        if realn_cigar != cigar_from_tracepoints //&& paf_gap_compressed_id != tracepoints_gap_compressed_id
         {
             println!("CIGAR mismatch! {}", line);
             println!("\t seqa: {}", String::from_utf8(query_seq.clone()).unwrap());
             println!("\t seqb: {}", String::from_utf8(target_seq.clone()).unwrap());
+            println!("\t                  CIGAR from realign: {}", realn_cigar);
             println!("\t                      CIGAR from PAF: {}", paf_cigar);
             println!("\t              CIGAR from tracepoints: {}", cigar_from_tracepoints);
             // println!("\t  CIGAR from single_band_tracepoints: {}", cigar_from_single_band_tracepoints);
             // println!("\t  CIGAR from double_band_tracepoints: {}", cigar_from_double_band_tracepoints);
             // println!("\tCIGAR from variable_band_tracepoints: {}", cigar_from_variable_band_tracepoints);
+            println!("\t    CIGAR score from realign: {}", compute_alignment_score_from_cigar(&realn_cigar, mismatch, gap_open1, gap_ext1, gap_open2, gap_ext2));
+            println!("\t        CIGAR score from PAF: {}", compute_alignment_score_from_cigar(&paf_cigar, mismatch, gap_open1, gap_ext1, gap_open2, gap_ext2));
+            println!("\tCIGAR score from tracepoints: {}", compute_alignment_score_from_cigar(&cigar_from_tracepoints, mismatch, gap_open1, gap_ext1, gap_open2, gap_ext2));
+            println!("\t     cigar stats from realign: matches: {}, mismatches: {}, insertions: {}, inserted_bp: {}, deletions: {}, deleted_bp: {}, gap_compressed_id: {:.12}, block_id: {:.12}",
+                realign_matches, realign_mismatches, realign_insertions, realign_inserted_bp, realign_deletions, realign_deleted_bp, realign_gap_compressed_id, realign_block_id);
             println!("\t         cigar stats from PAF: matches: {}, mismatches: {}, insertions: {}, inserted_bp: {}, deletions: {}, deleted_bp: {}, gap_compressed_id: {:.12}, block_id: {:.12}",
                 matches, mismatches, insertions, inserted_bp, deletions, deleted_bp, paf_gap_compressed_id, paf_block_id);
             println!("\t cigar stats from tracepoints: matches: {}, mismatches: {}, insertions: {}, inserted_bp: {}, deletions: {}, deleted_bp: {}, gap_compressed_id: {:.12}, block_id: {:.12}",
                 tracepoints_matches, tracepoints_mismatches, tracepoints_insertions, tracepoints_inserted_bp, tracepoints_deletions, tracepoints_deleted_bp, tracepoints_gap_compressed_id, tracepoints_block_id);
-            println!("\t         gap compressed identity from PAF: {:.12}", paf_gap_compressed_id);
-            println!("\t gap compressed identity from tracepoints: {:.12}", tracepoints_gap_compressed_id);
-            println!("\t         block identity from PAF: {:.12}", paf_block_id);
-            println!("\t block identity from tracepoints: {:.12}", tracepoints_block_id);
             println!("\t                         tracepoints: {:?}", tracepoints);
             // println!("\t             single_band_tracepoints: {:?}", single_band_tracepoints);
             // println!("\t             double_band_tracepoints: {:?}", double_band_tracepoints);
@@ -825,6 +828,73 @@ fn calculate_cigar_stats(cigar: &str) -> (usize, usize, usize, usize, usize, usi
     };
 
     (matches, mismatches, insertions, inserted_bp, deletions, deleted_bp, gap_compressed_identity, block_identity)
+}
+
+fn compute_alignment_score_from_cigar(
+    cigar: &str,
+    mismatch: i32,
+    gap_open1: i32,
+    gap_ext1: i32,
+    gap_open2: i32,
+    gap_ext2: i32,
+) -> i32 {
+    let mut score = 0i32;
+    let mut num_buffer = String::new();
+    
+    for c in cigar.chars() {
+        if c.is_digit(10) {
+            num_buffer.push(c);
+        } else {
+            // Get the count
+            let len = num_buffer.parse::<usize>().unwrap_or(0);
+            num_buffer.clear();
+            
+            match c {
+                '=' => {
+                    // Matches - no penalty (score 0)
+                    // score += 0;
+                }
+                'M' => {
+                    // For 'M' operations, we'd need the actual sequences to determine matches vs mismatches
+                    // For now, we'll treat 'M' as matches (you may want to adjust this)
+                    // score += 0;
+                    eprintln!("Warning: 'M' in CIGAR requires sequences to determine match/mismatch");
+                }
+                'X' => {
+                    // Mismatches
+                    score -= mismatch * (len as i32);
+                }
+                'I' | 'D' => {
+                    // Gaps - using dual affine model
+                    // The choice between penalty 1 and 2 depends on your specific model
+                    // Typically, shorter gaps use penalty1 and longer gaps use penalty2
+                    
+                    // Simple heuristic: use penalty1 for short gaps, penalty2 for long gaps
+                    // You may need to adjust this threshold based on your model
+                    let gap_score = if len == 1 {
+                        // Single gap - might use just gap_open1
+                        -gap_open1
+                    } else if len <= 3 {
+                        // Short gap - use first affine penalty
+                        -gap_open1 - gap_ext1 * ((len - 1) as i32)
+                    } else {
+                        // Long gap - use second affine penalty
+                        -gap_open2 - gap_ext2 * ((len - 1) as i32)
+                    };
+                    score += gap_score;
+                }
+                'S' | 'H' | 'P' | 'N' => {
+                    // Soft clips, hard clips, padding, and skipped regions
+                    // These typically don't contribute to the alignment score
+                }
+                _ => {
+                    eprintln!("Unknown CIGAR operation: {}", c);
+                }
+            }
+        }
+    }
+    
+    score
 }
 
 /// Initialize logger based on verbosity

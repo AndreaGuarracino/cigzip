@@ -6,7 +6,7 @@ edition = "2021"
 [dependencies]
 clap = { version = "4.5.39", features = ["derive"] }
 rust-htslib = { version = "0.46.0", default-features = false } # Don't update it, see https://github.com/rust-bio/rust-htslib/issues/434
-flate2 = "1.1.1"
+flate2 = "1.1.2"
 
 #lib_wfa2 = { path = "/home/guarracino/Dropbox/git/lib_wfa2"}
 lib_wfa2 = { git = "https://github.com/AndreaGuarracino/lib_wfa2"}
