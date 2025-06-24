@@ -1,11 +1,7 @@
 use clap::Parser;
 use flate2::read::MultiGzDecoder;
 use lib_tracepoints::{
-    align_sequences_wfa, cigar_ops_to_cigar_string, cigar_to_double_band_tracepoints,
-    cigar_to_mixed_double_band_tracepoints, cigar_to_single_band_tracepoints, cigar_to_tracepoints,
-    cigar_to_variable_band_tracepoints, double_band_tracepoints_to_cigar,
-    mixed_double_band_tracepoints_to_cigar, single_band_tracepoints_to_cigar, tracepoints_to_cigar,
-    variable_band_tracepoints_to_cigar, MixedRepresentation,
+    align_sequences_wfa, cigar_ops_to_cigar_string, cigar_to_tracepoints, cigar_to_mixed_tracepoints, tracepoints_to_cigar, mixed_tracepoints_to_cigar, MixedRepresentation
 };
 use lib_wfa2::affine_wavefront::AffineWavefronts;
 use log::{error, info};
@@ -15,39 +11,6 @@ use std::fs::File;
 use std::io::{self, BufRead, BufReader};
 use indicatif::ProgressStyle;
 use indicatif::ProgressBar;
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum BandType {
-    None,
-    Single,
-    Double,
-    Variable,
-}
-
-impl BandType {
-    // Parse from string
-    fn from_str(s: &str) -> Result<Self, String> {
-        match s.to_lowercase().as_str() {
-            "none" => Ok(BandType::None),
-            "single" => Ok(BandType::Single),
-            "double" => Ok(BandType::Double),
-            "variable" => Ok(BandType::Variable),
-            _ => Err(format!(
-                "Invalid banding strategy '{}'. Supported options: none, single, double, variable",
-                s
-            )),
-        }
-    }
-
-    // Get a user-friendly name for logging/display
-    fn display_name(&self) -> &'static str {
-        match self {
-            BandType::None => "no-band",
-            BandType::Single => "single-band",
-            BandType::Double => "double-band",
-            BandType::Variable => "variable-band",
-        }
-    }
-}
 
 /// Common options shared between all commands
 #[derive(Parser, Debug)]
@@ -72,10 +35,6 @@ enum Args {
     Compress {
         #[clap(flatten)]
         common: CommonOpts,
-
-        /// Banding strategy: none, single, double, variable
-        #[arg(short = 'b', long = "band", default_value = "none", value_parser = BandType::from_str)]
-        band: BandType,
 
         /// Use mixed representation (preserves S/H/P/N CIGAR operations)
         #[arg(short = 'm', long = "mixed", default_value_t = false)]
@@ -142,19 +101,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     match args {
         Args::Compress {
             common,
-            band,
             mixed,
             max_diff,
         } => {
             setup_logger(common.verbose);
-
-            // If mixed is true, validate that band is Double
-            if mixed && band != BandType::Double {
-                error!("The --mixed option can only be used with the double-band strategy. Use --band double with --mixed.");
-                std::process::exit(1);
-            }
-
-            info!("Converting CIGAR to {} tracepoints", band.display_name());
+            info!("Converting CIGAR to {}tracepoints", if mixed {"mixed "} else {""});
 
             // Set the thread pool size
             rayon::ThreadPoolBuilder::new()
@@ -178,7 +129,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
                         if lines.len() >= chunk_size {
                             // Process current chunk in parallel
-                            process_compress_chunk(&lines, band, mixed, max_diff);
+                            process_compress_chunk(&lines, mixed, max_diff);
                             lines.clear();
                         }
                     }
@@ -188,7 +139,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
             // Process remaining lines
             if !lines.is_empty() {
-                process_compress_chunk(&lines, band, mixed, max_diff);
+                process_compress_chunk(&lines, mixed, max_diff);
             }
         }
         Args::Decompress {
@@ -418,9 +369,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 let paf_cigar = cigar_ops_to_cigar_string(&paf_cigar);
 
                 let tracepoints = cigar_to_tracepoints(&paf_cigar, max_diff);
-                let single_band_tracepoints = cigar_to_single_band_tracepoints(&paf_cigar, max_diff);
-                let double_band_tracepoints = cigar_to_double_band_tracepoints(&paf_cigar, max_diff);
-                let variable_band_tracepoints = cigar_to_variable_band_tracepoints(&paf_cigar, max_diff);
 
                 let cigar_from_tracepoints = tracepoints_to_cigar(
                     &tracepoints,
@@ -434,70 +382,20 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     gap_open2,
                     gap_ext2,
                 );
-                let cigar_from_single_band_tracepoints = single_band_tracepoints_to_cigar(
-                    &single_band_tracepoints,
-                    &query_seq,
-                    &target_seq,
-                    0,
-                    0,
-                    mismatch,
-                    gap_open1,
-                    gap_ext1,
-                    gap_open2,
-                    gap_ext2,
-                );
-                let cigar_from_double_band_tracepoints = double_band_tracepoints_to_cigar(
-                    &double_band_tracepoints,
-                    &query_seq,
-                    &target_seq,
-                    0,
-                    0,
-                    mismatch,
-                    gap_open1,
-                    gap_ext1,
-                    gap_open2,
-                    gap_ext2,
-                );
-                let cigar_from_variable_band_tracepoints = variable_band_tracepoints_to_cigar(
-                    &variable_band_tracepoints,
-                    &query_seq,
-                    &target_seq,
-                    0,
-                    0,
-                    mismatch,
-                    gap_open1,
-                    gap_ext1,
-                    gap_open2,
-                    gap_ext2,
-                );
 
-                if cigar_from_tracepoints != cigar_from_single_band_tracepoints
-                    || cigar_from_tracepoints != cigar_from_double_band_tracepoints
-                    || cigar_from_tracepoints != cigar_from_variable_band_tracepoints
+                if false
                 {
                     error!("CIGAR mismatch!");
                     error!("\t                         tracepoints: {:?}", tracepoints);
-                    error!("\t             single_band_tracepoints: {:?}", single_band_tracepoints);
-                    error!("\t             double_band_tracepoints: {:?}", double_band_tracepoints);
-                    error!("\t           variable_band_tracepoints: {:?}", variable_band_tracepoints);
                     error!("\t                      CIGAR from PAF: {}", paf_cigar);
                     error!("\t              CIGAR from tracepoints: {}", cigar_from_tracepoints);
-                    error!("\t  CIGAR from single_band_tracepoints: {}", cigar_from_single_band_tracepoints);
-                    error!("\t  CIGAR from double_band_tracepoints: {}", cigar_from_double_band_tracepoints);
-                    error!("\tCIGAR from variable_band_tracepoints: {}", cigar_from_variable_band_tracepoints);
                     error!("\t                      bounds CIGAR from PAF: {:?}", get_cigar_diagonal_bounds(&paf_cigar));
                     error!("\t              bounds CIGAR from tracepoints: {:?}", get_cigar_diagonal_bounds(&cigar_from_tracepoints));
-                    error!("\t  bounds CIGAR from single_band_tracepoints: {:?}", get_cigar_diagonal_bounds(&cigar_from_single_band_tracepoints));
-                    error!("\t  bounds CIGAR from double_band_tracepoints: {:?}", get_cigar_diagonal_bounds(&cigar_from_double_band_tracepoints));
-                    error!("\tbounds CIGAR from variable_band_tracepoints: {:?}", get_cigar_diagonal_bounds(&cigar_from_variable_band_tracepoints));
 
                     let (deviation, d_min, d_max, max_gap) =
                         compute_deviation(&cigar_from_tracepoints);
                     error!("\t                      deviation CIGAR from PAF: {:?}", compute_deviation(&paf_cigar));
                     error!("\t              deviation CIGAR from tracepoints: {:?}", (deviation, d_min, d_max, max_gap));
-                    error!("\t  deviation CIGAR from single_band_tracepoints: {:?}", compute_deviation(&cigar_from_single_band_tracepoints));
-                    error!("\t  deviation CIGAR from double_band_tracepoints: {:?}", compute_deviation(&cigar_from_double_band_tracepoints));
-                    error!("\tdeviation CIGAR from variable_band_tracepoints: {:?}", compute_deviation(&cigar_from_variable_band_tracepoints));
                     error!("=> Try using --wfa-heuristic=banded-static --wfa-heuristic-parameters=-{},{}\n", std::cmp::max(max_gap, -d_min), std::cmp::max(max_gap, d_max));
                 }
             }
@@ -914,7 +812,7 @@ fn get_paf_reader(paf: &str) -> io::Result<Box<dyn BufRead>> {
 }
 
 /// Process a chunk of lines in parallel for compression
-fn process_compress_chunk(lines: &[String], band: BandType, mixed: bool, max_diff: usize) {
+fn process_compress_chunk(lines: &[String], mixed: bool, max_diff: usize) {
     lines.par_iter().for_each(|line| {
         let fields: Vec<&str> = line.split('\t').collect();
         if fields.len() < 12 {
@@ -937,32 +835,12 @@ fn process_compress_chunk(lines: &[String], band: BandType, mixed: bool, max_dif
         // Convert CIGAR based on options and add type prefix
         let tracepoints_str = if mixed {
             // Use mixed representation
-            let tp = cigar_to_mixed_double_band_tracepoints(cigar, max_diff);
-            format!("M{}", format_mixed_double_band_tracepoints(&tp))
+            let tp = cigar_to_mixed_tracepoints(cigar, max_diff);
+            format!("M{}", format_mixed_tracepoints(&tp))
         } else {
-            // Use standard tracepoints with optional banding
-            match band {
-                BandType::None => {
-                    // No-band tracepoints
-                    let tp = cigar_to_tracepoints(cigar, max_diff);
-                    format_tracepoints(&tp)
-                }
-                BandType::Single => {
-                    // Single-band tracepoints
-                    let tp = cigar_to_single_band_tracepoints(cigar, max_diff);
-                    format_single_band_tracepoints(&tp)
-                }
-                BandType::Double => {
-                    // Double-band tracepoints
-                    let tp = cigar_to_double_band_tracepoints(cigar, max_diff);
-                    format_double_band_tracepoints(&tp)
-                }
-                BandType::Variable => {
-                    // Variable-band tracepoints
-                    let tp = cigar_to_variable_band_tracepoints(cigar, max_diff);
-                    format!("V{}", format_variable_band_tracepoints(&tp))
-                }
-            }
+            // Use standard tracepoints
+            let tp = cigar_to_tracepoints(cigar, max_diff);
+            format_tracepoints(&tp)
         };
 
         // Print the result
@@ -1097,22 +975,8 @@ fn process_decompress_chunk(
 
         // Check if it's a mixed representation (starts with 'M')
         let cigar = if let Some('M') = tracepoints_str.chars().next() {
-            let mixed_tracepoints = parse_mixed_double_band_tracepoints(&tracepoints_str[1..]); // Skip the 'M'
-            mixed_double_band_tracepoints_to_cigar(
-                &mixed_tracepoints,
-                &query_seq,
-                &target_seq,
-                0,
-                0,
-                mismatch,
-                gap_open1,
-                gap_ext1,
-                gap_open2,
-                gap_ext2,
-            )
-        } else if Some('V') == tracepoints_str.chars().next() {
-            let mixed_tracepoints = parse_variable_band_tracepoints(&tracepoints_str[1..]); // Skip the 'M'
-            variable_band_tracepoints_to_cigar(
+            let mixed_tracepoints = parse_mixed_tracepoints(&tracepoints_str[1..]); // Skip the 'M'
+            mixed_tracepoints_to_cigar(
                 &mixed_tracepoints,
                 &query_seq,
                 &target_seq,
@@ -1125,14 +989,7 @@ fn process_decompress_chunk(
                 gap_ext2,
             )
         } else {
-            // Determine band type from the format string in process_compress_chunk
-            // We need to analyze the structure of the tracepoints string
-            let first_tracepoint = tracepoints_str.split(';').next().unwrap();
-
-            match first_tracepoint.split(',').count() {
-                2 => {
-                    // No-band tracepoints (type 0)
-                    let tracepoints = parse_tracepoints(tracepoints_str);
+            let tracepoints = parse_tracepoints(tracepoints_str);
                     tracepoints_to_cigar(
                         &tracepoints,
                         &query_seq,
@@ -1145,44 +1002,6 @@ fn process_decompress_chunk(
                         gap_open2,
                         gap_ext2,
                     )
-                }
-                3 => {
-                    // Single-band tracepoints (type 1)
-                    let tracepoints = parse_single_band_tracepoints(tracepoints_str);
-                    single_band_tracepoints_to_cigar(
-                        &tracepoints,
-                        &query_seq,
-                        &target_seq,
-                        0,
-                        0,
-                        mismatch,
-                        gap_open1,
-                        gap_ext1,
-                        gap_open2,
-                        gap_ext2,
-                    )
-                }
-                4 => {
-                    // Double-band tracepoints (type 2)
-                    let tracepoints = parse_double_band_tracepoints(tracepoints_str);
-                    double_band_tracepoints_to_cigar(
-                        &tracepoints,
-                        &query_seq,
-                        &target_seq,
-                        0,
-                        0,
-                        mismatch,
-                        gap_open1,
-                        gap_ext1,
-                        gap_open2,
-                        gap_ext2,
-                    )
-                }
-                _ => {
-                    error!("Invalid tracepoint format in PAF line: {}", tracepoints_str);
-                    std::process::exit(1);
-                }
-            }
         };
 
         // Print the original line, replacing the tracepoints tag with the CIGAR string
@@ -1204,44 +1023,16 @@ fn format_tracepoints(tracepoints: &[(usize, usize)]) -> String {
         .collect::<Vec<String>>()
         .join(";")
 }
-fn format_single_band_tracepoints(tracepoints: &[(usize, usize, usize)]) -> String {
-    tracepoints
-        .iter()
-        .map(|(a, b, c)| format!("{},{},{}", a, b, c))
-        .collect::<Vec<String>>()
-        .join(";")
-}
-fn format_double_band_tracepoints(tracepoints: &[(usize, usize, (usize, usize))]) -> String {
-    tracepoints
-        .iter()
-        .map(|(a, b, (c, d))| format!("{},{},{},{}", a, b, c, d))
-        .collect::<Vec<String>>()
-        .join(";")
-}
-fn format_mixed_double_band_tracepoints(mixed_tracepoints: &[MixedRepresentation]) -> String {
+fn format_mixed_tracepoints(mixed_tracepoints: &[MixedRepresentation]) -> String {
     mixed_tracepoints
         .iter()
         .map(|tp| match tp {
-            MixedRepresentation::Tracepoint(a, b, (c, d)) => format!("{},{},{},{}", a, b, c, d),
+            MixedRepresentation::Tracepoint(a, b) => format!("{},{}", a, b),
             MixedRepresentation::CigarOp(len, op) => format!("{}{}", len, op),
         })
         .collect::<Vec<String>>()
         .join(";")
 }
-fn format_variable_band_tracepoints(
-    tracepoints: &[(usize, usize, Option<(usize, Option<usize>)>)],
-) -> String {
-    tracepoints
-        .iter()
-        .map(|(a, b, c)| match c {
-            None => format!("{},{}", a, b),
-            Some((d, None)) => format!("{},{},{}", a, b, d),
-            Some((d, Some(e))) => format!("{},{},{},{}", a, b, d, e),
-        })
-        .collect::<Vec<String>>()
-        .join(";")
-}
-
 fn parse_penalties(
     penalties: &str,
 ) -> Result<(i32, i32, i32, i32, i32), Box<dyn std::error::Error>> {
@@ -1271,33 +1062,8 @@ fn parse_tracepoints(tp_str: &str) -> Vec<(usize, usize)> {
         })
         .collect()
 }
-fn parse_single_band_tracepoints(tp_str: &str) -> Vec<(usize, usize, usize)> {
-    tp_str
-        .split(';')
-        .filter_map(|s| {
-            let parts: Vec<&str> = s.split(',').collect();
-            Some((
-                parts[0].parse().unwrap(),
-                parts[1].parse().unwrap(),
-                parts[2].parse().unwrap(),
-            ))
-        })
-        .collect()
-}
-fn parse_double_band_tracepoints(tp_str: &str) -> Vec<(usize, usize, (usize, usize))> {
-    tp_str
-        .split(';')
-        .filter_map(|s| {
-            let parts: Vec<&str> = s.split(',').collect();
-            Some((
-                parts[0].parse().unwrap(),
-                parts[1].parse().unwrap(),
-                (parts[2].parse().unwrap(), parts[3].parse().unwrap()),
-            ))
-        })
-        .collect()
-}
-fn parse_mixed_double_band_tracepoints(tp_str: &str) -> Vec<MixedRepresentation> {
+
+fn parse_mixed_tracepoints(tp_str: &str) -> Vec<MixedRepresentation> {
     tp_str
         .split(';')
         .filter_map(|s| {
@@ -1307,7 +1073,6 @@ fn parse_mixed_double_band_tracepoints(tp_str: &str) -> Vec<MixedRepresentation>
                 Some(MixedRepresentation::Tracepoint(
                     parts[0].parse().unwrap(),
                     parts[1].parse().unwrap(),
-                    (parts[2].parse().unwrap(), parts[3].parse().unwrap()),
                 ))
             } else {
                 // This is a cigar operation
@@ -1327,30 +1092,6 @@ fn parse_mixed_double_band_tracepoints(tp_str: &str) -> Vec<MixedRepresentation>
 
                 // If we get here, parsing failed
                 None
-            }
-        })
-        .collect()
-}
-fn parse_variable_band_tracepoints(
-    tp_str: &str,
-) -> Vec<(usize, usize, Option<(usize, Option<usize>)>)> {
-    tp_str
-        .split(';')
-        .filter_map(|s| {
-            let parts: Vec<&str> = s.split(',').collect();
-            match parts.len() {
-                2 => Some((parts[0].parse().unwrap(), parts[1].parse().unwrap(), None)),
-                3 => Some((
-                    parts[0].parse().unwrap(),
-                    parts[1].parse().unwrap(),
-                    Some((parts[2].parse().unwrap(), None)),
-                )),
-                4 => Some((
-                    parts[0].parse().unwrap(),
-                    parts[1].parse().unwrap(),
-                    Some((parts[2].parse().unwrap(), Some(parts[3].parse().unwrap()))),
-                )),
-                _ => None, // Invalid format, skip this entry
             }
         })
         .collect()
