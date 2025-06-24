@@ -10,7 +10,6 @@ A tool for compression and decompression of alignment CIGAR strings using tracep
 
 - **Compression**: Convert CIGAR strings to tracepoints for compact storage
 - **Decompression**: Reconstruct full CIGAR strings from tracepoints
-- **Multiple Banding Strategies**: Choose between no banding, single-band, or double-band tracepoints
 - **Parallel Processing**: Multi-threaded operation with chunk-based processing
 - **Configurable Parameters**: Adjust max-diff, gap penalties, and other settings
 - **Support for Compressed Files**: Automatically handles gzipped and bgzipped PAF files
@@ -19,7 +18,7 @@ A tool for compression and decompression of alignment CIGAR strings using tracep
 
 ```shell
 # Compress alignments in a PAF file (convert CIGAR to tracepoints)
-cigzip compress --paf alignments.paf [--band none|single|double] [--max-diff 128] [--threads 4] > alignments.tp.paf
+cigzip compress --paf alignments.paf [--max-diff 32] [--threads 4] > alignments.tp.paf
 
 # Decompress alignments (convert tracepoints back to CIGAR)
 cigzip decompress --paf alignments.tp.paf --query-fasta query.fa --target-fasta target.fa [--penalties "5,8,2,24,1"] [--threads 4] > alignments.cigar.paf
@@ -33,7 +32,6 @@ cigzip decompress --paf alignments.tp.paf --query-fasta query.fa --target-fasta 
 - `--verbose N`: Verbosity level (0=error, 1=info, 2=debug)
 
 #### Compress-specific Options
-- `--band TYPE`: Banding strategy (none, single, or double)
 - `--max-diff N`: Max-diff value for tracepoints (default: 32)
 
 #### Decompress-specific Options
