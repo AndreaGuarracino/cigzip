@@ -1,7 +1,7 @@
 use clap::Parser;
 use flate2::read::MultiGzDecoder;
 use lib_tracepoints::{
-    align_sequences_wfa, cigar_ops_to_cigar_string, cigar_to_tracepoints, cigar_to_mixed_tracepoints, tracepoints_to_cigar, mixed_tracepoints_to_cigar, MixedRepresentation
+    align_sequences_wfa, cigar_ops_to_cigar_string, cigar_to_tracepoints, cigar_to_mixed_tracepoints, cigar_to_variable_tracepoints, tracepoints_to_cigar, mixed_tracepoints_to_cigar,variable_tracepoints_to_cigar, MixedRepresentation
 };
 use lib_wfa2::affine_wavefront::AffineWavefronts;
 use log::{error, info};
@@ -39,6 +39,10 @@ enum Args {
         /// Use mixed representation (preserves S/H/P/N CIGAR operations)
         #[arg(short = 'm', long = "mixed", default_value_t = false)]
         mixed: bool,
+
+        /// Use variable tracepoints representation
+        #[arg(long = "variable", default_value_t = false)]
+        variable: bool,
 
         /// Max-diff value for tracepoints
         #[arg(long, default_value = "32")]
@@ -102,10 +106,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         Args::Compress {
             common,
             mixed,
+            variable,
             max_diff,
         } => {
             setup_logger(common.verbose);
-            info!("Converting CIGAR to {}tracepoints", if mixed {"mixed "} else {""});
+            let tracepoint_type = if mixed {
+                "mixed "
+            } else if variable {
+                "variable "
+            } else {
+                ""
+            };
+            info!("Converting CIGAR to {}tracepoints", tracepoint_type);
 
             // Set the thread pool size
             rayon::ThreadPoolBuilder::new()
@@ -129,7 +141,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
                         if lines.len() >= chunk_size {
                             // Process current chunk in parallel
-                            process_compress_chunk(&lines, mixed, max_diff);
+                            process_compress_chunk(&lines, mixed, variable, max_diff);
                             lines.clear();
                         }
                     }
@@ -139,7 +151,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
             // Process remaining lines
             if !lines.is_empty() {
-                process_compress_chunk(&lines, mixed, max_diff);
+                process_compress_chunk(&lines, mixed, variable, max_diff);
             }
         }
         Args::Decompress {
@@ -812,7 +824,7 @@ fn get_paf_reader(paf: &str) -> io::Result<Box<dyn BufRead>> {
 }
 
 /// Process a chunk of lines in parallel for compression
-fn process_compress_chunk(lines: &[String], mixed: bool, max_diff: usize) {
+fn process_compress_chunk(lines: &[String], mixed: bool, variable: bool, max_diff: usize) {
     lines.par_iter().for_each(|line| {
         let fields: Vec<&str> = line.split('\t').collect();
         if fields.len() < 12 {
@@ -837,6 +849,10 @@ fn process_compress_chunk(lines: &[String], mixed: bool, max_diff: usize) {
             // Use mixed representation
             let tp = cigar_to_mixed_tracepoints(cigar, max_diff);
             format!("M{}", format_mixed_tracepoints(&tp))
+        } else if variable {
+            // Use variable tracepoints (placeholder implementation)
+            let tp = cigar_to_variable_tracepoints(cigar, max_diff);
+            format!("V{}", format_variable_tracepoints(&tp))
         } else {
             // Use standard tracepoints
             let tp = cigar_to_tracepoints(cigar, max_diff);
@@ -973,35 +989,56 @@ fn process_decompress_chunk(
                 }
             };
 
-        // Check if it's a mixed representation (starts with 'M')
-        let cigar = if let Some('M') = tracepoints_str.chars().next() {
-            let mixed_tracepoints = parse_mixed_tracepoints(&tracepoints_str[1..]); // Skip the 'M'
-            mixed_tracepoints_to_cigar(
-                &mixed_tracepoints,
-                &query_seq,
-                &target_seq,
-                0,
-                0,
-                mismatch,
-                gap_open1,
-                gap_ext1,
-                gap_open2,
-                gap_ext2,
-            )
-        } else {
-            let tracepoints = parse_tracepoints(tracepoints_str);
-                    tracepoints_to_cigar(
-                        &tracepoints,
-                        &query_seq,
-                        &target_seq,
-                        0,
-                        0,
-                        mismatch,
-                        gap_open1,
-                        gap_ext1,
-                        gap_open2,
-                        gap_ext2,
-                    )
+        // Check representation type based on first character
+        let cigar = match tracepoints_str.chars().next() {
+            Some('M') => {
+                // Mixed representation
+                let mixed_tracepoints = parse_mixed_tracepoints(&tracepoints_str[1..]); // Skip the 'M'
+                mixed_tracepoints_to_cigar(
+                    &mixed_tracepoints,
+                    &query_seq,
+                    &target_seq,
+                    0,
+                    0,
+                    mismatch,
+                    gap_open1,
+                    gap_ext1,
+                    gap_open2,
+                    gap_ext2,
+                )
+            }
+            Some('V') => {
+                // Variable tracepoints representation
+                let variable_tracepoints = parse_variable_tracepoints(&tracepoints_str[1..]); // Skip the 'V'
+                variable_tracepoints_to_cigar(
+                    &variable_tracepoints,
+                    &query_seq,
+                    &target_seq,
+                    0,
+                    0,
+                    mismatch,
+                    gap_open1,
+                    gap_ext1,
+                    gap_open2,
+                    gap_ext2,
+                )
+            }
+            _ => {
+                // Standard tracepoints
+                let tracepoints = parse_tracepoints(tracepoints_str);
+                tracepoints_to_cigar(
+                    &tracepoints,
+                    &query_seq,
+                    &target_seq,
+                    0,
+                    0,
+                    mismatch,
+                    gap_open1,
+                    gap_ext1,
+                    gap_open2,
+                    gap_ext2,
+                )
+            }
         };
 
         // Print the original line, replacing the tracepoints tag with the CIGAR string
@@ -1029,6 +1066,17 @@ fn format_mixed_tracepoints(mixed_tracepoints: &[MixedRepresentation]) -> String
         .map(|tp| match tp {
             MixedRepresentation::Tracepoint(a, b) => format!("{},{}", a, b),
             MixedRepresentation::CigarOp(len, op) => format!("{}{}", len, op),
+        })
+        .collect::<Vec<String>>()
+        .join(";")
+}
+
+fn format_variable_tracepoints(variable_tracepoints: &[(usize, Option<usize>)]) -> String {
+    variable_tracepoints
+        .iter()
+        .map(|(a, b_opt)| match b_opt {
+            Some(b) => format!("{},{}", a, b),
+            None => format!("{}", a),
         })
         .collect::<Vec<String>>()
         .join(";")
@@ -1092,6 +1140,25 @@ fn parse_mixed_tracepoints(tp_str: &str) -> Vec<MixedRepresentation> {
 
                 // If we get here, parsing failed
                 None
+            }
+        })
+        .collect()
+}
+
+fn parse_variable_tracepoints(tp_str: &str) -> Vec<(usize, Option<usize>)> {
+    tp_str
+        .split(';')
+        .filter_map(|s| {
+            if s.contains(',') {
+                // This has both coordinates
+                let parts: Vec<&str> = s.split(',').collect();
+                Some((parts[0].parse().unwrap(), Some(parts[1].parse().unwrap())))
+            } else {
+                // This has only first coordinate
+                match s.parse() {
+                    Ok(a) => Some((a, None)),
+                    Err(_) => None,
+                }
             }
         })
         .collect()
