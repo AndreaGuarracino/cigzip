@@ -631,7 +631,7 @@ fn process_debug_chunk(
         // let paf_cigar = &realn_cigar;
 
         // Convert CIGAR to tracepoints using query (A) and target (B) coordinates.
-        let tracepoints = cigar_to_tracepoints(paf_cigar, max_diff);
+        let tracepoints = cigar_to_tracepoints(&paf_cigar, max_diff);
         // let single_band_tracepoints = cigar_to_single_band_tracepoints(paf_cigar, max_diff);
         // let double_band_tracepoints = cigar_to_double_band_tracepoints(paf_cigar, max_diff);
         // let variable_band_tracepoints = cigar_to_variable_band_tracepoints(paf_cigar, max_diff);
@@ -722,7 +722,11 @@ fn process_debug_chunk(
         let (tracepoints_matches, tracepoints_mismatches, tracepoints_insertions, tracepoints_inserted_bp, tracepoints_deletions, tracepoints_deleted_bp, tracepoints_gap_compressed_id, tracepoints_block_id) = calculate_cigar_stats(&cigar_from_tracepoints);
         let (realign_matches, realign_mismatches, realign_insertions, realign_inserted_bp, realign_deletions, realign_deleted_bp, realign_gap_compressed_id, realign_block_id) = calculate_cigar_stats(&realn_cigar);
 
-        if realn_cigar != cigar_from_tracepoints //&& paf_gap_compressed_id != tracepoints_gap_compressed_id
+        let score_from_realign = compute_alignment_score_from_cigar(&realn_cigar, mismatch, gap_open1, gap_ext1, gap_open2, gap_ext2);
+        let score_from_paf = compute_alignment_score_from_cigar(&paf_cigar, mismatch, gap_open1, gap_ext1, gap_open2, gap_ext2);
+        let score_from_tracepoints = compute_alignment_score_from_cigar(&cigar_from_tracepoints, mismatch, gap_open1, gap_ext1, gap_open2, gap_ext2);
+
+        if paf_cigar != cigar_from_tracepoints && score_from_paf > score_from_tracepoints //&& paf_gap_compressed_id != tracepoints_gap_compressed_id
         {
             println!("CIGAR mismatch! {}", line);
             println!("\t seqa: {}", String::from_utf8(query_seq.clone()).unwrap());
@@ -733,9 +737,9 @@ fn process_debug_chunk(
             // println!("\t  CIGAR from single_band_tracepoints: {}", cigar_from_single_band_tracepoints);
             // println!("\t  CIGAR from double_band_tracepoints: {}", cigar_from_double_band_tracepoints);
             // println!("\tCIGAR from variable_band_tracepoints: {}", cigar_from_variable_band_tracepoints);
-            println!("\t    CIGAR score from realign: {}", compute_alignment_score_from_cigar(&realn_cigar, mismatch, gap_open1, gap_ext1, gap_open2, gap_ext2));
-            println!("\t        CIGAR score from PAF: {}", compute_alignment_score_from_cigar(&paf_cigar, mismatch, gap_open1, gap_ext1, gap_open2, gap_ext2));
-            println!("\tCIGAR score from tracepoints: {}", compute_alignment_score_from_cigar(&cigar_from_tracepoints, mismatch, gap_open1, gap_ext1, gap_open2, gap_ext2));
+            println!("\t    CIGAR score from realign: {}", score_from_realign);
+            println!("\t        CIGAR score from PAF: {}", score_from_paf);
+            println!("\tCIGAR score from tracepoints: {}", score_from_tracepoints);
             println!("\t     cigar stats from realign: matches: {}, mismatches: {}, insertions: {}, inserted_bp: {}, deletions: {}, deleted_bp: {}, gap_compressed_id: {:.12}, block_id: {:.12}",
                 realign_matches, realign_mismatches, realign_insertions, realign_inserted_bp, realign_deletions, realign_deleted_bp, realign_gap_compressed_id, realign_block_id);
             println!("\t         cigar stats from PAF: matches: {}, mismatches: {}, insertions: {}, inserted_bp: {}, deletions: {}, deleted_bp: {}, gap_compressed_id: {:.12}, block_id: {:.12}",
@@ -846,7 +850,7 @@ fn compute_alignment_score_from_cigar(
             num_buffer.push(c);
         } else {
             // Get the count
-            let len = num_buffer.parse::<usize>().unwrap_or(0);
+            let len = num_buffer.parse::<i32>().unwrap_or(0);
             num_buffer.clear();
             
             match c {
@@ -862,26 +866,15 @@ fn compute_alignment_score_from_cigar(
                 }
                 'X' => {
                     // Mismatches
-                    score -= mismatch * (len as i32);
+                    score -= mismatch * len;
                 }
                 'I' | 'D' => {
                     // Gaps - using dual affine model
-                    // The choice between penalty 1 and 2 depends on your specific model
-                    // Typically, shorter gaps use penalty1 and longer gaps use penalty2
-                    
-                    // Simple heuristic: use penalty1 for short gaps, penalty2 for long gaps
-                    // You may need to adjust this threshold based on your model
-                    let gap_score = if len == 1 {
-                        // Single gap - might use just gap_open1
-                        -gap_open1
-                    } else if len <= 3 {
-                        // Short gap - use first affine penalty
-                        -gap_open1 - gap_ext1 * ((len - 1) as i32)
-                    } else {
-                        // Long gap - use second affine penalty
-                        -gap_open2 - gap_ext2 * ((len - 1) as i32)
-                    };
-                    score += gap_score;
+                    // Calculate both penalty options and take the minimum (best score)
+                    let score1 = gap_open1 + gap_ext1 * len;
+                    let score2 = gap_open2 + gap_ext2 * len;
+                    let gap_penalty = std::cmp::min(score1, score2);
+                    score -= gap_penalty;
                 }
                 'S' | 'H' | 'P' | 'N' => {
                     // Soft clips, hard clips, padding, and skipped regions
@@ -896,7 +889,6 @@ fn compute_alignment_score_from_cigar(
     
     score
 }
-
 /// Initialize logger based on verbosity
 fn setup_logger(verbosity: u8) {
     env_logger::Builder::new()
