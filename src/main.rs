@@ -1,4 +1,4 @@
-use clap::Parser;
+use clap::{Parser, ValueEnum};
 use flate2::read::MultiGzDecoder;
 #[cfg(debug_assertions)]
 use indicatif::ProgressBar;
@@ -17,7 +17,29 @@ use log::{error, info};
 use rayon::prelude::*;
 use rust_htslib::faidx::Reader as FastaReader;
 use std::fs::File;
+use std::fmt;
 use std::io::{self, BufRead, BufReader};
+
+/// Tracepoint representation type
+#[derive(Debug, Clone, ValueEnum)]
+enum TracepointType {
+    /// Standard tracepoints
+    Standard,
+    /// Mixed representation (preserves S/H/P/N CIGAR operations)
+    Mixed,
+    /// Variable tracepoints representation
+    Variable,
+}
+
+impl fmt::Display for TracepointType {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            TracepointType::Standard => write!(f, "standard"),
+            TracepointType::Mixed => write!(f, "mixed"),
+            TracepointType::Variable => write!(f, "variable"),
+        }
+    }
+}
 
 /// Common options shared between all commands
 #[derive(Parser, Debug)]
@@ -59,6 +81,10 @@ enum Args {
     Decompress {
         #[clap(flatten)]
         common: CommonOpts,
+
+        /// Tracepoint type: standard, mixed, or variable
+        #[arg(long = "type", default_value_t = TracepointType::Standard)]
+        tp_type: TracepointType,
 
         /// FASTA file for query sequences
         #[arg(short = 'q', long = "query-fasta")]
@@ -163,6 +189,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
         Args::Decompress {
             common,
+            tp_type,
             query_fasta,
             target_fasta,
             penalties,
@@ -197,6 +224,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             // Process current chunk in parallel
                             process_decompress_chunk(
                                 &lines,
+                                &tp_type,
                                 &query_fasta,
                                 &target_fasta,
                                 mismatch,
@@ -216,6 +244,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             if !lines.is_empty() {
                 process_decompress_chunk(
                     &lines,
+                    &tp_type,
                     &query_fasta,
                     &target_fasta,
                     mismatch,
@@ -833,11 +862,11 @@ fn process_compress_chunk(lines: &[String], mixed: bool, variable: bool, max_dif
         let tracepoints_str = if mixed {
             // Use mixed representation
             let tp = cigar_to_mixed_tracepoints(cigar, max_diff);
-            format!("M{}", format_mixed_tracepoints(&tp))
+            format_mixed_tracepoints(&tp)
         } else if variable {
             // Use variable tracepoints (placeholder implementation)
             let tp = cigar_to_variable_tracepoints(cigar, max_diff);
-            format!("V{}", format_variable_tracepoints(&tp))
+            format_variable_tracepoints(&tp)
         } else {
             // Use standard tracepoints
             let tp = cigar_to_tracepoints(cigar, max_diff);
@@ -853,6 +882,7 @@ fn process_compress_chunk(lines: &[String], mixed: bool, variable: bool, max_dif
 /// Process a chunk of lines in parallel for decompression
 fn process_decompress_chunk(
     lines: &[String],
+    tp_type: &TracepointType,
     query_fasta_path: &str,
     target_fasta_path: &str,
     mismatch: i32,
@@ -974,11 +1004,11 @@ fn process_decompress_chunk(
                 }
             };
 
-        // Check representation type based on first character
-        let cigar = match tracepoints_str.chars().next() {
-            Some('M') => {
+        // Use specified tracepoint type
+        let cigar = match tp_type {
+            TracepointType::Mixed => {
                 // Mixed representation
-                let mixed_tracepoints = parse_mixed_tracepoints(&tracepoints_str[1..]); // Skip the 'M'
+                let mixed_tracepoints = parse_mixed_tracepoints(tracepoints_str);
                 mixed_tracepoints_to_cigar(
                     &mixed_tracepoints,
                     &query_seq,
@@ -988,9 +1018,9 @@ fn process_decompress_chunk(
                     (mismatch, gap_open1, gap_ext1, gap_open2, gap_ext2),
                 )
             }
-            Some('V') => {
+            TracepointType::Variable => {
                 // Variable tracepoints representation
-                let variable_tracepoints = parse_variable_tracepoints(&tracepoints_str[1..]); // Skip the 'V'
+                let variable_tracepoints = parse_variable_tracepoints(tracepoints_str);
                 variable_tracepoints_to_cigar(
                     &variable_tracepoints,
                     &query_seq,
@@ -1000,7 +1030,7 @@ fn process_decompress_chunk(
                     (mismatch, gap_open1, gap_ext1, gap_open2, gap_ext2),
                 )
             }
-            _ => {
+            TracepointType::Standard => {
                 // Standard tracepoints
                 let tracepoints = parse_tracepoints(tracepoints_str);
                 tracepoints_to_cigar(
