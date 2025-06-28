@@ -1,16 +1,45 @@
-use clap::Parser;
+use clap::{Parser, ValueEnum};
 use flate2::read::MultiGzDecoder;
+#[cfg(debug_assertions)]
+use indicatif::ProgressBar;
+#[cfg(debug_assertions)]
+use indicatif::ProgressStyle;
+#[cfg(debug_assertions)]
+use lib_tracepoints::{align_sequences_wfa, cigar_ops_to_cigar_string};
 use lib_tracepoints::{
-    align_sequences_wfa, cigar_ops_to_cigar_string, cigar_to_tracepoints, cigar_to_mixed_tracepoints, tracepoints_to_cigar, mixed_tracepoints_to_cigar, MixedRepresentation
+    cigar_to_mixed_tracepoints, cigar_to_tracepoints, cigar_to_variable_tracepoints,
+    mixed_tracepoints_to_cigar, tracepoints_to_cigar, variable_tracepoints_to_cigar,
+    MixedRepresentation,
 };
+#[cfg(debug_assertions)]
 use lib_wfa2::affine_wavefront::AffineWavefronts;
 use log::{error, info};
 use rayon::prelude::*;
 use rust_htslib::faidx::Reader as FastaReader;
 use std::fs::File;
+use std::fmt;
 use std::io::{self, BufRead, BufReader};
-use indicatif::ProgressStyle;
-use indicatif::ProgressBar;
+
+/// Tracepoint representation type
+#[derive(Debug, Clone, ValueEnum)]
+enum TracepointType {
+    /// Standard tracepoints
+    Standard,
+    /// Mixed representation (preserves S/H/P/N CIGAR operations)
+    Mixed,
+    /// Variable tracepoints representation
+    Variable,
+}
+
+impl fmt::Display for TracepointType {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            TracepointType::Standard => write!(f, "standard"),
+            TracepointType::Mixed => write!(f, "mixed"),
+            TracepointType::Variable => write!(f, "variable"),
+        }
+    }
+}
 
 /// Common options shared between all commands
 #[derive(Parser, Debug)]
@@ -40,6 +69,10 @@ enum Args {
         #[arg(short = 'm', long = "mixed", default_value_t = false)]
         mixed: bool,
 
+        /// Use variable tracepoints representation
+        #[arg(long = "variable", default_value_t = false)]
+        variable: bool,
+
         /// Max-diff value for tracepoints
         #[arg(long, default_value = "32")]
         max_diff: usize,
@@ -48,6 +81,10 @@ enum Args {
     Decompress {
         #[clap(flatten)]
         common: CommonOpts,
+
+        /// Tracepoint type: standard, mixed, or variable
+        #[arg(long = "type", default_value_t = TracepointType::Standard)]
+        tp_type: TracepointType,
 
         /// FASTA file for query sequences
         #[arg(short = 'q', long = "query-fasta")]
@@ -102,10 +139,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         Args::Compress {
             common,
             mixed,
+            variable,
             max_diff,
         } => {
             setup_logger(common.verbose);
-            info!("Converting CIGAR to {}tracepoints", if mixed {"mixed "} else {""});
+            let tracepoint_type = if mixed {
+                "mixed "
+            } else if variable {
+                "variable "
+            } else {
+                ""
+            };
+            info!("Converting CIGAR to {}tracepoints", tracepoint_type);
 
             // Set the thread pool size
             rayon::ThreadPoolBuilder::new()
@@ -129,7 +174,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
                         if lines.len() >= chunk_size {
                             // Process current chunk in parallel
-                            process_compress_chunk(&lines, mixed, max_diff);
+                            process_compress_chunk(&lines, mixed, variable, max_diff);
                             lines.clear();
                         }
                     }
@@ -139,11 +184,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
             // Process remaining lines
             if !lines.is_empty() {
-                process_compress_chunk(&lines, mixed, max_diff);
+                process_compress_chunk(&lines, mixed, variable, max_diff);
             }
         }
         Args::Decompress {
             common,
+            tp_type,
             query_fasta,
             target_fasta,
             penalties,
@@ -178,6 +224,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             // Process current chunk in parallel
                             process_decompress_chunk(
                                 &lines,
+                                &tp_type,
                                 &query_fasta,
                                 &target_fasta,
                                 mismatch,
@@ -197,6 +244,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             if !lines.is_empty() {
                 process_decompress_chunk(
                     &lines,
+                    &tp_type,
                     &query_fasta,
                     &target_fasta,
                     mismatch,
@@ -258,8 +306,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     let pb = ProgressBar::new_spinner();
                     pb.set_style(
                         ProgressStyle::default_spinner()
-                            .template("{spinner:.green} [{elapsed_precise}] {pos} lines processed {msg}")
-                            .unwrap()
+                            .template(
+                                "{spinner:.green} [{elapsed_precise}] {pos} lines processed {msg}",
+                            )
+                            .unwrap(),
                     );
                     pb.set_message("Processing PAF lines from stdin");
                     Some(pb)
@@ -277,7 +327,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 let chunk_size = 1000; // Or make this configurable
                 let mut lines = Vec::with_capacity(chunk_size);
                 let mut processed_count = 0;
-                
+
                 for line_result in paf_reader.lines() {
                     match line_result {
                         Ok(line) => {
@@ -376,26 +426,36 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     &target_seq,
                     0,
                     0,
-                    mismatch,
-                    gap_open1,
-                    gap_ext1,
-                    gap_open2,
-                    gap_ext2,
+                    (mismatch, gap_open1, gap_ext1, gap_open2, gap_ext2),
                 );
 
-                if false
-                {
+                if false {
                     error!("CIGAR mismatch!");
                     error!("\t                         tracepoints: {:?}", tracepoints);
                     error!("\t                      CIGAR from PAF: {}", paf_cigar);
-                    error!("\t              CIGAR from tracepoints: {}", cigar_from_tracepoints);
-                    error!("\t                      bounds CIGAR from PAF: {:?}", get_cigar_diagonal_bounds(&paf_cigar));
-                    error!("\t              bounds CIGAR from tracepoints: {:?}", get_cigar_diagonal_bounds(&cigar_from_tracepoints));
+                    error!(
+                        "\t              CIGAR from tracepoints: {}",
+                        cigar_from_tracepoints
+                    );
+                    error!(
+                        "\t                      bounds CIGAR from PAF: {:?}",
+                        get_cigar_diagonal_bounds(&paf_cigar)
+                    );
+                    error!(
+                        "\t              bounds CIGAR from tracepoints: {:?}",
+                        get_cigar_diagonal_bounds(&cigar_from_tracepoints)
+                    );
 
                     let (deviation, d_min, d_max, max_gap) =
                         compute_deviation(&cigar_from_tracepoints);
-                    error!("\t                      deviation CIGAR from PAF: {:?}", compute_deviation(&paf_cigar));
-                    error!("\t              deviation CIGAR from tracepoints: {:?}", (deviation, d_min, d_max, max_gap));
+                    error!(
+                        "\t                      deviation CIGAR from PAF: {:?}",
+                        compute_deviation(&paf_cigar)
+                    );
+                    error!(
+                        "\t              deviation CIGAR from tracepoints: {:?}",
+                        (deviation, d_min, d_max, max_gap)
+                    );
                     error!("=> Try using --wfa-heuristic=banded-static --wfa-heuristic-parameters=-{},{}\n", std::cmp::max(max_gap, -d_min), std::cmp::max(max_gap, d_max));
                 }
             }
@@ -530,41 +590,21 @@ fn process_debug_chunk(
 
         // Convert CIGAR to tracepoints using query (A) and target (B) coordinates.
         let tracepoints = cigar_to_tracepoints(&paf_cigar, max_diff);
-        // let single_band_tracepoints = cigar_to_single_band_tracepoints(paf_cigar, max_diff);
-        // let double_band_tracepoints = cigar_to_double_band_tracepoints(paf_cigar, max_diff);
-        // let variable_band_tracepoints = cigar_to_variable_band_tracepoints(paf_cigar, max_diff);
+        let variable_tracepoints = cigar_to_variable_tracepoints(paf_cigar, max_diff);
 
-        // Compare tracepoints
-        // if tracepoints
-        //     .iter()
-        //     .zip(single_band_tracepoints.iter())
-        //     .any(|(a, b)| a.0 != b.0 || a.1 != b.1)
-        // {
-        //     println!("Tracepoints mismatch! {}", line);
-        //     println!("\t            tracepoints: {:?}", tracepoints);
-        //     println!("\tsingle_band_tracepoints: {:?}", single_band_tracepoints);
-        //     std::process::exit(1);
-        // }
-        // if tracepoints
-        //     .iter()
-        //     .zip(double_band_tracepoints.iter())
-        //     .any(|(a, b)| a.0 != b.0 || a.1 != b.1)
-        // {
-        //     println!("Tracepoints mismatch! {}", line);
-        //     println!("\t            tracepoints: {:?}", tracepoints);
-        //     println!("\tdouble_band_tracepoints: {:?}", double_band_tracepoints);
-        //     std::process::exit(1);
-        // }
-        // if tracepoints
-        //     .iter()
-        //     .zip(variable_band_tracepoints.iter())
-        //     .any(|(a, b)| a.0 != b.0 || a.1 != b.1)
-        // {
-        //     println!("Tracepoints mismatch! {}", line);
-        //     println!("\t              tracepoints: {:?}", tracepoints);
-        //     println!("\tvariable_band_tracepoints: {:?}", variable_band_tracepoints);
-        //     std::process::exit(1);
-        // }
+        // Compare tracepoints (allowing variable tracepoints to have None for second coordinate)
+        if tracepoints
+            .iter()
+            .zip(variable_tracepoints.iter())
+            .any(|(a, b)| {
+                a.0 != b.0 || (b.1.is_some() && Some(a.1) != b.1)
+            })
+        {
+            println!("Tracepoints mismatch! {}", line);
+            println!("\t         tracepoints: {:?}", tracepoints);
+            println!("\tvariable_tracepoints: {:?}", variable_tracepoints);
+            std::process::exit(1);
+        }
 
         // Reconstruct the CIGAR from tracepoints.
         let cigar_from_tracepoints = tracepoints_to_cigar(
@@ -573,110 +613,84 @@ fn process_debug_chunk(
             &target_seq,
             0,
             0,
-            mismatch,
+            (mismatch,
             gap_open1,
             gap_ext1,
             gap_open2,
-            gap_ext2,
+            gap_ext2),
         );
-        // let cigar_from_single_band_tracepoints = single_band_tracepoints_to_cigar(
-        //     &single_band_tracepoints,
-        //     &query_seq,
-        //     &target_seq,
-        //     0,
-        //     0,
-        //     mismatch,
-        //     gap_open1,
-        //     gap_ext1,
-        //     gap_open2,
-        //     gap_ext2,
-        // );
-        // let cigar_from_double_band_tracepoints = double_band_tracepoints_to_cigar(
-        //     &double_band_tracepoints,
-        //     &query_seq,
-        //     &target_seq,
-        //     0,
-        //     0,
-        //     mismatch,
-        //     gap_open1,
-        //     gap_ext1,
-        //     gap_open2,
-        //     gap_ext2,
-        // );
-        // let cigar_from_variable_band_tracepoints = variable_band_tracepoints_to_cigar(
-        //     &variable_band_tracepoints,
-        //     &query_seq,
-        //     &target_seq,
-        //     0,
-        //     0,
-        //     mismatch,
-        //     gap_open1,
-        //     gap_ext1,
-        //     gap_open2,
-        //     gap_ext2,
-        // );
+        let cigar_from_variable_tracepoints = variable_tracepoints_to_cigar(
+            &variable_tracepoints,
+            &query_seq,
+            &target_seq,
+            0,
+            0,
+            (mismatch,
+            gap_open1,
+            gap_ext1,
+            gap_open2,
+            gap_ext2),
+        );
 
         let (matches, mismatches, insertions, inserted_bp, deletions, deleted_bp, paf_gap_compressed_id, paf_block_id) = calculate_cigar_stats(&paf_cigar);
         let (tracepoints_matches, tracepoints_mismatches, tracepoints_insertions, tracepoints_inserted_bp, tracepoints_deletions, tracepoints_deleted_bp, tracepoints_gap_compressed_id, tracepoints_block_id) = calculate_cigar_stats(&cigar_from_tracepoints);
+        let (variable_tracepoints_matches, variable_tracepoints_mismatches, variable_tracepoints_insertions, variable_tracepoints_inserted_bp, variable_tracepoints_deletions, variable_tracepoints_deleted_bp, variable_tracepoints_gap_compressed_id, variable_tracepoints_block_id) = calculate_cigar_stats(&cigar_from_variable_tracepoints);
         let (realign_matches, realign_mismatches, realign_insertions, realign_inserted_bp, realign_deletions, realign_deleted_bp, realign_gap_compressed_id, realign_block_id) = calculate_cigar_stats(&realn_cigar);
 
         let score_from_realign = compute_alignment_score_from_cigar(&realn_cigar, mismatch, gap_open1, gap_ext1, gap_open2, gap_ext2);
         let score_from_paf = compute_alignment_score_from_cigar(&paf_cigar, mismatch, gap_open1, gap_ext1, gap_open2, gap_ext2);
         let score_from_tracepoints = compute_alignment_score_from_cigar(&cigar_from_tracepoints, mismatch, gap_open1, gap_ext1, gap_open2, gap_ext2);
+        let score_from_variable_tracepoints = compute_alignment_score_from_cigar(&cigar_from_variable_tracepoints, mismatch, gap_open1, gap_ext1, gap_open2, gap_ext2);
 
-        if paf_cigar != cigar_from_tracepoints && score_from_paf > score_from_tracepoints //&& paf_gap_compressed_id != tracepoints_gap_compressed_id
+        if cigar_from_tracepoints != cigar_from_variable_tracepoints || (paf_cigar != cigar_from_tracepoints && score_from_paf != score_from_tracepoints) //&& paf_gap_compressed_id != tracepoints_gap_compressed_id
         {
             println!("CIGAR mismatch! {}", line);
             println!("\t seqa: {}", String::from_utf8(query_seq.clone()).unwrap());
             println!("\t seqb: {}", String::from_utf8(target_seq.clone()).unwrap());
-            println!("\t                  CIGAR from realign: {}", realn_cigar);
-            println!("\t                      CIGAR from PAF: {}", paf_cigar);
-            println!("\t              CIGAR from tracepoints: {}", cigar_from_tracepoints);
-            // println!("\t  CIGAR from single_band_tracepoints: {}", cigar_from_single_band_tracepoints);
-            // println!("\t  CIGAR from double_band_tracepoints: {}", cigar_from_double_band_tracepoints);
-            // println!("\tCIGAR from variable_band_tracepoints: {}", cigar_from_variable_band_tracepoints);
-            println!("\t    CIGAR score from realign: {}", score_from_realign);
-            println!("\t        CIGAR score from PAF: {}", score_from_paf);
-            println!("\tCIGAR score from tracepoints: {}", score_from_tracepoints);
-            println!("\t     cigar stats from realign: matches: {}, mismatches: {}, insertions: {}, inserted_bp: {}, deletions: {}, deleted_bp: {}, gap_compressed_id: {:.12}, block_id: {:.12}",
+            println!("\t             CIGAR from realign: {}", realn_cigar);
+            println!("\t                 CIGAR from PAF: {}", paf_cigar);
+            println!("\t         CIGAR from tracepoints: {}", cigar_from_tracepoints);
+            println!("\tCIGAR from variable_tracepoints: {}", cigar_from_variable_tracepoints);
+            println!("\t             CIGAR score from realign: {}", score_from_realign);
+            println!("\t                 CIGAR score from PAF: {}", score_from_paf);
+            println!("\t         CIGAR score from tracepoints: {}", score_from_tracepoints);
+            println!("\tCIGAR score from variable tracepoints: {}", score_from_variable_tracepoints);
+            println!("\t              cigar stats from realign: matches: {}, mismatches: {}, insertions: {}, inserted_bp: {}, deletions: {}, deleted_bp: {}, gap_compressed_id: {:.12}, block_id: {:.12}",
                 realign_matches, realign_mismatches, realign_insertions, realign_inserted_bp, realign_deletions, realign_deleted_bp, realign_gap_compressed_id, realign_block_id);
-            println!("\t         cigar stats from PAF: matches: {}, mismatches: {}, insertions: {}, inserted_bp: {}, deletions: {}, deleted_bp: {}, gap_compressed_id: {:.12}, block_id: {:.12}",
+            println!("\t                  cigar stats from PAF: matches: {}, mismatches: {}, insertions: {}, inserted_bp: {}, deletions: {}, deleted_bp: {}, gap_compressed_id: {:.12}, block_id: {:.12}",
                 matches, mismatches, insertions, inserted_bp, deletions, deleted_bp, paf_gap_compressed_id, paf_block_id);
-            println!("\t cigar stats from tracepoints: matches: {}, mismatches: {}, insertions: {}, inserted_bp: {}, deletions: {}, deleted_bp: {}, gap_compressed_id: {:.12}, block_id: {:.12}",
+            println!("\t cigar stats from          tracepoints: matches: {}, mismatches: {}, insertions: {}, inserted_bp: {}, deletions: {}, deleted_bp: {}, gap_compressed_id: {:.12}, block_id: {:.12}",
                 tracepoints_matches, tracepoints_mismatches, tracepoints_insertions, tracepoints_inserted_bp, tracepoints_deletions, tracepoints_deleted_bp, tracepoints_gap_compressed_id, tracepoints_block_id);
-            println!("\t                         tracepoints: {:?}", tracepoints);
-            // println!("\t             single_band_tracepoints: {:?}", single_band_tracepoints);
-            // println!("\t             double_band_tracepoints: {:?}", double_band_tracepoints);
-            // println!("\t           variable_band_tracepoints: {:?}", variable_band_tracepoints);
-            println!("\t                      bounds CIGAR from PAF: {:?}", get_cigar_diagonal_bounds(&paf_cigar));
-            println!("\t              bounds CIGAR from tracepoints: {:?}", get_cigar_diagonal_bounds(&cigar_from_tracepoints));
-            // println!("\t  bounds CIGAR from single_band_tracepoints: {:?}", get_cigar_diagonal_bounds(&cigar_from_single_band_tracepoints));
-            // println!("\t  bounds CIGAR from double_band_tracepoints: {:?}", get_cigar_diagonal_bounds(&cigar_from_double_band_tracepoints));
-            // println!("\tbounds CIGAR from variable_band_tracepoints: {:?}", get_cigar_diagonal_bounds(&cigar_from_variable_band_tracepoints));
+            println!("\t cigar stats from variable_tracepoints: matches: {}, mismatches: {}, insertions: {}, inserted_bp: {}, deletions: {}, deleted_bp: {}, gap_compressed_id: {:.12}, block_id: {:.12}",
+                variable_tracepoints_matches, variable_tracepoints_mismatches, variable_tracepoints_insertions, variable_tracepoints_inserted_bp, variable_tracepoints_deletions, variable_tracepoints_deleted_bp, variable_tracepoints_gap_compressed_id, variable_tracepoints_block_id);
+            println!("\t         tracepoints: {:?}", tracepoints);
+            println!("\tvariable_tracepoints: {:?}", variable_tracepoints);
+            println!("\t                 bounds CIGAR from PAF: {:?}", get_cigar_diagonal_bounds(&paf_cigar));
+            println!("\t         bounds CIGAR from tracepoints: {:?}", get_cigar_diagonal_bounds(&cigar_from_tracepoints));
+            println!("\tbounds CIGAR from variable_tracepoints: {:?}", get_cigar_diagonal_bounds(&cigar_from_variable_tracepoints));
 
             let (deviation, d_min, d_max, max_gap) = compute_deviation(&cigar_from_tracepoints);
-            println!("\t                      deviation CIGAR from PAF: {:?}", compute_deviation(&paf_cigar));
-            println!("\t              deviation CIGAR from tracepoints: {:?}", (deviation, d_min, d_max, max_gap));
-            // println!("\t  deviation CIGAR from single_band_tracepoints: {:?}", compute_deviation(&cigar_from_single_band_tracepoints));
-            // println!("\t  deviation CIGAR from double_band_tracepoints: {:?}", compute_deviation(&cigar_from_double_band_tracepoints));
-            // println!("\tdeviation CIGAR from variable_band_tracepoints: {:?}", compute_deviation(&cigar_from_variable_band_tracepoints));
+            println!("\t                 deviation CIGAR from PAF: {:?}", compute_deviation(&paf_cigar));
+            println!("\t         deviation CIGAR from tracepoints: {:?}", (deviation, d_min, d_max, max_gap));
+            println!("\tdeviation CIGAR from variable_tracepoints: {:?}", compute_deviation(&cigar_from_variable_tracepoints));
             // println!("=> Try using --wfa-heuristic=banded-static --wfa-heuristic-parameters=-{},{}\n", std::cmp::max(max_gap, -d_min), std::cmp::max(max_gap, d_max));
         }
     });
 }
 
 /// Calculate gap compressed identity and block identity from a CIGAR string
+#[cfg(debug_assertions)]
 fn calculate_cigar_stats(cigar: &str) -> (usize, usize, usize, usize, usize, usize, f64, f64) {
     let mut matches = 0;
     let mut mismatches = 0;
-    let mut insertions = 0;  // Number of insertion events
+    let mut insertions = 0; // Number of insertion events
     let mut inserted_bp = 0; // Total inserted base pairs
-    let mut deletions = 0;   // Number of deletion events
-    let mut deleted_bp = 0;  // Total deleted base pairs
-    
+    let mut deletions = 0; // Number of deletion events
+    let mut deleted_bp = 0; // Total deleted base pairs
+
     // Parse CIGAR string
     let mut num_buffer = String::new();
-    
+
     for c in cigar.chars() {
         if c.is_digit(10) {
             num_buffer.push(c);
@@ -684,7 +698,7 @@ fn calculate_cigar_stats(cigar: &str) -> (usize, usize, usize, usize, usize, usi
             // Get the count
             let len = num_buffer.parse::<usize>().unwrap_or(0);
             num_buffer.clear();
-            
+
             match c {
                 'M' => {
                     // Assuming 'M' represents matches for simplicity (as in your code)
@@ -697,12 +711,12 @@ fn calculate_cigar_stats(cigar: &str) -> (usize, usize, usize, usize, usize, usi
                     mismatches += len;
                 }
                 'I' => {
-                    insertions += 1;      // One insertion event
-                    inserted_bp += len;   // Total inserted bases
+                    insertions += 1; // One insertion event
+                    inserted_bp += len; // Total inserted bases
                 }
                 'D' => {
-                    deletions += 1;       // One deletion event
-                    deleted_bp += len;    // Total deleted bases
+                    deletions += 1; // One deletion event
+                    deleted_bp += len; // Total deleted bases
                 }
                 'S' | 'H' | 'P' | 'N' => {
                     // Skip soft clips, hard clips, padding, and skipped regions
@@ -713,14 +727,14 @@ fn calculate_cigar_stats(cigar: &str) -> (usize, usize, usize, usize, usize, usi
             }
         }
     }
-    
+
     // Calculate gap compressed identity
     let gap_compressed_identity = if matches + mismatches + insertions + deletions > 0 {
         (matches as f64) / (matches + mismatches + insertions + deletions) as f64
     } else {
         0.0
     };
-    
+
     // Calculate block identity
     let edit_distance = mismatches + inserted_bp + deleted_bp;
     let block_identity = if matches + edit_distance > 0 {
@@ -729,9 +743,19 @@ fn calculate_cigar_stats(cigar: &str) -> (usize, usize, usize, usize, usize, usi
         0.0
     };
 
-    (matches, mismatches, insertions, inserted_bp, deletions, deleted_bp, gap_compressed_identity, block_identity)
+    (
+        matches,
+        mismatches,
+        insertions,
+        inserted_bp,
+        deletions,
+        deleted_bp,
+        gap_compressed_identity,
+        block_identity,
+    )
 }
 
+#[cfg(debug_assertions)]
 fn compute_alignment_score_from_cigar(
     cigar: &str,
     mismatch: i32,
@@ -742,7 +766,7 @@ fn compute_alignment_score_from_cigar(
 ) -> i32 {
     let mut score = 0i32;
     let mut num_buffer = String::new();
-    
+
     for c in cigar.chars() {
         if c.is_digit(10) {
             num_buffer.push(c);
@@ -750,7 +774,7 @@ fn compute_alignment_score_from_cigar(
             // Get the count
             let len = num_buffer.parse::<i32>().unwrap_or(0);
             num_buffer.clear();
-            
+
             match c {
                 '=' => {
                     // Matches - no penalty (score 0)
@@ -760,7 +784,9 @@ fn compute_alignment_score_from_cigar(
                     // For 'M' operations, we'd need the actual sequences to determine matches vs mismatches
                     // For now, we'll treat 'M' as matches (you may want to adjust this)
                     // score += 0;
-                    eprintln!("Warning: 'M' in CIGAR requires sequences to determine match/mismatch");
+                    eprintln!(
+                        "Warning: 'M' in CIGAR requires sequences to determine match/mismatch"
+                    );
                 }
                 'X' => {
                     // Mismatches
@@ -784,7 +810,7 @@ fn compute_alignment_score_from_cigar(
             }
         }
     }
-    
+
     score
 }
 /// Initialize logger based on verbosity
@@ -812,7 +838,7 @@ fn get_paf_reader(paf: &str) -> io::Result<Box<dyn BufRead>> {
 }
 
 /// Process a chunk of lines in parallel for compression
-fn process_compress_chunk(lines: &[String], mixed: bool, max_diff: usize) {
+fn process_compress_chunk(lines: &[String], mixed: bool, variable: bool, max_diff: usize) {
     lines.par_iter().for_each(|line| {
         let fields: Vec<&str> = line.split('\t').collect();
         if fields.len() < 12 {
@@ -836,7 +862,11 @@ fn process_compress_chunk(lines: &[String], mixed: bool, max_diff: usize) {
         let tracepoints_str = if mixed {
             // Use mixed representation
             let tp = cigar_to_mixed_tracepoints(cigar, max_diff);
-            format!("M{}", format_mixed_tracepoints(&tp))
+            format_mixed_tracepoints(&tp)
+        } else if variable {
+            // Use variable tracepoints (placeholder implementation)
+            let tp = cigar_to_variable_tracepoints(cigar, max_diff);
+            format_variable_tracepoints(&tp)
         } else {
             // Use standard tracepoints
             let tp = cigar_to_tracepoints(cigar, max_diff);
@@ -852,6 +882,7 @@ fn process_compress_chunk(lines: &[String], mixed: bool, max_diff: usize) {
 /// Process a chunk of lines in parallel for decompression
 fn process_decompress_chunk(
     lines: &[String],
+    tp_type: &TracepointType,
     query_fasta_path: &str,
     target_fasta_path: &str,
     mismatch: i32,
@@ -973,35 +1004,44 @@ fn process_decompress_chunk(
                 }
             };
 
-        // Check if it's a mixed representation (starts with 'M')
-        let cigar = if let Some('M') = tracepoints_str.chars().next() {
-            let mixed_tracepoints = parse_mixed_tracepoints(&tracepoints_str[1..]); // Skip the 'M'
-            mixed_tracepoints_to_cigar(
-                &mixed_tracepoints,
-                &query_seq,
-                &target_seq,
-                0,
-                0,
-                mismatch,
-                gap_open1,
-                gap_ext1,
-                gap_open2,
-                gap_ext2,
-            )
-        } else {
-            let tracepoints = parse_tracepoints(tracepoints_str);
-                    tracepoints_to_cigar(
-                        &tracepoints,
-                        &query_seq,
-                        &target_seq,
-                        0,
-                        0,
-                        mismatch,
-                        gap_open1,
-                        gap_ext1,
-                        gap_open2,
-                        gap_ext2,
-                    )
+        // Use specified tracepoint type
+        let cigar = match tp_type {
+            TracepointType::Mixed => {
+                // Mixed representation
+                let mixed_tracepoints = parse_mixed_tracepoints(tracepoints_str);
+                mixed_tracepoints_to_cigar(
+                    &mixed_tracepoints,
+                    &query_seq,
+                    &target_seq,
+                    0,
+                    0,
+                    (mismatch, gap_open1, gap_ext1, gap_open2, gap_ext2),
+                )
+            }
+            TracepointType::Variable => {
+                // Variable tracepoints representation
+                let variable_tracepoints = parse_variable_tracepoints(tracepoints_str);
+                variable_tracepoints_to_cigar(
+                    &variable_tracepoints,
+                    &query_seq,
+                    &target_seq,
+                    0,
+                    0,
+                    (mismatch, gap_open1, gap_ext1, gap_open2, gap_ext2),
+                )
+            }
+            TracepointType::Standard => {
+                // Standard tracepoints
+                let tracepoints = parse_tracepoints(tracepoints_str);
+                tracepoints_to_cigar(
+                    &tracepoints,
+                    &query_seq,
+                    &target_seq,
+                    0,
+                    0,
+                    (mismatch, gap_open1, gap_ext1, gap_open2, gap_ext2),
+                )
+            }
         };
 
         // Print the original line, replacing the tracepoints tag with the CIGAR string
@@ -1029,6 +1069,17 @@ fn format_mixed_tracepoints(mixed_tracepoints: &[MixedRepresentation]) -> String
         .map(|tp| match tp {
             MixedRepresentation::Tracepoint(a, b) => format!("{},{}", a, b),
             MixedRepresentation::CigarOp(len, op) => format!("{}{}", len, op),
+        })
+        .collect::<Vec<String>>()
+        .join(";")
+}
+
+fn format_variable_tracepoints(variable_tracepoints: &[(usize, Option<usize>)]) -> String {
+    variable_tracepoints
+        .iter()
+        .map(|(a, b_opt)| match b_opt {
+            Some(b) => format!("{},{}", a, b),
+            None => format!("{}", a),
         })
         .collect::<Vec<String>>()
         .join(";")
@@ -1097,6 +1148,26 @@ fn parse_mixed_tracepoints(tp_str: &str) -> Vec<MixedRepresentation> {
         .collect()
 }
 
+fn parse_variable_tracepoints(tp_str: &str) -> Vec<(usize, Option<usize>)> {
+    tp_str
+        .split(';')
+        .filter_map(|s| {
+            if s.contains(',') {
+                // This has both coordinates
+                let parts: Vec<&str> = s.split(',').collect();
+                Some((parts[0].parse().unwrap(), Some(parts[1].parse().unwrap())))
+            } else {
+                // This has only first coordinate
+                match s.parse() {
+                    Ok(a) => Some((a, None)),
+                    Err(_) => None,
+                }
+            }
+        })
+        .collect()
+}
+
+#[cfg(debug_assertions)]
 fn get_cigar_diagonal_bounds(cigar: &str) -> (i64, i64) {
     let mut current_diagonal = 0; // Current diagonal position
     let mut min_diagonal = 0; // Lowest diagonal reached
@@ -1135,6 +1206,7 @@ fn get_cigar_diagonal_bounds(cigar: &str) -> (i64, i64) {
     (min_diagonal, max_diagonal)
 }
 
+#[cfg(debug_assertions)]
 fn compute_deviation(cigar: &str) -> (i64, i64, i64, i64) {
     let mut deviation = 0;
     let mut d_max = -10000;

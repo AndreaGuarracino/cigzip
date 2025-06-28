@@ -88,9 +88,9 @@ checksum = "1b8e56985ec62d17e9c1001dc89c88ecd7dc08e47eba5ec7c29c7b5eeecde967"
 
 [[package]]
 name = "bumpalo"
-version = "3.18.1"
+version = "3.19.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "793db76d6187cd04dff33004d8e6c9cc4e05cd330500379d2394209271b4aeee"
+checksum = "46c5e41b57b8bba42a04676d81cb89e9ee8e859a1a66f80a5a72e1cb76b34d43"
 
 [[package]]
 name = "byteorder"
@@ -556,7 +556,7 @@ checksum = "bbd2bcb4c963f2ddae06a2efc7e9f3591312473c50c6685e1f298068316e66fe"
 [[package]]
 name = "lib_tracepoints"
 version = "0.1.0"
-source = "git+https://github.com/AndreaGuarracino/lib_tracepoints#0682b4fe53ef4d4e89a29ef1b4b1966c072a7a5c"
+source = "git+https://github.com/AndreaGuarracino/lib_tracepoints#a27b40b12cdd15790be6be5fe2bc0517301014cc"
 dependencies = [
  "lib_wfa2",
 ]
