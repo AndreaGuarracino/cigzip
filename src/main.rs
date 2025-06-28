@@ -1,16 +1,23 @@
 use clap::Parser;
 use flate2::read::MultiGzDecoder;
+#[cfg(debug_assertions)]
+use indicatif::ProgressBar;
+#[cfg(debug_assertions)]
+use indicatif::ProgressStyle;
+#[cfg(debug_assertions)]
+use lib_tracepoints::{align_sequences_wfa, cigar_ops_to_cigar_string};
 use lib_tracepoints::{
-    align_sequences_wfa, cigar_ops_to_cigar_string, cigar_to_tracepoints, cigar_to_mixed_tracepoints, cigar_to_variable_tracepoints, tracepoints_to_cigar, mixed_tracepoints_to_cigar,variable_tracepoints_to_cigar, MixedRepresentation
+    cigar_to_mixed_tracepoints, cigar_to_tracepoints, cigar_to_variable_tracepoints,
+    mixed_tracepoints_to_cigar, tracepoints_to_cigar, variable_tracepoints_to_cigar,
+    MixedRepresentation,
 };
+#[cfg(debug_assertions)]
 use lib_wfa2::affine_wavefront::AffineWavefronts;
 use log::{error, info};
 use rayon::prelude::*;
 use rust_htslib::faidx::Reader as FastaReader;
 use std::fs::File;
 use std::io::{self, BufRead, BufReader};
-use indicatif::ProgressStyle;
-use indicatif::ProgressBar;
 
 /// Common options shared between all commands
 #[derive(Parser, Debug)]
@@ -270,8 +277,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     let pb = ProgressBar::new_spinner();
                     pb.set_style(
                         ProgressStyle::default_spinner()
-                            .template("{spinner:.green} [{elapsed_precise}] {pos} lines processed {msg}")
-                            .unwrap()
+                            .template(
+                                "{spinner:.green} [{elapsed_precise}] {pos} lines processed {msg}",
+                            )
+                            .unwrap(),
                     );
                     pb.set_message("Processing PAF lines from stdin");
                     Some(pb)
@@ -289,7 +298,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 let chunk_size = 1000; // Or make this configurable
                 let mut lines = Vec::with_capacity(chunk_size);
                 let mut processed_count = 0;
-                
+
                 for line_result in paf_reader.lines() {
                     match line_result {
                         Ok(line) => {
@@ -388,26 +397,36 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     &target_seq,
                     0,
                     0,
-                    mismatch,
-                    gap_open1,
-                    gap_ext1,
-                    gap_open2,
-                    gap_ext2,
+                    (mismatch, gap_open1, gap_ext1, gap_open2, gap_ext2),
                 );
 
-                if false
-                {
+                if false {
                     error!("CIGAR mismatch!");
                     error!("\t                         tracepoints: {:?}", tracepoints);
                     error!("\t                      CIGAR from PAF: {}", paf_cigar);
-                    error!("\t              CIGAR from tracepoints: {}", cigar_from_tracepoints);
-                    error!("\t                      bounds CIGAR from PAF: {:?}", get_cigar_diagonal_bounds(&paf_cigar));
-                    error!("\t              bounds CIGAR from tracepoints: {:?}", get_cigar_diagonal_bounds(&cigar_from_tracepoints));
+                    error!(
+                        "\t              CIGAR from tracepoints: {}",
+                        cigar_from_tracepoints
+                    );
+                    error!(
+                        "\t                      bounds CIGAR from PAF: {:?}",
+                        get_cigar_diagonal_bounds(&paf_cigar)
+                    );
+                    error!(
+                        "\t              bounds CIGAR from tracepoints: {:?}",
+                        get_cigar_diagonal_bounds(&cigar_from_tracepoints)
+                    );
 
                     let (deviation, d_min, d_max, max_gap) =
                         compute_deviation(&cigar_from_tracepoints);
-                    error!("\t                      deviation CIGAR from PAF: {:?}", compute_deviation(&paf_cigar));
-                    error!("\t              deviation CIGAR from tracepoints: {:?}", (deviation, d_min, d_max, max_gap));
+                    error!(
+                        "\t                      deviation CIGAR from PAF: {:?}",
+                        compute_deviation(&paf_cigar)
+                    );
+                    error!(
+                        "\t              deviation CIGAR from tracepoints: {:?}",
+                        (deviation, d_min, d_max, max_gap)
+                    );
                     error!("=> Try using --wfa-heuristic=banded-static --wfa-heuristic-parameters=-{},{}\n", std::cmp::max(max_gap, -d_min), std::cmp::max(max_gap, d_max));
                 }
             }
@@ -565,11 +584,11 @@ fn process_debug_chunk(
             &target_seq,
             0,
             0,
-            mismatch,
+            (mismatch,
             gap_open1,
             gap_ext1,
             gap_open2,
-            gap_ext2,
+            gap_ext2),
         );
         let cigar_from_variable_tracepoints = variable_tracepoints_to_cigar(
             &variable_tracepoints,
@@ -577,11 +596,11 @@ fn process_debug_chunk(
             &target_seq,
             0,
             0,
-            mismatch,
+            (mismatch,
             gap_open1,
             gap_ext1,
             gap_open2,
-            gap_ext2,
+            gap_ext2),
         );
 
         let (matches, mismatches, insertions, inserted_bp, deletions, deleted_bp, paf_gap_compressed_id, paf_block_id) = calculate_cigar_stats(&paf_cigar);
@@ -594,7 +613,7 @@ fn process_debug_chunk(
         let score_from_tracepoints = compute_alignment_score_from_cigar(&cigar_from_tracepoints, mismatch, gap_open1, gap_ext1, gap_open2, gap_ext2);
         let score_from_variable_tracepoints = compute_alignment_score_from_cigar(&cigar_from_variable_tracepoints, mismatch, gap_open1, gap_ext1, gap_open2, gap_ext2);
 
-        if cigar_from_tracepoints != cigar_from_variable_tracepoints //&& score_from_paf > score_from_tracepoints //&& paf_gap_compressed_id != tracepoints_gap_compressed_id
+        if cigar_from_tracepoints != cigar_from_variable_tracepoints || (paf_cigar != cigar_from_tracepoints && score_from_paf != score_from_tracepoints) //&& paf_gap_compressed_id != tracepoints_gap_compressed_id
         {
             println!("CIGAR mismatch! {}", line);
             println!("\t seqa: {}", String::from_utf8(query_seq.clone()).unwrap());
@@ -631,17 +650,18 @@ fn process_debug_chunk(
 }
 
 /// Calculate gap compressed identity and block identity from a CIGAR string
+#[cfg(debug_assertions)]
 fn calculate_cigar_stats(cigar: &str) -> (usize, usize, usize, usize, usize, usize, f64, f64) {
     let mut matches = 0;
     let mut mismatches = 0;
-    let mut insertions = 0;  // Number of insertion events
+    let mut insertions = 0; // Number of insertion events
     let mut inserted_bp = 0; // Total inserted base pairs
-    let mut deletions = 0;   // Number of deletion events
-    let mut deleted_bp = 0;  // Total deleted base pairs
-    
+    let mut deletions = 0; // Number of deletion events
+    let mut deleted_bp = 0; // Total deleted base pairs
+
     // Parse CIGAR string
     let mut num_buffer = String::new();
-    
+
     for c in cigar.chars() {
         if c.is_digit(10) {
             num_buffer.push(c);
@@ -649,7 +669,7 @@ fn calculate_cigar_stats(cigar: &str) -> (usize, usize, usize, usize, usize, usi
             // Get the count
             let len = num_buffer.parse::<usize>().unwrap_or(0);
             num_buffer.clear();
-            
+
             match c {
                 'M' => {
                     // Assuming 'M' represents matches for simplicity (as in your code)
@@ -662,12 +682,12 @@ fn calculate_cigar_stats(cigar: &str) -> (usize, usize, usize, usize, usize, usi
                     mismatches += len;
                 }
                 'I' => {
-                    insertions += 1;      // One insertion event
-                    inserted_bp += len;   // Total inserted bases
+                    insertions += 1; // One insertion event
+                    inserted_bp += len; // Total inserted bases
                 }
                 'D' => {
-                    deletions += 1;       // One deletion event
-                    deleted_bp += len;    // Total deleted bases
+                    deletions += 1; // One deletion event
+                    deleted_bp += len; // Total deleted bases
                 }
                 'S' | 'H' | 'P' | 'N' => {
                     // Skip soft clips, hard clips, padding, and skipped regions
@@ -678,14 +698,14 @@ fn calculate_cigar_stats(cigar: &str) -> (usize, usize, usize, usize, usize, usi
             }
         }
     }
-    
+
     // Calculate gap compressed identity
     let gap_compressed_identity = if matches + mismatches + insertions + deletions > 0 {
         (matches as f64) / (matches + mismatches + insertions + deletions) as f64
     } else {
         0.0
     };
-    
+
     // Calculate block identity
     let edit_distance = mismatches + inserted_bp + deleted_bp;
     let block_identity = if matches + edit_distance > 0 {
@@ -694,9 +714,19 @@ fn calculate_cigar_stats(cigar: &str) -> (usize, usize, usize, usize, usize, usi
         0.0
     };
 
-    (matches, mismatches, insertions, inserted_bp, deletions, deleted_bp, gap_compressed_identity, block_identity)
+    (
+        matches,
+        mismatches,
+        insertions,
+        inserted_bp,
+        deletions,
+        deleted_bp,
+        gap_compressed_identity,
+        block_identity,
+    )
 }
 
+#[cfg(debug_assertions)]
 fn compute_alignment_score_from_cigar(
     cigar: &str,
     mismatch: i32,
@@ -707,7 +737,7 @@ fn compute_alignment_score_from_cigar(
 ) -> i32 {
     let mut score = 0i32;
     let mut num_buffer = String::new();
-    
+
     for c in cigar.chars() {
         if c.is_digit(10) {
             num_buffer.push(c);
@@ -715,7 +745,7 @@ fn compute_alignment_score_from_cigar(
             // Get the count
             let len = num_buffer.parse::<i32>().unwrap_or(0);
             num_buffer.clear();
-            
+
             match c {
                 '=' => {
                     // Matches - no penalty (score 0)
@@ -725,7 +755,9 @@ fn compute_alignment_score_from_cigar(
                     // For 'M' operations, we'd need the actual sequences to determine matches vs mismatches
                     // For now, we'll treat 'M' as matches (you may want to adjust this)
                     // score += 0;
-                    eprintln!("Warning: 'M' in CIGAR requires sequences to determine match/mismatch");
+                    eprintln!(
+                        "Warning: 'M' in CIGAR requires sequences to determine match/mismatch"
+                    );
                 }
                 'X' => {
                     // Mismatches
@@ -749,7 +781,7 @@ fn compute_alignment_score_from_cigar(
             }
         }
     }
-    
+
     score
 }
 /// Initialize logger based on verbosity
@@ -953,11 +985,7 @@ fn process_decompress_chunk(
                     &target_seq,
                     0,
                     0,
-                    mismatch,
-                    gap_open1,
-                    gap_ext1,
-                    gap_open2,
-                    gap_ext2,
+                    (mismatch, gap_open1, gap_ext1, gap_open2, gap_ext2),
                 )
             }
             Some('V') => {
@@ -969,11 +997,7 @@ fn process_decompress_chunk(
                     &target_seq,
                     0,
                     0,
-                    mismatch,
-                    gap_open1,
-                    gap_ext1,
-                    gap_open2,
-                    gap_ext2,
+                    (mismatch, gap_open1, gap_ext1, gap_open2, gap_ext2),
                 )
             }
             _ => {
@@ -985,11 +1009,7 @@ fn process_decompress_chunk(
                     &target_seq,
                     0,
                     0,
-                    mismatch,
-                    gap_open1,
-                    gap_ext1,
-                    gap_open2,
-                    gap_ext2,
+                    (mismatch, gap_open1, gap_ext1, gap_open2, gap_ext2),
                 )
             }
         };
@@ -1117,6 +1137,7 @@ fn parse_variable_tracepoints(tp_str: &str) -> Vec<(usize, Option<usize>)> {
         .collect()
 }
 
+#[cfg(debug_assertions)]
 fn get_cigar_diagonal_bounds(cigar: &str) -> (i64, i64) {
     let mut current_diagonal = 0; // Current diagonal position
     let mut min_diagonal = 0; // Lowest diagonal reached
@@ -1155,6 +1176,7 @@ fn get_cigar_diagonal_bounds(cigar: &str) -> (i64, i64) {
     (min_diagonal, max_diagonal)
 }
 
+#[cfg(debug_assertions)]
 fn compute_deviation(cigar: &str) -> (i64, i64, i64, i64) {
     let mut deviation = 0;
     let mut d_max = -10000;
