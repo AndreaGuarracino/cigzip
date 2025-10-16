@@ -9,7 +9,7 @@ use lib_tracepoints::{align_sequences_wfa, cigar_ops_to_cigar_string};
 use lib_tracepoints::{
     cigar_to_mixed_tracepoints, cigar_to_tracepoints, cigar_to_variable_tracepoints,
     mixed_tracepoints_to_cigar, tracepoints_to_cigar, variable_tracepoints_to_cigar,
-    MixedRepresentation,
+    DistanceMode, MixedRepresentation,
 };
 #[cfg(debug_assertions)]
 use lib_wfa2::affine_wavefront::AffineWavefronts;
@@ -420,13 +420,20 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
                 let tracepoints = cigar_to_tracepoints(&paf_cigar, max_diff);
 
+                let distance_mode = DistanceMode::Affine2p {
+                    mismatch,
+                    gap_open1,
+                    gap_ext1,
+                    gap_open2,
+                    gap_ext2,
+                };
                 let cigar_from_tracepoints = tracepoints_to_cigar(
                     &tracepoints,
                     &query_seq,
                     &target_seq,
                     0,
                     0,
-                    (mismatch, gap_open1, gap_ext1, gap_open2, gap_ext2),
+                    &distance_mode,
                 );
 
                 if false {
@@ -607,17 +614,20 @@ fn process_debug_chunk(
         }
 
         // Reconstruct the CIGAR from tracepoints.
+        let distance_mode = DistanceMode::Affine2p {
+            mismatch,
+            gap_open1,
+            gap_ext1,
+            gap_open2,
+            gap_ext2,
+        };
         let cigar_from_tracepoints = tracepoints_to_cigar(
             &tracepoints,
             &query_seq,
             &target_seq,
             0,
             0,
-            (mismatch,
-            gap_open1,
-            gap_ext1,
-            gap_open2,
-            gap_ext2),
+            &distance_mode,
         );
         let cigar_from_variable_tracepoints = variable_tracepoints_to_cigar(
             &variable_tracepoints,
@@ -625,11 +635,7 @@ fn process_debug_chunk(
             &target_seq,
             0,
             0,
-            (mismatch,
-            gap_open1,
-            gap_ext1,
-            gap_open2,
-            gap_ext2),
+            &distance_mode,
         );
 
         let (matches, mismatches, insertions, inserted_bp, deletions, deleted_bp, paf_gap_compressed_id, paf_block_id) = calculate_cigar_stats(&paf_cigar);
@@ -1005,6 +1011,13 @@ fn process_decompress_chunk(
             };
 
         // Use specified tracepoint type
+        let distance_mode = DistanceMode::Affine2p {
+            mismatch,
+            gap_open1,
+            gap_ext1,
+            gap_open2,
+            gap_ext2,
+        };
         let cigar = match tp_type {
             TracepointType::Mixed => {
                 // Mixed representation
@@ -1015,7 +1028,7 @@ fn process_decompress_chunk(
                     &target_seq,
                     0,
                     0,
-                    (mismatch, gap_open1, gap_ext1, gap_open2, gap_ext2),
+                    &distance_mode,
                 )
             }
             TracepointType::Variable => {
@@ -1027,7 +1040,7 @@ fn process_decompress_chunk(
                     &target_seq,
                     0,
                     0,
-                    (mismatch, gap_open1, gap_ext1, gap_open2, gap_ext2),
+                    &distance_mode,
                 )
             }
             TracepointType::Standard => {
@@ -1039,7 +1052,7 @@ fn process_decompress_chunk(
                     &target_seq,
                     0,
                     0,
-                    (mismatch, gap_open1, gap_ext1, gap_open2, gap_ext2),
+                    &distance_mode,
                 )
             }
         };
