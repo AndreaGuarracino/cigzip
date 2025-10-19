@@ -79,9 +79,9 @@ enum Args {
         #[arg(long = "fastga", default_value_t = false)]
         fastga: bool,
 
-        /// Max-diff value for tracepoints / trace_spacing for fastga
-        #[arg(long, default_value = "32")]
-        max_diff: usize,
+        /// Max-diff value for tracepoints (default: 32; 100 if --fastga is specified)
+        #[arg(long)]
+        max_diff: Option<usize>,
     },
     /// Decompression of alignments
     Decompress {
@@ -108,8 +108,8 @@ enum Args {
         #[arg(long = "fastga", default_value_t = false)]
         fastga: bool,
 
-        /// Trace spacing for fastga (default: 32)
-        #[arg(long, default_value = "32")]
+        /// Trace spacing for fastga (default: 100)
+        #[arg(long, default_value = "100")]
         trace_spacing: usize,
     },
     /// Run debugging mode (only available in debug builds)
@@ -158,6 +158,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             max_diff,
         } => {
             setup_logger(common.verbose);
+
+            // Determine max_diff: use provided value, or default to 100 if fastga, else 32
+            let max_diff = max_diff.unwrap_or(if fastga { 100 } else { 32 });
+
             let tracepoint_type = if mixed {
                 "mixed "
             } else if variable {
@@ -678,11 +682,7 @@ fn process_debug_chunk(
             &target_seq,
             0,
             0,
-            (mismatch,
-            gap_open1,
-            gap_ext1,
-            gap_open2,
-            gap_ext2),
+            &distance_mode,
         );
         let cigar_from_variable_tracepoints_raw = variable_tracepoints_to_cigar(
             &variable_tracepoints_raw,
@@ -690,13 +690,9 @@ fn process_debug_chunk(
             &target_seq,
             0,
             0,
-            (mismatch,
-            gap_open1,
-            gap_ext1,
-            gap_open2,
-            gap_ext2),
+            &distance_mode,
         );
-        
+
         // Reconstruct CIGAR from diagonal tracepoints
         let cigar_from_tracepoints_diagonal = lib_tracepoints::tracepoints_to_cigar_diagonal(
             &tracepoints_diagonal,
@@ -704,11 +700,7 @@ fn process_debug_chunk(
             &target_seq,
             0,
             0,
-            (mismatch,
-            gap_open1,
-            gap_ext1,
-            gap_open2,
-            gap_ext2),
+            &distance_mode,
         );
         let cigar_from_mixed_tracepoints_diagonal = lib_tracepoints::mixed_tracepoints_to_cigar_diagonal(
             &mixed_tracepoints_diagonal,
@@ -716,11 +708,7 @@ fn process_debug_chunk(
             &target_seq,
             0,
             0,
-            (mismatch,
-            gap_open1,
-            gap_ext1,
-            gap_open2,
-            gap_ext2),
+            &distance_mode,
         );
         let cigar_from_variable_tracepoints_diagonal = lib_tracepoints::variable_tracepoints_to_cigar_diagonal(
             &variable_tracepoints_diagonal,
@@ -728,11 +716,7 @@ fn process_debug_chunk(
             &target_seq,
             0,
             0,
-            (mismatch,
-            gap_open1,
-            gap_ext1,
-            gap_open2,
-            gap_ext2),
+            &distance_mode,
         );
 
         let (matches, mismatches, insertions, inserted_bp, deletions, deleted_bp, paf_gap_compressed_id, paf_block_id) = calculate_cigar_stats(&paf_cigar);
