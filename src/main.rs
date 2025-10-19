@@ -31,6 +31,8 @@ enum TracepointType {
     Mixed,
     /// Variable tracepoints representation
     Variable,
+    /// FastGA tracepoints representation
+    Fastga,
 }
 
 impl fmt::Display for TracepointType {
@@ -39,6 +41,7 @@ impl fmt::Display for TracepointType {
             TracepointType::Standard => write!(f, "standard"),
             TracepointType::Mixed => write!(f, "mixed"),
             TracepointType::Variable => write!(f, "variable"),
+            TracepointType::Fastga => write!(f, "fastga"),
         }
     }
 }
@@ -67,19 +70,11 @@ enum Args {
         #[clap(flatten)]
         common: CommonOpts,
 
-        /// Use mixed representation (preserves S/H/P/N CIGAR operations)
-        #[arg(short = 'm', long = "mixed", default_value_t = false)]
-        mixed: bool,
+        /// Tracepoint type
+        #[arg(long = "type", default_value_t = TracepointType::Standard)]
+        tp_type: TracepointType,
 
-        /// Use variable tracepoints representation
-        #[arg(long = "variable", default_value_t = false)]
-        variable: bool,
-
-        /// Use fastga encoding
-        #[arg(long = "fastga", default_value_t = false)]
-        fastga: bool,
-
-        /// Max-diff value for tracepoints (default: 32; 100 if --fastga is specified)
+        /// Max-diff value for tracepoints (default: 32; 100 if type is fastga)
         #[arg(long)]
         max_diff: Option<usize>,
     },
@@ -88,7 +83,7 @@ enum Args {
         #[clap(flatten)]
         common: CommonOpts,
 
-        /// Tracepoint type: standard, mixed, or variable
+        /// Tracepoint type
         #[arg(long = "type", default_value_t = TracepointType::Standard)]
         tp_type: TracepointType,
 
@@ -100,17 +95,13 @@ enum Args {
         #[arg(short = 't', long = "target-fasta")]
         target_fasta: String,
 
-        /// Gap penalties in the format mismatch,gap_open1,gap_ext1,gap_open2,gap_ext2
-        #[arg(long, default_value = "5,8,2,24,1")]
-        penalties: String,
+        /// Gap penalties in the format mismatch,gap_open1,gap_ext1,gap_open2,gap_ext2 (only used without fastga type, default: 5,8,2,24,1)
+        #[arg(long)]
+        penalties: Option<String>,
 
-        /// Use fastga decoding
-        #[arg(long = "fastga", default_value_t = false)]
-        fastga: bool,
-
-        /// Trace spacing for fastga (default: 100)
-        #[arg(long, default_value = "100")]
-        trace_spacing: usize,
+        /// Trace spacing for fastga (only used with fastga type, default: 100)
+        #[arg(long)]
+        trace_spacing: Option<usize>,
     },
     /// Run debugging mode (only available in debug builds)
     #[cfg(debug_assertions)]
@@ -152,26 +143,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     match args {
         Args::Compress {
             common,
-            mixed,
-            variable,
-            fastga,
+            tp_type,
             max_diff,
         } => {
             setup_logger(common.verbose);
 
             // Determine max_diff: use provided value, or default to 100 if fastga, else 32
-            let max_diff = max_diff.unwrap_or(if fastga { 100 } else { 32 });
+            let is_fastga = matches!(tp_type, TracepointType::Fastga);
+            let max_diff = max_diff.unwrap_or(if is_fastga { 100 } else { 32 });
 
-            let tracepoint_type = if mixed {
-                "mixed "
-            } else if variable {
-                "variable "
-            } else if fastga {
-                "fastga "
-            } else {
-                ""
-            };
-            info!("Converting CIGAR to {}tracepoints", tracepoint_type);
+            info!("Converting CIGAR to {} tracepoints ({}={})", tp_type,  if is_fastga {"trace_spacing"} else {"max_diff"}, max_diff);
 
             // Set the thread pool size
             rayon::ThreadPoolBuilder::new()
@@ -195,7 +176,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
                         if lines.len() >= chunk_size {
                             // Process current chunk in parallel
-                            process_compress_chunk(&lines, mixed, variable, fastga, max_diff);
+                            process_compress_chunk(&lines, &tp_type, max_diff);
                             lines.clear();
                         }
                     }
@@ -205,7 +186,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
             // Process remaining lines
             if !lines.is_empty() {
-                process_compress_chunk(&lines, mixed, variable, fastga, max_diff);
+                process_compress_chunk(&lines, &tp_type, max_diff);
             }
         }
         Args::Decompress {
@@ -214,19 +195,42 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             query_fasta,
             target_fasta,
             penalties,
-            fastga,
             trace_spacing,
         } => {
             setup_logger(common.verbose);
-            info!("Converting tracepoints to CIGAR");
+            info!("Converting tracepoints to CIGAR using type = {}", tp_type);
 
             // Set the thread pool size
             rayon::ThreadPoolBuilder::new()
                 .num_threads(common.threads)
                 .build_global()?;
 
+            // Determine if we're using fastga based on tp_type
+            let is_fastga = matches!(tp_type, TracepointType::Fastga);
+
+            // Validate and apply conditional defaults
+            let trace_spacing = if is_fastga {
+                trace_spacing.unwrap_or(100)
+            } else {
+                if trace_spacing.is_some() {
+                    error!("--trace-spacing should only be used with --type fastga");
+                    std::process::exit(1);
+                }
+                0 // Not used when not fastga
+            };
+
+            let penalties_str = if is_fastga {
+                if penalties.is_some() {
+                    error!("--penalties should only be used without --type fastga");
+                    std::process::exit(1);
+                }
+                "5,8,2,24,1".to_string()
+            } else {
+                penalties.unwrap_or_else(|| "5,8,2,24,1".to_string())
+            };
+
             // Parse penalties
-            let (mismatch, gap_open1, gap_ext1, gap_open2, gap_ext2) = parse_penalties(&penalties)?;
+            let (mismatch, gap_open1, gap_ext1, gap_open2, gap_ext2) = parse_penalties(&penalties_str)?;
 
             // Open the PAF file (or use stdin if "-" is provided).
             let paf_reader = get_paf_reader(&common.paf)?;
@@ -255,7 +259,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 gap_ext1,
                                 gap_open2,
                                 gap_ext2,
-                                fastga,
+                                is_fastga,
                                 trace_spacing,
                             );
                             lines.clear();
@@ -277,7 +281,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     gap_ext1,
                     gap_open2,
                     gap_ext2,
-                    fastga,
+                    is_fastga,
                     trace_spacing,
                 );
             }
@@ -972,7 +976,7 @@ fn get_paf_reader(paf: &str) -> io::Result<Box<dyn BufRead>> {
 }
 
 /// Process a chunk of lines in parallel for compression
-fn process_compress_chunk(lines: &[String], mixed: bool, variable: bool, fastga: bool, max_diff: usize) {
+fn process_compress_chunk(lines: &[String], tp_type: &TracepointType, max_diff: usize) {
     lines.par_iter().for_each(|line| {
         let fields: Vec<&str> = line.split('\t').collect();
         if fields.len() < 12 {
@@ -998,34 +1002,39 @@ fn process_compress_chunk(lines: &[String], mixed: bool, variable: bool, fastga:
             .map(|&s| s[5..].parse::<usize>().ok())
             .flatten();
 
-        // Convert CIGAR based on options and calculate df if needed
-        let (tracepoints_str, df_value) = if mixed {
-            let tp = cigar_to_mixed_tracepoints(cigar, max_diff);
-            (format_mixed_tracepoints(&tp), None)
-        } else if variable {
-            let tp = cigar_to_variable_tracepoints(cigar, max_diff);
-            (format_variable_tracepoints(&tp), None)
-        } else if fastga {
-            // Use fastga encoding and calculate sum of differences
-            let a_start: usize = fields[2].parse().unwrap_or_else(|_| {
-                error!("Invalid query_start in PAF line");
-                std::process::exit(1);
-            });
-            let b_start: usize = fields[7].parse().unwrap_or_else(|_| {
-                error!("Invalid target_start in PAF line");
-                std::process::exit(1);
-            });
-            let complement = fields[4] == "-";
-            let tp = cigar_to_tracepoints_fastga(cigar, max_diff, a_start, b_start, complement);
-            
-            // Calculate sum of differences (first value in each tracepoint pair)
-            let sum_of_differences: usize = tp.iter().map(|(diff, _)| diff).sum();
-            
-            (format_tracepoints(&tp), Some(sum_of_differences))
-        } else {
-            // Use standard tracepoints
-            let tp = cigar_to_tracepoints(cigar, max_diff);
-            (format_tracepoints(&tp), None)
+        // Convert CIGAR based on tracepoint type
+        let (tracepoints_str, df_value) = match tp_type {
+            TracepointType::Mixed => {
+                let tp = cigar_to_mixed_tracepoints(cigar, max_diff);
+                (format_mixed_tracepoints(&tp), None)
+            }
+            TracepointType::Variable => {
+                let tp = cigar_to_variable_tracepoints(cigar, max_diff);
+                (format_variable_tracepoints(&tp), None)
+            }
+            TracepointType::Fastga => {
+                // Use fastga encoding and calculate sum of differences
+                let a_start: usize = fields[2].parse().unwrap_or_else(|_| {
+                    error!("Invalid query_start in PAF line");
+                    std::process::exit(1);
+                });
+                let b_start: usize = fields[7].parse().unwrap_or_else(|_| {
+                    error!("Invalid target_start in PAF line");
+                    std::process::exit(1);
+                });
+                let complement = fields[4] == "-";
+                let tp = cigar_to_tracepoints_fastga(cigar, max_diff, a_start, b_start, complement);
+
+                // Calculate sum of differences (first value in each tracepoint pair)
+                let sum_of_differences: usize = tp.iter().map(|(diff, _)| diff).sum();
+
+                (format_tracepoints(&tp), Some(sum_of_differences))
+            }
+            TracepointType::Standard => {
+                // Use standard tracepoints
+                let tp = cigar_to_tracepoints(cigar, max_diff);
+                (format_tracepoints(&tp), None)
+            }
         };
 
         // Build the new line
@@ -1250,6 +1259,11 @@ fn process_decompress_chunk(
                         0,
                         &distance_mode,
                     )
+                }
+                TracepointType::Fastga => {
+                    // Should not reach here - fastga is handled above
+                    error!("Fastga should not be handled in non-fastga path");
+                    std::process::exit(1);
                 }
             }
         };
