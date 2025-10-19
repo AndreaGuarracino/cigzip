@@ -198,7 +198,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             trace_spacing,
         } => {
             setup_logger(common.verbose);
-            info!("Converting tracepoints to CIGAR using type = {}", tp_type);
+            info!("Converting {} tracepoints to CIGAR", tp_type);
 
             // Set the thread pool size
             rayon::ThreadPoolBuilder::new()
