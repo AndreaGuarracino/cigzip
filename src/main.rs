@@ -15,7 +15,7 @@ use lib_tracepoints::{
 };
 #[cfg(debug_assertions)]
 use lib_wfa2::affine_wavefront::AffineWavefronts;
-use log::{error, info};
+use log::{error, info, debug};
 use rayon::prelude::*;
 use rust_htslib::faidx::Reader as FastaReader;
 use std::fs::File;
@@ -1068,16 +1068,32 @@ fn process_compress_chunk(lines: &[String], tp_type: &TracepointType, max_diff: 
             }
             TracepointType::Fastga => {
                 // Use fastga encoding and calculate sum of differences
-                let a_start: usize = fields[2].parse().unwrap_or_else(|_| {
+                let query_len = fields[1].parse().unwrap_or_else(|_| {
+                    error!("Invalid query_len in PAF line");
+                    std::process::exit(1);
+                });
+                let query_start: usize = fields[2].parse().unwrap_or_else(|_| {
                     error!("Invalid query_start in PAF line");
                     std::process::exit(1);
                 });
-                let b_start: usize = fields[7].parse().unwrap_or_else(|_| {
+                let query_end: usize = fields[3].parse().unwrap_or_else(|_| {
+                    error!("Invalid query_end in PAF line");
+                    std::process::exit(1);
+                });
+                let target_len: usize = fields[6].parse().unwrap_or_else(|_| {
+                    error!("Invalid target_length in PAF line");
+                    std::process::exit(1);
+                });
+                let target_start: usize = fields[7].parse().unwrap_or_else(|_| {
                     error!("Invalid target_start in PAF line");
                     std::process::exit(1);
                 });
+                let target_end: usize = fields[8].parse().unwrap_or_else(|_| {
+                    error!("Invalid target_end in PAF line");
+                    std::process::exit(1);
+                });
                 let complement = fields[4] == "-";
-                let tp = cigar_to_tracepoints_fastga(cigar, max_diff, a_start, b_start, complement);
+                let tp = cigar_to_tracepoints_fastga(cigar, max_diff, query_start, query_end, query_len, target_start, target_end, target_len, complement);
 
                 // Calculate sum of differences (first value in each tracepoint pair)
                 let sum_of_differences: usize = tp.iter().map(|(diff, _)| diff).sum();
@@ -1171,7 +1187,13 @@ fn process_decompress_chunk(
         });
         let strand = fields[4];
         let target_name = fields[5];
-        //let target_len: usize = fields[6].parse()?;
+        let target_len: usize = fields[6].parse().unwrap_or_else(|_| {
+            error!(
+                "{}",
+                message_with_truncate_paf_file("Invalid target_length in PAF line", line)
+            );
+            std::process::exit(1);
+        });
         let target_start: usize = fields[7].parse().unwrap_or_else(|_| {
             error!(
                 "{}",
@@ -1198,8 +1220,10 @@ fn process_decompress_chunk(
             std::process::exit(1);
         });
 
-        // Fetch query sequence from query FASTA
-        let query_seq = if strand == "+" {
+        // Fetch query sequence from query FASTA (with FASTGA we always use forward strand for the query)
+        let query_seq = if strand == "+" || fastga {
+            debug!("Fetching query sequence {}:{}-{} on + strand", query_name, query_start, query_end - 1);
+
             match query_fasta_reader.fetch_seq(query_name, query_start, query_end - 1) {
                 Ok(seq) => {
                     let mut seq_vec = seq.to_vec();
@@ -1215,6 +1239,8 @@ fn process_decompress_chunk(
                 }
             }
         } else {
+            debug!("Fetching query sequence {}:{}-{} on - strand", query_name, query_start, query_end - 1);
+
             match query_fasta_reader.fetch_seq(query_name, query_start, query_end - 1) {
                 Ok(seq) => {
                     let mut rc = reverse_complement(&seq.to_vec());
@@ -1230,8 +1256,10 @@ fn process_decompress_chunk(
             }
         };
 
-        // Fetch target sequence from target FASTA
-        let target_seq =
+        // Fetch target sequence from target FASTA (with FASTGA the strand affects the target sequence)
+        let target_seq = if strand == "+" || !fastga {
+            debug!("Fetching target sequence {}:{}-{} on + strand", target_name, target_start, target_end - 1);
+
             match target_fasta_reader.fetch_seq(target_name, target_start, target_end - 1) {
                 Ok(seq) => {
                     let mut seq_vec = seq.to_vec();
@@ -1245,7 +1273,24 @@ fn process_decompress_chunk(
                     error!("Failed to fetch target sequence: {}", e);
                     std::process::exit(1);
                 }
-            };
+            }
+        } else {
+            debug!("Fetching target sequence {}:{}-{} on - strand", target_name, target_start, target_end - 1);
+
+            match target_fasta_reader.fetch_seq(target_name, target_start, target_end - 1) {
+                Ok(seq) => {
+                    let mut rc = reverse_complement(&seq.to_vec());
+                    unsafe { libc::free(seq.as_ptr() as *mut std::ffi::c_void) }; // Free up memory (bug https://github.com/rust-bio/rust-htslib/issues/401#issuecomment-1704290171)
+                    rc.iter_mut()
+                        .for_each(|byte| *byte = byte.to_ascii_uppercase());
+                    rc
+                }
+                Err(e) => {
+                    error!("Failed to fetch target sequence: {}", e);
+                    std::process::exit(1);
+                }
+            }
+        };
 
         // Use specified tracepoint type
         let distance_mode = DistanceMode::Affine2p {
@@ -1278,7 +1323,8 @@ fn process_decompress_chunk(
                 &query_seq,
                 &target_seq,
                 query_start,
-                target_start,
+                if  strand == "+" { target_len - target_end } else { target_start },
+                strand == "-",
             )
         } else {
             match tp_type {
