@@ -1222,7 +1222,7 @@ fn process_decompress_chunk(
 
         // Fetch query sequence from query FASTA (with FASTGA we always use forward strand for the query)
         let query_seq = if strand == "+" || fastga {
-            debug!("Fetching query sequence {}:{}-{} on + strand", query_name, query_start, query_end - 1);
+            debug!("Fetching query sequence {}:{}-{} on + strand", query_name, query_start, query_end);
 
             match query_fasta_reader.fetch_seq(query_name, query_start, query_end - 1) {
                 Ok(seq) => {
@@ -1239,7 +1239,7 @@ fn process_decompress_chunk(
                 }
             }
         } else {
-            debug!("Fetching query sequence {}:{}-{} on - strand", query_name, query_start, query_end - 1);
+            debug!("Fetching query sequence {}:{}-{} on - strand", query_name, query_start, query_end);
 
             match query_fasta_reader.fetch_seq(query_name, query_start, query_end - 1) {
                 Ok(seq) => {
@@ -1258,7 +1258,7 @@ fn process_decompress_chunk(
 
         // Fetch target sequence from target FASTA (with FASTGA the strand affects the target sequence)
         let target_seq = if strand == "+" || !fastga {
-            debug!("Fetching target sequence {}:{}-{} on + strand", target_name, target_start, target_end - 1);
+            debug!("Fetching target sequence {}:{}-{} on + strand", target_name, target_start, target_end);
 
             match target_fasta_reader.fetch_seq(target_name, target_start, target_end - 1) {
                 Ok(seq) => {
@@ -1275,7 +1275,8 @@ fn process_decompress_chunk(
                 }
             }
         } else {
-            debug!("Fetching target sequence {}:{}-{} on - strand", target_name, target_start, target_end - 1);
+            //let (target_start, target_end) = (target_len - target_end, target_len - target_start);
+            debug!("Fetching target sequence {}:{}-{} on - strand", target_name, target_start, target_end);
 
             match target_fasta_reader.fetch_seq(target_name, target_start, target_end - 1) {
                 Ok(seq) => {
