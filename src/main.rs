@@ -499,6 +499,35 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
+/// Calculate alignment score based on edit distance from a CIGAR string
+/// Alignment score = -(mismatches + inserted_bp + deleted_bp)
+fn calculate_alignment_score_edit_distance(cigar: &str) -> i32 {
+    let mut mismatches = 0;
+    let mut inserted_bp = 0;
+    let mut deleted_bp = 0;
+
+    let mut num_buffer = String::new();
+
+    for c in cigar.chars() {
+        if c.is_ascii_digit() {
+            num_buffer.push(c);
+        } else {
+            let len = num_buffer.parse::<usize>().unwrap_or(0);
+            num_buffer.clear();
+
+            match c {
+                'X' => mismatches += len,
+                'I' => inserted_bp += len,
+                'D' => deleted_bp += len,
+                _ => {}
+            }
+        }
+    }
+
+    let edit_distance = mismatches + inserted_bp + deleted_bp;
+    -(edit_distance as i32)
+}
+
 /// Calculate gap-compressed identity and block identity from a CIGAR string
 fn calculate_identity_stats(cigar: &str) -> (f64, f64) {
     let mut matches = 0;
@@ -1050,6 +1079,9 @@ fn process_compress_chunk(lines: &[String], tp_type: &TracepointType, max_diff: 
         // Calculate identity stats from the CIGAR
         let (gap_compressed_identity, block_identity) = calculate_identity_stats(cigar);
 
+        // Calculate alignment score based on edit distance
+        let alignment_score = calculate_alignment_score_edit_distance(cigar);
+
         // Check for existing df:i: field
         let existing_df = fields.iter()
             .find(|&&s| s.starts_with("df:i:"))
@@ -1109,13 +1141,13 @@ fn process_compress_chunk(lines: &[String], tp_type: &TracepointType, max_diff: 
 
         // Build the new line
         let mut new_fields: Vec<String> = Vec::new();
-        
+
         for field in fields.iter() {
             if field.starts_with("cg:Z:") {
                 // Add identity stats before tracepoints (replacing CIGAR position)
                 new_fields.push(format!("gi:f:{:.12}", gap_compressed_identity));
                 new_fields.push(format!("bi:f:{:.12}", block_identity));
-                
+
                 // Replace CIGAR with df fields (if using fastga) followed by tracepoints
                 if let Some(new_df) = df_value {
                     if let Some(old_df) = existing_df {
@@ -1123,9 +1155,13 @@ fn process_compress_chunk(lines: &[String], tp_type: &TracepointType, max_diff: 
                     }
                     new_fields.push(format!("df:i:{}", new_df));
                 }
+
+                // Add alignment score field
+                new_fields.push(format!("sc:i:{}", alignment_score));
+
                 new_fields.push(format!("tp:Z:{}", tracepoints_str));
-            } else if field.starts_with("df:i:") || field.starts_with("gi:f:") || field.starts_with("bi:f:") {
-                // Skip existing df, gi, and bi fields as we've already handled them
+            } else if field.starts_with("df:i:") || field.starts_with("gi:f:") || field.starts_with("bi:f:") || field.starts_with("sc:i:") {
+                // Skip existing df, gi, bi, and sc fields as we've already handled them
                 continue;
             } else {
                 new_fields.push(field.to_string());
@@ -1376,31 +1412,39 @@ fn process_decompress_chunk(
         // Calculate identity stats from the reconstructed CIGAR
         let (gap_compressed_identity, block_identity) = calculate_identity_stats(&cigar);
 
-        // Check for existing gi:f: and bi:f: fields
+        // Calculate alignment score based on edit distance
+        let alignment_score = calculate_alignment_score_edit_distance(&cigar);
+
+        // Check for existing gi:f:, bi:f:, and sc:i: fields
         let existing_gi = fields.iter().find(|&&s| s.starts_with("gi:f:"));
         let existing_bi = fields.iter().find(|&&s| s.starts_with("bi:f:"));
+        let existing_sc = fields.iter().find(|&&s| s.starts_with("sc:i:"));
 
         // Build the new line
         let mut new_fields: Vec<String> = Vec::new();
-        
+
         for field in fields.iter() {
             if field.starts_with("tp:Z:") {
-                // If there were existing gi/bi fields, rename them with 'old' prefix
+                // If there were existing gi/bi/sc fields, rename them with 'old' prefix
                 if let Some(old_gi) = existing_gi {
                     new_fields.push(format!("giold:f:{}", &old_gi[5..]));
                 }
                 if let Some(old_bi) = existing_bi {
                     new_fields.push(format!("biold:f:{}", &old_bi[5..]));
                 }
-                
-                // Add new identity stats before the CIGAR
+                if let Some(old_sc) = existing_sc {
+                    new_fields.push(format!("scold:i:{}", &old_sc[5..]));
+                }
+
+                // Add new identity stats and alignment score before the CIGAR
                 new_fields.push(format!("gi:f:{:.12}", gap_compressed_identity));
                 new_fields.push(format!("bi:f:{:.12}", block_identity));
-                
+                new_fields.push(format!("sc:i:{}", alignment_score));
+
                 // Replace tracepoints with CIGAR
                 new_fields.push(format!("cg:Z:{}", cigar));
-            } else if field.starts_with("gi:f:") || field.starts_with("bi:f:") {
-                // Skip existing gi and bi fields - we've already handled them
+            } else if field.starts_with("gi:f:") || field.starts_with("bi:f:") || field.starts_with("sc:i:") {
+                // Skip existing gi, bi, and sc fields - we've already handled them
                 continue;
             } else {
                 new_fields.push(field.to_string());
