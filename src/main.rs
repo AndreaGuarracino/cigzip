@@ -499,6 +499,57 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
+/// Calculate gap-compressed identity and block identity from a CIGAR string
+fn calculate_identity_stats(cigar: &str) -> (f64, f64) {
+    let mut matches = 0;
+    let mut mismatches = 0;
+    let mut insertions = 0;
+    let mut inserted_bp = 0;
+    let mut deletions = 0;
+    let mut deleted_bp = 0;
+
+    let mut num_buffer = String::new();
+
+    for c in cigar.chars() {
+        if c.is_ascii_digit() {
+            num_buffer.push(c);
+        } else {
+            let len = num_buffer.parse::<usize>().unwrap_or(0);
+            num_buffer.clear();
+
+            match c {
+                'M' | '=' => matches += len,
+                'X' => mismatches += len,
+                'I' => {
+                    insertions += 1;
+                    inserted_bp += len;
+                }
+                'D' => {
+                    deletions += 1;
+                    deleted_bp += len;
+                }
+                'S' | 'H' | 'P' | 'N' => {}
+                _ => {}
+            }
+        }
+    }
+
+    let gap_compressed_identity = if matches + mismatches + insertions + deletions > 0 {
+        (matches as f64) / (matches + mismatches + insertions + deletions) as f64
+    } else {
+        0.0
+    };
+
+    let edit_distance = mismatches + inserted_bp + deleted_bp;
+    let block_identity = if matches + edit_distance > 0 {
+        (matches as f64) / (matches + edit_distance) as f64
+    } else {
+        0.0
+    };
+
+    (gap_compressed_identity, block_identity)
+}
+
 /// Process a chunk of lines in parallel for debugging
 #[cfg(debug_assertions)]
 fn process_debug_chunk(
@@ -996,6 +1047,9 @@ fn process_compress_chunk(lines: &[String], tp_type: &TracepointType, max_diff: 
         };
         let cigar = &cg_field[5..];
 
+        // Calculate identity stats from the CIGAR
+        let (gap_compressed_identity, block_identity) = calculate_identity_stats(cigar);
+
         // Check for existing df:i: field
         let existing_df = fields.iter()
             .find(|&&s| s.starts_with("df:i:"))
@@ -1042,6 +1096,10 @@ fn process_compress_chunk(lines: &[String], tp_type: &TracepointType, max_diff: 
         
         for field in fields.iter() {
             if field.starts_with("cg:Z:") {
+                // Add identity stats before tracepoints (replacing CIGAR position)
+                new_fields.push(format!("gi:f:{:.12}", gap_compressed_identity));
+                new_fields.push(format!("bi:f:{:.12}", block_identity));
+                
                 // Replace CIGAR with df fields (if using fastga) followed by tracepoints
                 if let Some(new_df) = df_value {
                     if let Some(old_df) = existing_df {
@@ -1050,8 +1108,8 @@ fn process_compress_chunk(lines: &[String], tp_type: &TracepointType, max_diff: 
                     new_fields.push(format!("df:i:{}", new_df));
                 }
                 new_fields.push(format!("tp:Z:{}", tracepoints_str));
-            } else if field.starts_with("df:i:") {
-                // Skip the old df:i: field as we've already handled it
+            } else if field.starts_with("df:i:") || field.starts_with("gi:f:") || field.starts_with("bi:f:") {
+                // Skip existing df, gi, and bi fields as we've already handled them
                 continue;
             } else {
                 new_fields.push(field.to_string());
@@ -1268,9 +1326,41 @@ fn process_decompress_chunk(
             }
         };
 
-        // Print the original line, replacing the tracepoints tag with the CIGAR string
-        let new_line = line.replace(tp_field, &format!("cg:Z:{}", cigar));
-        println!("{}", new_line);
+        // Calculate identity stats from the reconstructed CIGAR
+        let (gap_compressed_identity, block_identity) = calculate_identity_stats(&cigar);
+
+        // Check for existing gi:f: and bi:f: fields
+        let existing_gi = fields.iter().find(|&&s| s.starts_with("gi:f:"));
+        let existing_bi = fields.iter().find(|&&s| s.starts_with("bi:f:"));
+
+        // Build the new line
+        let mut new_fields: Vec<String> = Vec::new();
+        
+        for field in fields.iter() {
+            if field.starts_with("tp:Z:") {
+                // If there were existing gi/bi fields, rename them with 'old' prefix
+                if let Some(old_gi) = existing_gi {
+                    new_fields.push(format!("giold:f:{}", &old_gi[5..]));
+                }
+                if let Some(old_bi) = existing_bi {
+                    new_fields.push(format!("biold:f:{}", &old_bi[5..]));
+                }
+                
+                // Add new identity stats before the CIGAR
+                new_fields.push(format!("gi:f:{:.12}", gap_compressed_identity));
+                new_fields.push(format!("bi:f:{:.12}", block_identity));
+                
+                // Replace tracepoints with CIGAR
+                new_fields.push(format!("cg:Z:{}", cigar));
+            } else if field.starts_with("gi:f:") || field.starts_with("bi:f:") {
+                // Skip existing gi and bi fields - we've already handled them
+                continue;
+            } else {
+                new_fields.push(field.to_string());
+            }
+        }
+        
+        println!("{}", new_fields.join("\t"));
     });
 }
 
