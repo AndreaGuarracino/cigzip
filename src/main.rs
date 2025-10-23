@@ -671,7 +671,7 @@ fn process_debug_chunk(
         } else {
             match query_fasta_reader.fetch_seq(query_name, query_start, query_end - 1) {
                 Ok(seq) => {
-                    let mut rc = reverse_complement(&seq.to_vec());
+                    let mut rc = reverse_complement(seq);
                     unsafe { libc::free(seq.as_ptr() as *mut std::ffi::c_void) };
                     rc.iter_mut()
                         .for_each(|byte| *byte = byte.to_ascii_uppercase());
@@ -713,17 +713,17 @@ fn process_debug_chunk(
         // let paf_cigar = &realn_cigar;
 
         // Convert CIGAR to tracepoints using query (A) and target (B) coordinates.
-        let tracepoints = cigar_to_tracepoints(&paf_cigar, max_diff);
+        let tracepoints = cigar_to_tracepoints(paf_cigar, max_diff);
         let variable_tracepoints = cigar_to_variable_tracepoints(paf_cigar, max_diff);
         
         // Also convert using raw functions
-        let tracepoints_raw = cigar_to_tracepoints_raw(&paf_cigar, max_diff);
-        let variable_tracepoints_raw = cigar_to_variable_tracepoints_raw(&paf_cigar, max_diff);
+        let tracepoints_raw = cigar_to_tracepoints_raw(paf_cigar, max_diff);
+        let variable_tracepoints_raw = cigar_to_variable_tracepoints_raw(paf_cigar, max_diff);
         
         // Convert using diagonal distance functions
-        let tracepoints_diagonal = cigar_to_tracepoints_diagonal(&paf_cigar, max_diff);
-        let mixed_tracepoints_diagonal = cigar_to_mixed_tracepoints_diagonal(&paf_cigar, max_diff);
-        let variable_tracepoints_diagonal = cigar_to_variable_tracepoints_diagonal(&paf_cigar, max_diff);
+        let tracepoints_diagonal = cigar_to_tracepoints_diagonal(paf_cigar, max_diff);
+        let mixed_tracepoints_diagonal = cigar_to_mixed_tracepoints_diagonal(paf_cigar, max_diff);
+        let variable_tracepoints_diagonal = cigar_to_variable_tracepoints_diagonal(paf_cigar, max_diff);
 
         // Compare tracepoints (allowing variable tracepoints to have None for second coordinate)
         if tracepoints
@@ -813,7 +813,7 @@ fn process_debug_chunk(
             &distance_mode,
         );
 
-        let (matches, mismatches, insertions, inserted_bp, deletions, deleted_bp, paf_gap_compressed_id, paf_block_id) = calculate_cigar_stats(&paf_cigar);
+        let (matches, mismatches, insertions, inserted_bp, deletions, deleted_bp, paf_gap_compressed_id, paf_block_id) = calculate_cigar_stats(paf_cigar);
         let (tracepoints_matches, tracepoints_mismatches, tracepoints_insertions, tracepoints_inserted_bp, tracepoints_deletions, tracepoints_deleted_bp, tracepoints_gap_compressed_id, tracepoints_block_id) = calculate_cigar_stats(&cigar_from_tracepoints);
         let (variable_tracepoints_matches, variable_tracepoints_mismatches, variable_tracepoints_insertions, variable_tracepoints_inserted_bp, variable_tracepoints_deletions, variable_tracepoints_deleted_bp, variable_tracepoints_gap_compressed_id, variable_tracepoints_block_id) = calculate_cigar_stats(&cigar_from_variable_tracepoints);
         let (tracepoints_raw_matches, tracepoints_raw_mismatches, tracepoints_raw_insertions, tracepoints_raw_inserted_bp, tracepoints_raw_deletions, tracepoints_raw_deleted_bp, tracepoints_raw_gap_compressed_id, tracepoints_raw_block_id) = calculate_cigar_stats(&cigar_from_tracepoints_raw);
@@ -825,7 +825,7 @@ fn process_debug_chunk(
         let (realign_matches, realign_mismatches, realign_insertions, realign_inserted_bp, realign_deletions, realign_deleted_bp, realign_gap_compressed_id, realign_block_id) = calculate_cigar_stats(&realn_cigar);
 
         let score_from_realign = compute_alignment_score_from_cigar(&realn_cigar, mismatch, gap_open1, gap_ext1, gap_open2, gap_ext2);
-        let score_from_paf = compute_alignment_score_from_cigar(&paf_cigar, mismatch, gap_open1, gap_ext1, gap_open2, gap_ext2);
+        let score_from_paf = compute_alignment_score_from_cigar(paf_cigar, mismatch, gap_open1, gap_ext1, gap_open2, gap_ext2);
         let score_from_tracepoints = compute_alignment_score_from_cigar(&cigar_from_tracepoints, mismatch, gap_open1, gap_ext1, gap_open2, gap_ext2);
         let score_from_variable_tracepoints = compute_alignment_score_from_cigar(&cigar_from_variable_tracepoints, mismatch, gap_open1, gap_ext1, gap_open2, gap_ext2);
         let score_from_tracepoints_raw = compute_alignment_score_from_cigar(&cigar_from_tracepoints_raw, mismatch, gap_open1, gap_ext1, gap_open2, gap_ext2);
@@ -885,7 +885,7 @@ fn process_debug_chunk(
             println!("\t          tracepoints_diagonal: {:?}", tracepoints_diagonal);
             //println!("\t    mixed_tracepoints_diagonal: {:?}", mixed_tracepoints_diagonal);
             //println!("\t variable_tracepoints_diagonal: {:?}", variable_tracepoints_diagonal);
-            println!("\t                           bounds CIGAR from PAF: {:?}", get_cigar_diagonal_bounds(&paf_cigar));
+            println!("\t                           bounds CIGAR from PAF: {:?}", get_cigar_diagonal_bounds(paf_cigar));
             println!("\t                   bounds CIGAR from tracepoints: {:?}", get_cigar_diagonal_bounds(&cigar_from_tracepoints));
             println!("\t               bounds CIGAR from tracepoints_raw: {:?}", get_cigar_diagonal_bounds(&cigar_from_tracepoints_raw));
             println!("\t          bounds CIGAR from tracepoints_diagonal: {:?}", get_cigar_diagonal_bounds(&cigar_from_tracepoints_diagonal));
@@ -901,7 +901,7 @@ fn process_debug_chunk(
             //println!("\tdeviation CIGAR from variable_tracepoints: {:?}", compute_deviation(&cigar_from_variable_tracepoints));
             //println!("\tdeviation CIGAR from variable_tracepoints_raw: {:?}", compute_deviation(&cigar_from_variable_tracepoints_raw));
             // println!("=> Try using --wfa-heuristic=banded-static --wfa-heuristic-parameters=-{},{}\n", std::cmp::max(max_gap, -d_min), std::cmp::max(max_gap, d_max));
-            println!("");
+            println!();
         }
     });
 }
@@ -920,7 +920,7 @@ fn calculate_cigar_stats(cigar: &str) -> (usize, usize, usize, usize, usize, usi
     let mut num_buffer = String::new();
 
     for c in cigar.chars() {
-        if c.is_digit(10) {
+        if c.is_ascii_digit() {
             num_buffer.push(c);
         } else {
             // Get the count
@@ -996,7 +996,7 @@ fn compute_alignment_score_from_cigar(
     let mut num_buffer = String::new();
 
     for c in cigar.chars() {
-        if c.is_digit(10) {
+        if c.is_ascii_digit() {
             num_buffer.push(c);
         } else {
             // Get the count
@@ -1096,8 +1096,7 @@ fn process_compress_chunk(lines: &[String], tp_type: &TracepointType, max_diff: 
         let existing_df = fields
             .iter()
             .find(|&&s| s.starts_with("df:i:"))
-            .map(|&s| s[5..].parse::<usize>().ok())
-            .flatten();
+            .and_then(|&s| s[5..].parse::<usize>().ok());
 
         // Handle FastGA tracepoints with potential overflow splitting
         if matches!(tp_type, TracepointType::Fastga) {
@@ -1445,7 +1444,7 @@ fn process_decompress_chunk(
 
             match query_fasta_reader.fetch_seq(query_name, query_start, query_end - 1) {
                 Ok(seq) => {
-                    let mut rc = reverse_complement(&seq.to_vec());
+                    let mut rc = reverse_complement(seq);
                     unsafe { libc::free(seq.as_ptr() as *mut std::ffi::c_void) }; // Free up memory (bug https://github.com/rust-bio/rust-htslib/issues/401#issuecomment-1704290171)
                     rc.iter_mut()
                         .for_each(|byte| *byte = byte.to_ascii_uppercase());
@@ -1488,7 +1487,7 @@ fn process_decompress_chunk(
 
             match target_fasta_reader.fetch_seq(target_name, target_start, target_end - 1) {
                 Ok(seq) => {
-                    let mut rc = reverse_complement(&seq.to_vec());
+                    let mut rc = reverse_complement(seq);
                     unsafe { libc::free(seq.as_ptr() as *mut std::ffi::c_void) }; // Free up memory (bug https://github.com/rust-bio/rust-htslib/issues/401#issuecomment-1704290171)
                     rc.iter_mut()
                         .for_each(|byte| *byte = byte.to_ascii_uppercase());
@@ -1711,12 +1710,12 @@ fn parse_mixed_tracepoints(tp_str: &str) -> Vec<MixedRepresentation> {
                 ))
             } else {
                 // This is a cigar operation
-                let mut chars = s.chars();
+                let chars = s.chars();
                 let mut len_str = String::new();
 
                 // Read digits
-                while let Some(c) = chars.next() {
-                    if c.is_digit(10) {
+                for c in chars {
+                    if c.is_ascii_digit() {
                         len_str.push(c);
                     } else {
                         // Found operator character
@@ -1761,7 +1760,7 @@ fn get_cigar_diagonal_bounds(cigar: &str) -> (i64, i64) {
     let mut num_buffer = String::new();
 
     for c in cigar.chars() {
-        if c.is_digit(10) {
+        if c.is_ascii_digit() {
             num_buffer.push(c);
         } else {
             // Get the count
@@ -1801,7 +1800,7 @@ fn compute_deviation(cigar: &str) -> (i64, i64, i64, i64) {
     let mut num_buffer = String::new();
 
     for c in cigar.chars() {
-        if c.is_digit(10) {
+        if c.is_ascii_digit() {
             num_buffer.push(c);
         } else {
             // Get the count
