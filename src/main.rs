@@ -1056,6 +1056,122 @@ fn get_paf_reader(paf: &str) -> io::Result<Box<dyn BufRead>> {
 }
 
 /// Process a chunk of lines in parallel for compression
+// fn process_compress_chunk(lines: &[String], tp_type: &TracepointType, max_diff: usize) {
+//     lines.par_iter().for_each(|line| {
+//         let fields: Vec<&str> = line.split('\t').collect();
+//         if fields.len() < 12 {
+//             error!(
+//                 "{}",
+//                 message_with_truncate_paf_file("Skipping malformed PAF line", line)
+//             );
+//             std::process::exit(1);
+//         }
+
+//         let Some(cg_field) = fields.iter().find(|&&s| s.starts_with("cg:Z:")) else {
+//             error!(
+//                 "{}",
+//                 message_with_truncate_paf_file("Skipping CIGAR-less PAF line", line)
+//             );
+//             std::process::exit(1);
+//         };
+//         let cigar = &cg_field[5..];
+
+//         // Calculate identity stats from the CIGAR
+//         let (gap_compressed_identity, block_identity) = calculate_identity_stats(cigar);
+
+//         // Calculate alignment score based on edit distance
+//         let alignment_score = calculate_alignment_score_edit_distance(cigar);
+
+//         // Check for existing df:i: field
+//         let existing_df = fields.iter()
+//             .find(|&&s| s.starts_with("df:i:"))
+//             .map(|&s| s[5..].parse::<usize>().ok())
+//             .flatten();
+
+//         // Convert CIGAR based on tracepoint type
+//         let (tracepoints_str, df_value) = match tp_type {
+//             TracepointType::Mixed => {
+//                 let tp = cigar_to_mixed_tracepoints(cigar, max_diff);
+//                 (format_mixed_tracepoints(&tp), None)
+//             }
+//             TracepointType::Variable => {
+//                 let tp = cigar_to_variable_tracepoints(cigar, max_diff);
+//                 (format_variable_tracepoints(&tp), None)
+//             }
+//             TracepointType::Fastga => {
+//                 // Use fastga encoding and calculate sum of differences
+//                 let query_len = fields[1].parse().unwrap_or_else(|_| {
+//                     error!("Invalid query_len in PAF line");
+//                     std::process::exit(1);
+//                 });
+//                 let query_start: usize = fields[2].parse().unwrap_or_else(|_| {
+//                     error!("Invalid query_start in PAF line");
+//                     std::process::exit(1);
+//                 });
+//                 let query_end: usize = fields[3].parse().unwrap_or_else(|_| {
+//                     error!("Invalid query_end in PAF line");
+//                     std::process::exit(1);
+//                 });
+//                 let target_len: usize = fields[6].parse().unwrap_or_else(|_| {
+//                     error!("Invalid target_length in PAF line");
+//                     std::process::exit(1);
+//                 });
+//                 let target_start: usize = fields[7].parse().unwrap_or_else(|_| {
+//                     error!("Invalid target_start in PAF line");
+//                     std::process::exit(1);
+//                 });
+//                 let target_end: usize = fields[8].parse().unwrap_or_else(|_| {
+//                     error!("Invalid target_end in PAF line");
+//                     std::process::exit(1);
+//                 });
+//                 let complement = fields[4] == "-";
+//                 let tp = cigar_to_tracepoints_fastga(cigar, max_diff, query_start, query_end, query_len, target_start, target_end, target_len, complement);
+
+//                 // Calculate sum of differences (first value in each tracepoint pair)
+//                 let sum_of_differences: usize = tp.iter().map(|(diff, _)| diff).sum();
+
+//                 (format_tracepoints(&tp), Some(sum_of_differences))
+//             }
+//             TracepointType::Standard => {
+//                 // Use standard tracepoints
+//                 let tp = cigar_to_tracepoints(cigar, max_diff);
+//                 (format_tracepoints(&tp), None)
+//             }
+//         };
+
+//         // Build the new line
+//         let mut new_fields: Vec<String> = Vec::new();
+
+//         for field in fields.iter() {
+//             if field.starts_with("cg:Z:") {
+//                 // Add identity stats before tracepoints (replacing CIGAR position)
+//                 new_fields.push(format!("gi:f:{:.12}", gap_compressed_identity));
+//                 new_fields.push(format!("bi:f:{:.12}", block_identity));
+
+//                 // Replace CIGAR with df fields (if using fastga) followed by tracepoints
+//                 if let Some(new_df) = df_value {
+//                     if let Some(old_df) = existing_df {
+//                         new_fields.push(format!("dfold:i:{}", old_df));
+//                     }
+//                     new_fields.push(format!("df:i:{}", new_df));
+//                 }
+
+//                 // Add alignment score field
+//                 new_fields.push(format!("sc:i:{}", alignment_score));
+
+//                 new_fields.push(format!("tp:Z:{}", tracepoints_str));
+//             } else if field.starts_with("df:i:") || field.starts_with("gi:f:") || field.starts_with("bi:f:") || field.starts_with("sc:i:") {
+//                 // Skip existing df, gi, bi, and sc fields as we've already handled them
+//                 continue;
+//             } else {
+//                 new_fields.push(field.to_string());
+//             }
+//         }
+        
+//         println!("{}", new_fields.join("\t"));
+//     });
+// }
+
 fn process_compress_chunk(lines: &[String], tp_type: &TracepointType, max_diff: usize) {
     lines.par_iter().for_each(|line| {
         let fields: Vec<&str> = line.split('\t').collect();
@@ -1088,88 +1204,227 @@ fn process_compress_chunk(lines: &[String], tp_type: &TracepointType, max_diff: 
             .map(|&s| s[5..].parse::<usize>().ok())
             .flatten();
 
-        // Convert CIGAR based on tracepoint type
-        let (tracepoints_str, df_value) = match tp_type {
-            TracepointType::Mixed => {
-                let tp = cigar_to_mixed_tracepoints(cigar, max_diff);
-                (format_mixed_tracepoints(&tp), None)
-            }
-            TracepointType::Variable => {
-                let tp = cigar_to_variable_tracepoints(cigar, max_diff);
-                (format_variable_tracepoints(&tp), None)
-            }
-            TracepointType::Fastga => {
-                // Use fastga encoding and calculate sum of differences
-                let query_len = fields[1].parse().unwrap_or_else(|_| {
-                    error!("Invalid query_len in PAF line");
-                    std::process::exit(1);
-                });
-                let query_start: usize = fields[2].parse().unwrap_or_else(|_| {
-                    error!("Invalid query_start in PAF line");
-                    std::process::exit(1);
-                });
-                let query_end: usize = fields[3].parse().unwrap_or_else(|_| {
-                    error!("Invalid query_end in PAF line");
-                    std::process::exit(1);
-                });
-                let target_len: usize = fields[6].parse().unwrap_or_else(|_| {
-                    error!("Invalid target_length in PAF line");
-                    std::process::exit(1);
-                });
-                let target_start: usize = fields[7].parse().unwrap_or_else(|_| {
-                    error!("Invalid target_start in PAF line");
-                    std::process::exit(1);
-                });
-                let target_end: usize = fields[8].parse().unwrap_or_else(|_| {
-                    error!("Invalid target_end in PAF line");
-                    std::process::exit(1);
-                });
-                let complement = fields[4] == "-";
-                let tp = cigar_to_tracepoints_fastga(cigar, max_diff, query_start, query_end, query_len, target_start, target_end, target_len, complement);
+        // Handle FastGA tracepoints with potential overflow splitting
+        if matches!(tp_type, TracepointType::Fastga) {
+            process_fastga_with_overflow(
+                &fields,
+                cigar,
+                max_diff,
+                gap_compressed_identity,
+                block_identity,
+                alignment_score,
+                existing_df,
+                cg_field,
+            );
+        } else {
+            // Handle other tracepoint types (no overflow splitting needed)
+            process_single_record(
+                &fields,
+                cigar,
+                tp_type,
+                max_diff,
+                gap_compressed_identity,
+                block_identity,
+                alignment_score,
+                existing_df,
+                cg_field,
+            );
+        }
+    });
+}
 
-                // Calculate sum of differences (first value in each tracepoint pair)
-                let sum_of_differences: usize = tp.iter().map(|(diff, _)| diff).sum();
+fn process_fastga_with_overflow(
+    fields: &[&str],
+    cigar: &str,
+    max_diff: usize,
+    gap_compressed_identity: f64,
+    block_identity: f64,
+    alignment_score: i32,
+    existing_df: Option<usize>,
+    cg_field: &str,
+) {
+    // Parse coordinates
+    let query_len = fields[1].parse().unwrap_or_else(|_| {
+        error!("Invalid query_len in PAF line");
+        std::process::exit(1);
+    });
+    let query_start: usize = fields[2].parse().unwrap_or_else(|_| {
+        error!("Invalid query_start in PAF line");
+        std::process::exit(1);
+    });
+    let query_end: usize = fields[3].parse().unwrap_or_else(|_| {
+        error!("Invalid query_end in PAF line");
+        std::process::exit(1);
+    });
+    let target_len: usize = fields[6].parse().unwrap_or_else(|_| {
+        error!("Invalid target_length in PAF line");
+        std::process::exit(1);
+    });
+    let target_start: usize = fields[7].parse().unwrap_or_else(|_| {
+        error!("Invalid target_start in PAF line");
+        std::process::exit(1);
+    });
+    let target_end: usize = fields[8].parse().unwrap_or_else(|_| {
+        error!("Invalid target_end in PAF line");
+        std::process::exit(1);
+    });
+    let complement = fields[4] == "-";
 
-                (format_tracepoints(&tp), Some(sum_of_differences))
-            }
-            TracepointType::Standard => {
-                // Use standard tracepoints
-                let tp = cigar_to_tracepoints(cigar, max_diff);
-                (format_tracepoints(&tp), None)
-            }
-        };
+    // Process with overflow handling
+    let segments = cigar_to_tracepoints_fastga(
+        cigar, 
+        max_diff, 
+        query_start, 
+        query_end, 
+        query_len, 
+        target_start, 
+        target_end, 
+        target_len, 
+        complement
+    );
 
-        // Build the new line
+    // Output each segment as a separate PAF record
+    for (segment_idx, (tracepoints, (seg_query_start, seg_query_end, seg_target_start, seg_target_end))) in segments.iter().enumerate() {
+        // Calculate segment-specific stats
+        let sum_of_differences: usize = tracepoints.iter().map(|(diff, _)| diff).sum();
+        let tracepoints_str = format_tracepoints(tracepoints);
+        
+        // Create modified fields for this segment
         let mut new_fields: Vec<String> = Vec::new();
-
-        for field in fields.iter() {
-            if field.starts_with("cg:Z:") {
-                // Add identity stats before tracepoints (replacing CIGAR position)
-                new_fields.push(format!("gi:f:{:.12}", gap_compressed_identity));
-                new_fields.push(format!("bi:f:{:.12}", block_identity));
-
-                // Replace CIGAR with df fields (if using fastga) followed by tracepoints
-                if let Some(new_df) = df_value {
-                    if let Some(old_df) = existing_df {
-                        new_fields.push(format!("dfold:i:{}", old_df));
+        
+        for (i, field) in fields.iter().enumerate() {
+            match i {
+                2 => new_fields.push(seg_query_start.to_string()), // query_start
+                3 => new_fields.push(seg_query_end.to_string()),   // query_end
+                7 => {
+                    // Handle target coordinates based on strand
+                    if complement {
+                        // For reverse strand, transform back to PAF coordinates
+                        new_fields.push((target_len - seg_target_end).to_string());
+                    } else {
+                        new_fields.push(seg_target_start.to_string());
                     }
-                    new_fields.push(format!("df:i:{}", new_df));
                 }
+                8 => {
+                    // Handle target coordinates based on strand
+                    if complement {
+                        // For reverse strand, transform back to PAF coordinates
+                        new_fields.push((target_len - seg_target_start).to_string());
+                    } else {
+                        new_fields.push(seg_target_end.to_string());
+                    }
+                }
+                9 => {
+                    // Update residue_matches for this segment
+                    let alignment_length = seg_query_end - seg_query_start;
+                    let matches = alignment_length.saturating_sub(sum_of_differences);
+                    new_fields.push(matches.to_string());
+                }
+                10 => {
+                    // Update alignment_block_length for this segment
+                    let alignment_length = seg_query_end - seg_query_start;
+                    new_fields.push(alignment_length.to_string());
+                }
+                _ => {
+                    if field.starts_with("cg:Z:") {
+                        // Add identity stats before tracepoints
+                        new_fields.push(format!("gi:f:{:.12}", gap_compressed_identity));
+                        new_fields.push(format!("bi:f:{:.12}", block_identity));
 
-                // Add alignment score field
-                new_fields.push(format!("sc:i:{}", alignment_score));
+                        // Add df fields
+                        if let Some(old_df) = existing_df {
+                            new_fields.push(format!("dfold:i:{}", old_df));
+                        }
+                        new_fields.push(format!("df:i:{}", sum_of_differences));
 
-                new_fields.push(format!("tp:Z:{}", tracepoints_str));
-            } else if field.starts_with("df:i:") || field.starts_with("gi:f:") || field.starts_with("bi:f:") || field.starts_with("sc:i:") {
-                // Skip existing df, gi, bi, and sc fields as we've already handled them
-                continue;
-            } else {
-                new_fields.push(field.to_string());
+                        // Add alignment score
+                        new_fields.push(format!("sc:i:{}", alignment_score));
+
+                        // Add tracepoints
+                        new_fields.push(format!("tp:Z:{}", tracepoints_str));
+                    } else if field.starts_with("df:i:") || field.starts_with("gi:f:") || 
+                              field.starts_with("bi:f:") || field.starts_with("sc:i:") {
+                        // Skip existing fields as we handle them above
+                        continue;
+                    } else {
+                        new_fields.push(field.to_string());
+                    }
+                }
             }
         }
-        
+
+        // Add segment marker if this record was split
+        if segments.len() > 1 {
+            new_fields.push(format!("sg:i:{}", segment_idx));
+        }
+
         println!("{}", new_fields.join("\t"));
-    });
+    }
+}
+
+fn process_single_record(
+    fields: &[&str],
+    cigar: &str,
+    tp_type: &TracepointType,
+    max_diff: usize,
+    gap_compressed_identity: f64,
+    block_identity: f64,
+    alignment_score: i32,
+    existing_df: Option<usize>,
+    cg_field: &str,
+) {
+    // Convert CIGAR based on tracepoint type
+    let (tracepoints_str, df_value) = match tp_type {
+        TracepointType::Mixed => {
+            let tp = cigar_to_mixed_tracepoints(cigar, max_diff);
+            (format_mixed_tracepoints(&tp), None::<usize>)
+        }
+        TracepointType::Variable => {
+            let tp = cigar_to_variable_tracepoints(cigar, max_diff);
+            (format_variable_tracepoints(&tp), None)
+        }
+        TracepointType::Standard => {
+            let tp = cigar_to_tracepoints(cigar, max_diff);
+            (format_tracepoints(&tp), None)
+        }
+        TracepointType::Fastga => {
+            // This should not happen as FastGA is handled separately
+            unreachable!("FastGA should be handled by process_fastga_with_overflow")
+        }
+    };
+
+    // Build the new line
+    let mut new_fields: Vec<String> = Vec::new();
+
+    for field in fields.iter() {
+        if field.starts_with("cg:Z:") {
+            // Add identity stats before tracepoints
+            new_fields.push(format!("gi:f:{:.12}", gap_compressed_identity));
+            new_fields.push(format!("bi:f:{:.12}", block_identity));
+
+            // Add df field if needed
+            if let Some(new_df) = df_value {
+                if let Some(old_df) = existing_df {
+                    new_fields.push(format!("dfold:i:{}", old_df));
+                }
+                new_fields.push(format!("df:i:{}", new_df));
+            }
+
+            // Add alignment score
+            new_fields.push(format!("sc:i:{}", alignment_score));
+
+            // Add tracepoints
+            new_fields.push(format!("tp:Z:{}", tracepoints_str));
+        } else if field.starts_with("df:i:") || field.starts_with("gi:f:") || 
+                  field.starts_with("bi:f:") || field.starts_with("sc:i:") {
+            // Skip existing fields as we handle them above
+            continue;
+        } else {
+            new_fields.push(field.to_string());
+        }
+    }
+    
+    println!("{}", new_fields.join("\t"));
 }
 
 /// Process a chunk of lines in parallel for decompression
