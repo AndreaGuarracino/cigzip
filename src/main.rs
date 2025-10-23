@@ -7,15 +7,15 @@ use indicatif::ProgressStyle;
 #[cfg(debug_assertions)]
 use lib_tracepoints::{align_sequences_wfa, cigar_ops_to_cigar_string};
 use lib_tracepoints::{
-    cigar_to_mixed_tracepoints, cigar_to_tracepoints, cigar_to_variable_tracepoints,
+    cigar_to_mixed_tracepoints, cigar_to_tracepoints, cigar_to_variable_tracepoints, cigar_to_tracepoints_fastga,
     cigar_to_tracepoints_raw, cigar_to_variable_tracepoints_raw,
     cigar_to_tracepoints_diagonal, cigar_to_mixed_tracepoints_diagonal, cigar_to_variable_tracepoints_diagonal,
-    mixed_tracepoints_to_cigar, tracepoints_to_cigar, variable_tracepoints_to_cigar,
+    mixed_tracepoints_to_cigar, tracepoints_to_cigar, variable_tracepoints_to_cigar, tracepoints_to_cigar_fastga,
     DistanceMode, MixedRepresentation,
 };
 #[cfg(debug_assertions)]
 use lib_wfa2::affine_wavefront::AffineWavefronts;
-use log::{error, info};
+use log::{error, info, debug};
 use rayon::prelude::*;
 use rust_htslib::faidx::Reader as FastaReader;
 use std::fs::File;
@@ -31,6 +31,8 @@ enum TracepointType {
     Mixed,
     /// Variable tracepoints representation
     Variable,
+    /// FastGA tracepoints representation
+    Fastga,
 }
 
 impl fmt::Display for TracepointType {
@@ -39,6 +41,7 @@ impl fmt::Display for TracepointType {
             TracepointType::Standard => write!(f, "standard"),
             TracepointType::Mixed => write!(f, "mixed"),
             TracepointType::Variable => write!(f, "variable"),
+            TracepointType::Fastga => write!(f, "fastga"),
         }
     }
 }
@@ -67,24 +70,20 @@ enum Args {
         #[clap(flatten)]
         common: CommonOpts,
 
-        /// Use mixed representation (preserves S/H/P/N CIGAR operations)
-        #[arg(short = 'm', long = "mixed", default_value_t = false)]
-        mixed: bool,
+        /// Tracepoint type
+        #[arg(long = "type", default_value_t = TracepointType::Standard)]
+        tp_type: TracepointType,
 
-        /// Use variable tracepoints representation
-        #[arg(long = "variable", default_value_t = false)]
-        variable: bool,
-
-        /// Max-diff value for tracepoints
-        #[arg(long, default_value = "32")]
-        max_diff: usize,
+        /// Max-diff value for tracepoints (default: 32; 100 if type is fastga)
+        #[arg(long)]
+        max_diff: Option<usize>,
     },
     /// Decompression of alignments
     Decompress {
         #[clap(flatten)]
         common: CommonOpts,
 
-        /// Tracepoint type: standard, mixed, or variable
+        /// Tracepoint type
         #[arg(long = "type", default_value_t = TracepointType::Standard)]
         tp_type: TracepointType,
 
@@ -96,9 +95,13 @@ enum Args {
         #[arg(short = 't', long = "target-fasta")]
         target_fasta: String,
 
-        /// Gap penalties in the format mismatch,gap_open1,gap_ext1,gap_open2,gap_ext2
-        #[arg(long, default_value = "5,8,2,24,1")]
-        penalties: String,
+        /// Gap penalties in the format mismatch,gap_open1,gap_ext1,gap_open2,gap_ext2 (only used without fastga type, default: 5,8,2,24,1)
+        #[arg(long)]
+        penalties: Option<String>,
+
+        /// Trace spacing for fastga (only used with fastga type, default: 100)
+        #[arg(long)]
+        trace_spacing: Option<usize>,
     },
     /// Run debugging mode (only available in debug builds)
     #[cfg(debug_assertions)]
@@ -140,19 +143,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     match args {
         Args::Compress {
             common,
-            mixed,
-            variable,
+            tp_type,
             max_diff,
         } => {
             setup_logger(common.verbose);
-            let tracepoint_type = if mixed {
-                "mixed "
-            } else if variable {
-                "variable "
-            } else {
-                ""
-            };
-            info!("Converting CIGAR to {}tracepoints", tracepoint_type);
+
+            // Determine max_diff: use provided value, or default to 100 if fastga, else 32
+            let is_fastga = matches!(tp_type, TracepointType::Fastga);
+            let max_diff = max_diff.unwrap_or(if is_fastga { 100 } else { 32 });
+
+            info!("Converting CIGAR to {} tracepoints ({}={})", tp_type,  if is_fastga {"trace_spacing"} else {"max_diff"}, max_diff);
 
             // Set the thread pool size
             rayon::ThreadPoolBuilder::new()
@@ -176,7 +176,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
                         if lines.len() >= chunk_size {
                             // Process current chunk in parallel
-                            process_compress_chunk(&lines, mixed, variable, max_diff);
+                            process_compress_chunk(&lines, &tp_type, max_diff);
                             lines.clear();
                         }
                     }
@@ -186,7 +186,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
             // Process remaining lines
             if !lines.is_empty() {
-                process_compress_chunk(&lines, mixed, variable, max_diff);
+                process_compress_chunk(&lines, &tp_type, max_diff);
             }
         }
         Args::Decompress {
@@ -195,17 +195,42 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             query_fasta,
             target_fasta,
             penalties,
+            trace_spacing,
         } => {
             setup_logger(common.verbose);
-            info!("Converting tracepoints to CIGAR");
+            info!("Converting {} tracepoints to CIGAR", tp_type);
 
             // Set the thread pool size
             rayon::ThreadPoolBuilder::new()
                 .num_threads(common.threads)
                 .build_global()?;
 
+            // Determine if we're using fastga based on tp_type
+            let is_fastga = matches!(tp_type, TracepointType::Fastga);
+
+            // Validate and apply conditional defaults
+            let trace_spacing = if is_fastga {
+                trace_spacing.unwrap_or(100)
+            } else {
+                if trace_spacing.is_some() {
+                    error!("--trace-spacing should only be used with --type fastga");
+                    std::process::exit(1);
+                }
+                0 // Not used when not fastga
+            };
+
+            let penalties_str = if is_fastga {
+                if penalties.is_some() {
+                    error!("--penalties should only be used without --type fastga");
+                    std::process::exit(1);
+                }
+                "5,8,2,24,1".to_string()
+            } else {
+                penalties.unwrap_or_else(|| "5,8,2,24,1".to_string())
+            };
+
             // Parse penalties
-            let (mismatch, gap_open1, gap_ext1, gap_open2, gap_ext2) = parse_penalties(&penalties)?;
+            let (mismatch, gap_open1, gap_ext1, gap_open2, gap_ext2) = parse_penalties(&penalties_str)?;
 
             // Open the PAF file (or use stdin if "-" is provided).
             let paf_reader = get_paf_reader(&common.paf)?;
@@ -234,6 +259,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 gap_ext1,
                                 gap_open2,
                                 gap_ext2,
+                                is_fastga,
+                                trace_spacing,
                             );
                             lines.clear();
                         }
@@ -254,6 +281,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     gap_ext1,
                     gap_open2,
                     gap_ext2,
+                    is_fastga,
+                    trace_spacing,
                 );
             }
         }
@@ -470,6 +499,86 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
+/// Calculate alignment score based on edit distance from a CIGAR string
+/// Alignment score = -(mismatches + inserted_bp + deleted_bp)
+fn calculate_alignment_score_edit_distance(cigar: &str) -> i32 {
+    let mut mismatches = 0;
+    let mut inserted_bp = 0;
+    let mut deleted_bp = 0;
+
+    let mut num_buffer = String::new();
+
+    for c in cigar.chars() {
+        if c.is_ascii_digit() {
+            num_buffer.push(c);
+        } else {
+            let len = num_buffer.parse::<usize>().unwrap_or(0);
+            num_buffer.clear();
+
+            match c {
+                'X' => mismatches += len,
+                'I' => inserted_bp += len,
+                'D' => deleted_bp += len,
+                _ => {}
+            }
+        }
+    }
+
+    let edit_distance = mismatches + inserted_bp + deleted_bp;
+    -(edit_distance as i32)
+}
+
+/// Calculate gap-compressed identity and block identity from a CIGAR string
+fn calculate_identity_stats(cigar: &str) -> (f64, f64) {
+    let mut matches = 0;
+    let mut mismatches = 0;
+    let mut insertions = 0;
+    let mut inserted_bp = 0;
+    let mut deletions = 0;
+    let mut deleted_bp = 0;
+
+    let mut num_buffer = String::new();
+
+    for c in cigar.chars() {
+        if c.is_ascii_digit() {
+            num_buffer.push(c);
+        } else {
+            let len = num_buffer.parse::<usize>().unwrap_or(0);
+            num_buffer.clear();
+
+            match c {
+                'M' | '=' => matches += len,
+                'X' => mismatches += len,
+                'I' => {
+                    insertions += 1;
+                    inserted_bp += len;
+                }
+                'D' => {
+                    deletions += 1;
+                    deleted_bp += len;
+                }
+                'S' | 'H' | 'P' | 'N' => {}
+                _ => {}
+            }
+        }
+    }
+
+    let gap_compressed_identity = if matches + mismatches + insertions + deletions > 0 {
+        (matches as f64) / (matches + mismatches + insertions + deletions) as f64
+    } else {
+        0.0
+    };
+
+    let edit_distance = mismatches + inserted_bp + deleted_bp;
+    let block_identity = if matches + edit_distance > 0 {
+        (matches as f64) / (matches + edit_distance) as f64
+    } else {
+        0.0
+    };
+
+    (gap_compressed_identity, block_identity)
+}
+
 /// Process a chunk of lines in parallel for debugging
 #[cfg(debug_assertions)]
 fn process_debug_chunk(
@@ -657,11 +766,7 @@ fn process_debug_chunk(
             &target_seq,
             0,
             0,
-            (mismatch,
-            gap_open1,
-            gap_ext1,
-            gap_open2,
-            gap_ext2),
+            &distance_mode,
         );
         let cigar_from_variable_tracepoints_raw = variable_tracepoints_to_cigar(
             &variable_tracepoints_raw,
@@ -669,13 +774,9 @@ fn process_debug_chunk(
             &target_seq,
             0,
             0,
-            (mismatch,
-            gap_open1,
-            gap_ext1,
-            gap_open2,
-            gap_ext2),
+            &distance_mode,
         );
-        
+
         // Reconstruct CIGAR from diagonal tracepoints
         let cigar_from_tracepoints_diagonal = lib_tracepoints::tracepoints_to_cigar_diagonal(
             &tracepoints_diagonal,
@@ -683,11 +784,7 @@ fn process_debug_chunk(
             &target_seq,
             0,
             0,
-            (mismatch,
-            gap_open1,
-            gap_ext1,
-            gap_open2,
-            gap_ext2),
+            &distance_mode,
         );
         let cigar_from_mixed_tracepoints_diagonal = lib_tracepoints::mixed_tracepoints_to_cigar_diagonal(
             &mixed_tracepoints_diagonal,
@@ -695,11 +792,7 @@ fn process_debug_chunk(
             &target_seq,
             0,
             0,
-            (mismatch,
-            gap_open1,
-            gap_ext1,
-            gap_open2,
-            gap_ext2),
+            &distance_mode,
         );
         let cigar_from_variable_tracepoints_diagonal = lib_tracepoints::variable_tracepoints_to_cigar_diagonal(
             &variable_tracepoints_diagonal,
@@ -707,11 +800,7 @@ fn process_debug_chunk(
             &target_seq,
             0,
             0,
-            (mismatch,
-            gap_open1,
-            gap_ext1,
-            gap_open2,
-            gap_ext2),
+            &distance_mode,
         );
 
         let (matches, mismatches, insertions, inserted_bp, deletions, deleted_bp, paf_gap_compressed_id, paf_block_id) = calculate_cigar_stats(&paf_cigar);
@@ -967,7 +1056,7 @@ fn get_paf_reader(paf: &str) -> io::Result<Box<dyn BufRead>> {
 }
 
 /// Process a chunk of lines in parallel for compression
-fn process_compress_chunk(lines: &[String], mixed: bool, variable: bool, max_diff: usize) {
+fn process_compress_chunk(lines: &[String], tp_type: &TracepointType, max_diff: usize) {
     lines.par_iter().for_each(|line| {
         let fields: Vec<&str> = line.split('\t').collect();
         if fields.len() < 12 {
@@ -985,26 +1074,101 @@ fn process_compress_chunk(lines: &[String], mixed: bool, variable: bool, max_dif
             );
             std::process::exit(1);
         };
-        let cigar = &cg_field[5..]; // Direct slice instead of strip_prefix("cg:Z:")
+        let cigar = &cg_field[5..];
 
-        // Convert CIGAR based on options and add type prefix
-        let tracepoints_str = if mixed {
-            // Use mixed representation
-            let tp = cigar_to_mixed_tracepoints(cigar, max_diff);
-            format_mixed_tracepoints(&tp)
-        } else if variable {
-            // Use variable tracepoints (placeholder implementation)
-            let tp = cigar_to_variable_tracepoints(cigar, max_diff);
-            format_variable_tracepoints(&tp)
-        } else {
-            // Use standard tracepoints
-            let tp = cigar_to_tracepoints(cigar, max_diff);
-            format_tracepoints(&tp)
+        // Calculate identity stats from the CIGAR
+        let (gap_compressed_identity, block_identity) = calculate_identity_stats(cigar);
+
+        // Calculate alignment score based on edit distance
+        let alignment_score = calculate_alignment_score_edit_distance(cigar);
+
+        // Check for existing df:i: field
+        let existing_df = fields.iter()
+            .find(|&&s| s.starts_with("df:i:"))
+            .map(|&s| s[5..].parse::<usize>().ok())
+            .flatten();
+
+        // Convert CIGAR based on tracepoint type
+        let (tracepoints_str, df_value) = match tp_type {
+            TracepointType::Mixed => {
+                let tp = cigar_to_mixed_tracepoints(cigar, max_diff);
+                (format_mixed_tracepoints(&tp), None)
+            }
+            TracepointType::Variable => {
+                let tp = cigar_to_variable_tracepoints(cigar, max_diff);
+                (format_variable_tracepoints(&tp), None)
+            }
+            TracepointType::Fastga => {
+                // Use fastga encoding and calculate sum of differences
+                let query_len = fields[1].parse().unwrap_or_else(|_| {
+                    error!("Invalid query_len in PAF line");
+                    std::process::exit(1);
+                });
+                let query_start: usize = fields[2].parse().unwrap_or_else(|_| {
+                    error!("Invalid query_start in PAF line");
+                    std::process::exit(1);
+                });
+                let query_end: usize = fields[3].parse().unwrap_or_else(|_| {
+                    error!("Invalid query_end in PAF line");
+                    std::process::exit(1);
+                });
+                let target_len: usize = fields[6].parse().unwrap_or_else(|_| {
+                    error!("Invalid target_length in PAF line");
+                    std::process::exit(1);
+                });
+                let target_start: usize = fields[7].parse().unwrap_or_else(|_| {
+                    error!("Invalid target_start in PAF line");
+                    std::process::exit(1);
+                });
+                let target_end: usize = fields[8].parse().unwrap_or_else(|_| {
+                    error!("Invalid target_end in PAF line");
+                    std::process::exit(1);
+                });
+                let complement = fields[4] == "-";
+                let tp = cigar_to_tracepoints_fastga(cigar, max_diff, query_start, query_end, query_len, target_start, target_end, target_len, complement);
+
+                // Calculate sum of differences (first value in each tracepoint pair)
+                let sum_of_differences: usize = tp.iter().map(|(diff, _)| diff).sum();
+
+                (format_tracepoints(&tp), Some(sum_of_differences))
+            }
+            TracepointType::Standard => {
+                // Use standard tracepoints
+                let tp = cigar_to_tracepoints(cigar, max_diff);
+                (format_tracepoints(&tp), None)
+            }
         };
 
-        // Print the result
-        let new_line = line.replace(cg_field, &format!("tp:Z:{}", tracepoints_str));
-        println!("{}", new_line); // It is thread-safe by default
+        // Build the new line
+        let mut new_fields: Vec<String> = Vec::new();
+
+        for field in fields.iter() {
+            if field.starts_with("cg:Z:") {
+                // Add identity stats before tracepoints (replacing CIGAR position)
+                new_fields.push(format!("gi:f:{:.12}", gap_compressed_identity));
+                new_fields.push(format!("bi:f:{:.12}", block_identity));
+
+                // Replace CIGAR with df fields (if using fastga) followed by tracepoints
+                if let Some(new_df) = df_value {
+                    if let Some(old_df) = existing_df {
+                        new_fields.push(format!("dfold:i:{}", old_df));
+                    }
+                    new_fields.push(format!("df:i:{}", new_df));
+                }
+
+                // Add alignment score field
+                new_fields.push(format!("sc:i:{}", alignment_score));
+
+                new_fields.push(format!("tp:Z:{}", tracepoints_str));
+            } else if field.starts_with("df:i:") || field.starts_with("gi:f:") || field.starts_with("bi:f:") || field.starts_with("sc:i:") {
+                // Skip existing df, gi, bi, and sc fields as we've already handled them
+                continue;
+            } else {
+                new_fields.push(field.to_string());
+            }
+        }
+        
+        println!("{}", new_fields.join("\t"));
     });
 }
 
@@ -1019,6 +1183,8 @@ fn process_decompress_chunk(
     gap_ext1: i32,
     gap_open2: i32,
     gap_ext2: i32,
+    fastga: bool,
+    trace_spacing: usize,
 ) {
     lines.par_iter().for_each(|line| {
         let fields: Vec<&str> = line.split('\t').collect();
@@ -1057,7 +1223,13 @@ fn process_decompress_chunk(
         });
         let strand = fields[4];
         let target_name = fields[5];
-        //let target_len: usize = fields[6].parse()?;
+        let target_len: usize = fields[6].parse().unwrap_or_else(|_| {
+            error!(
+                "{}",
+                message_with_truncate_paf_file("Invalid target_length in PAF line", line)
+            );
+            std::process::exit(1);
+        });
         let target_start: usize = fields[7].parse().unwrap_or_else(|_| {
             error!(
                 "{}",
@@ -1084,8 +1256,10 @@ fn process_decompress_chunk(
             std::process::exit(1);
         });
 
-        // Fetch query sequence from query FASTA
-        let query_seq = if strand == "+" {
+        // Fetch query sequence from query FASTA (with FASTGA we always use forward strand for the query)
+        let query_seq = if strand == "+" || fastga {
+            debug!("Fetching query sequence {}:{}-{} on + strand", query_name, query_start, query_end);
+
             match query_fasta_reader.fetch_seq(query_name, query_start, query_end - 1) {
                 Ok(seq) => {
                     let mut seq_vec = seq.to_vec();
@@ -1101,6 +1275,8 @@ fn process_decompress_chunk(
                 }
             }
         } else {
+            debug!("Fetching query sequence {}:{}-{} on - strand", query_name, query_start, query_end);
+
             match query_fasta_reader.fetch_seq(query_name, query_start, query_end - 1) {
                 Ok(seq) => {
                     let mut rc = reverse_complement(&seq.to_vec());
@@ -1116,8 +1292,10 @@ fn process_decompress_chunk(
             }
         };
 
-        // Fetch target sequence from target FASTA
-        let target_seq =
+        // Fetch target sequence from target FASTA (with FASTGA the strand affects the target sequence)
+        let target_seq = if strand == "+" || !fastga {
+            debug!("Fetching target sequence {}:{}-{} on + strand", target_name, target_start, target_end);
+
             match target_fasta_reader.fetch_seq(target_name, target_start, target_end - 1) {
                 Ok(seq) => {
                     let mut seq_vec = seq.to_vec();
@@ -1131,7 +1309,25 @@ fn process_decompress_chunk(
                     error!("Failed to fetch target sequence: {}", e);
                     std::process::exit(1);
                 }
-            };
+            }
+        } else {
+            //let (target_start, target_end) = (target_len - target_end, target_len - target_start);
+            debug!("Fetching target sequence {}:{}-{} on - strand", target_name, target_start, target_end);
+
+            match target_fasta_reader.fetch_seq(target_name, target_start, target_end - 1) {
+                Ok(seq) => {
+                    let mut rc = reverse_complement(&seq.to_vec());
+                    unsafe { libc::free(seq.as_ptr() as *mut std::ffi::c_void) }; // Free up memory (bug https://github.com/rust-bio/rust-htslib/issues/401#issuecomment-1704290171)
+                    rc.iter_mut()
+                        .for_each(|byte| *byte = byte.to_ascii_uppercase());
+                    rc
+                }
+                Err(e) => {
+                    error!("Failed to fetch target sequence: {}", e);
+                    std::process::exit(1);
+                }
+            }
+        };
 
         // Use specified tracepoint type
         let distance_mode = DistanceMode::Affine2p {
@@ -1141,48 +1337,121 @@ fn process_decompress_chunk(
             gap_open2,
             gap_ext2,
         };
-        let cigar = match tp_type {
-            TracepointType::Mixed => {
-                // Mixed representation
-                let mixed_tracepoints = parse_mixed_tracepoints(tracepoints_str);
-                mixed_tracepoints_to_cigar(
-                    &mixed_tracepoints,
-                    &query_seq,
-                    &target_seq,
-                    0,
-                    0,
-                    &distance_mode,
-                )
-            }
-            TracepointType::Variable => {
-                // Variable tracepoints representation
-                let variable_tracepoints = parse_variable_tracepoints(tracepoints_str);
-                variable_tracepoints_to_cigar(
-                    &variable_tracepoints,
-                    &query_seq,
-                    &target_seq,
-                    0,
-                    0,
-                    &distance_mode,
-                )
-            }
-            TracepointType::Standard => {
-                // Standard tracepoints
-                let tracepoints = parse_tracepoints(tracepoints_str);
-                tracepoints_to_cigar(
-                    &tracepoints,
-                    &query_seq,
-                    &target_seq,
-                    0,
-                    0,
-                    &distance_mode,
-                )
+        let cigar = if fastga {
+            // FastGA decoding
+            let tracepoints = parse_tracepoints(tracepoints_str);
+            let query_start: usize = fields[2].parse().unwrap_or_else(|_| {
+                error!(
+                    "{}",
+                    message_with_truncate_paf_file("Invalid query_start in PAF line", line)
+                );
+                std::process::exit(1);
+            });
+            let target_start: usize = fields[7].parse().unwrap_or_else(|_| {
+                error!(
+                    "{}",
+                    message_with_truncate_paf_file("Invalid target_start in PAF line", line)
+                );
+                std::process::exit(1);
+            });
+            tracepoints_to_cigar_fastga(
+                &tracepoints,
+                trace_spacing,
+                &query_seq,
+                &target_seq,
+                query_start,
+                if  strand == "+" { target_len - target_end } else { target_start },
+                strand == "-",
+            )
+        } else {
+            match tp_type {
+                TracepointType::Mixed => {
+                    // Mixed representation
+                    let mixed_tracepoints = parse_mixed_tracepoints(tracepoints_str);
+                    mixed_tracepoints_to_cigar(
+                        &mixed_tracepoints,
+                        &query_seq,
+                        &target_seq,
+                        0,
+                        0,
+                        &distance_mode,
+                    )
+                }
+                TracepointType::Variable => {
+                    // Variable tracepoints representation
+                    let variable_tracepoints = parse_variable_tracepoints(tracepoints_str);
+                    variable_tracepoints_to_cigar(
+                        &variable_tracepoints,
+                        &query_seq,
+                        &target_seq,
+                        0,
+                        0,
+                        &distance_mode,
+                    )
+                }
+                TracepointType::Standard => {
+                    // Standard tracepoints
+                    let tracepoints = parse_tracepoints(tracepoints_str);
+                    tracepoints_to_cigar(
+                        &tracepoints,
+                        &query_seq,
+                        &target_seq,
+                        0,
+                        0,
+                        &distance_mode,
+                    )
+                }
+                TracepointType::Fastga => {
+                    // Should not reach here - fastga is handled above
+                    error!("Fastga should not be handled in non-fastga path");
+                    std::process::exit(1);
+                }
             }
         };
 
-        // Print the original line, replacing the tracepoints tag with the CIGAR string
-        let new_line = line.replace(tp_field, &format!("cg:Z:{}", cigar));
-        println!("{}", new_line);
+        // Calculate identity stats from the reconstructed CIGAR
+        let (gap_compressed_identity, block_identity) = calculate_identity_stats(&cigar);
+
+        // Calculate alignment score based on edit distance
+        let alignment_score = calculate_alignment_score_edit_distance(&cigar);
+
+        // Check for existing gi:f:, bi:f:, and sc:i: fields
+        let existing_gi = fields.iter().find(|&&s| s.starts_with("gi:f:"));
+        let existing_bi = fields.iter().find(|&&s| s.starts_with("bi:f:"));
+        let existing_sc = fields.iter().find(|&&s| s.starts_with("sc:i:"));
+
+        // Build the new line
+        let mut new_fields: Vec<String> = Vec::new();
+
+        for field in fields.iter() {
+            if field.starts_with("tp:Z:") {
+                // If there were existing gi/bi/sc fields, rename them with 'old' prefix
+                if let Some(old_gi) = existing_gi {
+                    new_fields.push(format!("giold:f:{}", &old_gi[5..]));
+                }
+                if let Some(old_bi) = existing_bi {
+                    new_fields.push(format!("biold:f:{}", &old_bi[5..]));
+                }
+                if let Some(old_sc) = existing_sc {
+                    new_fields.push(format!("scold:i:{}", &old_sc[5..]));
+                }
+
+                // Add new identity stats and alignment score before the CIGAR
+                new_fields.push(format!("gi:f:{:.12}", gap_compressed_identity));
+                new_fields.push(format!("bi:f:{:.12}", block_identity));
+                new_fields.push(format!("sc:i:{}", alignment_score));
+
+                // Replace tracepoints with CIGAR
+                new_fields.push(format!("cg:Z:{}", cigar));
+            } else if field.starts_with("gi:f:") || field.starts_with("bi:f:") || field.starts_with("sc:i:") {
+                // Skip existing gi, bi, and sc fields - we've already handled them
+                continue;
+            } else {
+                new_fields.push(field.to_string());
+            }
+        }
+        
+        println!("{}", new_fields.join("\t"));
     });
 }
 
