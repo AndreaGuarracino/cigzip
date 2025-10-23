@@ -7,19 +7,19 @@ use indicatif::ProgressStyle;
 #[cfg(debug_assertions)]
 use lib_tracepoints::{align_sequences_wfa, cigar_ops_to_cigar_string};
 use lib_tracepoints::{
-    cigar_to_mixed_tracepoints, cigar_to_tracepoints, cigar_to_variable_tracepoints, cigar_to_tracepoints_fastga,
-    cigar_to_tracepoints_raw, cigar_to_variable_tracepoints_raw,
-    cigar_to_tracepoints_diagonal, cigar_to_mixed_tracepoints_diagonal, cigar_to_variable_tracepoints_diagonal,
-    mixed_tracepoints_to_cigar, tracepoints_to_cigar, variable_tracepoints_to_cigar, tracepoints_to_cigar_fastga,
-    DistanceMode, MixedRepresentation,
+    cigar_to_mixed_tracepoints, cigar_to_mixed_tracepoints_diagonal, cigar_to_tracepoints,
+    cigar_to_tracepoints_diagonal, cigar_to_tracepoints_fastga, cigar_to_tracepoints_raw,
+    cigar_to_variable_tracepoints, cigar_to_variable_tracepoints_diagonal,
+    cigar_to_variable_tracepoints_raw, mixed_tracepoints_to_cigar, tracepoints_to_cigar,
+    tracepoints_to_cigar_fastga, variable_tracepoints_to_cigar, DistanceMode, MixedRepresentation,
 };
 #[cfg(debug_assertions)]
 use lib_wfa2::affine_wavefront::AffineWavefronts;
-use log::{error, info, debug};
+use log::{debug, error, info};
 use rayon::prelude::*;
 use rust_htslib::faidx::Reader as FastaReader;
-use std::fs::File;
 use std::fmt;
+use std::fs::File;
 use std::io::{self, BufRead, BufReader};
 
 /// Tracepoint representation type
@@ -152,7 +152,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             let is_fastga = matches!(tp_type, TracepointType::Fastga);
             let max_diff = max_diff.unwrap_or(if is_fastga { 100 } else { 32 });
 
-            info!("Converting CIGAR to {} tracepoints ({}={})", tp_type,  if is_fastga {"trace_spacing"} else {"max_diff"}, max_diff);
+            info!(
+                "Converting CIGAR to {} tracepoints ({}={})",
+                tp_type,
+                if is_fastga {
+                    "trace_spacing"
+                } else {
+                    "max_diff"
+                },
+                max_diff
+            );
 
             // Set the thread pool size
             rayon::ThreadPoolBuilder::new()
@@ -230,7 +239,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             };
 
             // Parse penalties
-            let (mismatch, gap_open1, gap_ext1, gap_open2, gap_ext2) = parse_penalties(&penalties_str)?;
+            let (mismatch, gap_open1, gap_ext1, gap_open2, gap_ext2) =
+                parse_penalties(&penalties_str)?;
 
             // Open the PAF file (or use stdin if "-" is provided).
             let paf_reader = get_paf_reader(&common.paf)?;
@@ -1083,7 +1093,8 @@ fn process_compress_chunk(lines: &[String], tp_type: &TracepointType, max_diff: 
         let alignment_score = calculate_alignment_score_edit_distance(cigar);
 
         // Check for existing df:i: field
-        let existing_df = fields.iter()
+        let existing_df = fields
+            .iter()
             .find(|&&s| s.starts_with("df:i:"))
             .map(|&s| s[5..].parse::<usize>().ok())
             .flatten();
@@ -1156,26 +1167,30 @@ fn process_fastga_with_overflow(
 
     // Process with overflow handling
     let segments = cigar_to_tracepoints_fastga(
-        cigar, 
-        max_diff, 
-        query_start, 
-        query_end, 
-        query_len, 
-        target_start, 
-        target_end, 
-        target_len, 
-        complement
+        cigar,
+        max_diff,
+        query_start,
+        query_end,
+        query_len,
+        target_start,
+        target_end,
+        target_len,
+        complement,
     );
 
     // Output each segment as a separate PAF record
-    for (segment_idx, (tracepoints, (seg_query_start, seg_query_end, seg_target_start, seg_target_end))) in segments.iter().enumerate() {
+    for (
+        segment_idx,
+        (tracepoints, (seg_query_start, seg_query_end, seg_target_start, seg_target_end)),
+    ) in segments.iter().enumerate()
+    {
         // Calculate segment-specific stats
         let sum_of_differences: usize = tracepoints.iter().map(|(diff, _)| diff).sum();
         let tracepoints_str = format_tracepoints(tracepoints);
-        
+
         // Create modified fields for this segment
         let mut new_fields: Vec<String> = Vec::new();
-        
+
         for (i, field) in fields.iter().enumerate() {
             match i {
                 2 => new_fields.push(seg_query_start.to_string()), // query_start
@@ -1226,8 +1241,11 @@ fn process_fastga_with_overflow(
 
                         // Add tracepoints
                         new_fields.push(format!("tp:Z:{}", tracepoints_str));
-                    } else if field.starts_with("df:i:") || field.starts_with("gi:f:") || 
-                              field.starts_with("bi:f:") || field.starts_with("sc:i:") {
+                    } else if field.starts_with("df:i:")
+                        || field.starts_with("gi:f:")
+                        || field.starts_with("bi:f:")
+                        || field.starts_with("sc:i:")
+                    {
                         // Skip existing fields as we handle them above
                         continue;
                     } else {
@@ -1299,15 +1317,18 @@ fn process_single_record(
 
             // Add tracepoints
             new_fields.push(format!("tp:Z:{}", tracepoints_str));
-        } else if field.starts_with("df:i:") || field.starts_with("gi:f:") || 
-                  field.starts_with("bi:f:") || field.starts_with("sc:i:") {
+        } else if field.starts_with("df:i:")
+            || field.starts_with("gi:f:")
+            || field.starts_with("bi:f:")
+            || field.starts_with("sc:i:")
+        {
             // Skip existing fields as we handle them above
             continue;
         } else {
             new_fields.push(field.to_string());
         }
     }
-    
+
     println!("{}", new_fields.join("\t"));
 }
 
@@ -1397,7 +1418,10 @@ fn process_decompress_chunk(
 
         // Fetch query sequence from query FASTA (with FASTGA we always use forward strand for the query)
         let query_seq = if strand == "+" || fastga {
-            debug!("Fetching query sequence {}:{}-{} on + strand", query_name, query_start, query_end);
+            debug!(
+                "Fetching query sequence {}:{}-{} on + strand",
+                query_name, query_start, query_end
+            );
 
             match query_fasta_reader.fetch_seq(query_name, query_start, query_end - 1) {
                 Ok(seq) => {
@@ -1414,7 +1438,10 @@ fn process_decompress_chunk(
                 }
             }
         } else {
-            debug!("Fetching query sequence {}:{}-{} on - strand", query_name, query_start, query_end);
+            debug!(
+                "Fetching query sequence {}:{}-{} on - strand",
+                query_name, query_start, query_end
+            );
 
             match query_fasta_reader.fetch_seq(query_name, query_start, query_end - 1) {
                 Ok(seq) => {
@@ -1433,7 +1460,10 @@ fn process_decompress_chunk(
 
         // Fetch target sequence from target FASTA (with FASTGA the strand affects the target sequence)
         let target_seq = if strand == "+" || !fastga {
-            debug!("Fetching target sequence {}:{}-{} on + strand", target_name, target_start, target_end);
+            debug!(
+                "Fetching target sequence {}:{}-{} on + strand",
+                target_name, target_start, target_end
+            );
 
             match target_fasta_reader.fetch_seq(target_name, target_start, target_end - 1) {
                 Ok(seq) => {
@@ -1451,7 +1481,10 @@ fn process_decompress_chunk(
             }
         } else {
             //let (target_start, target_end) = (target_len - target_end, target_len - target_start);
-            debug!("Fetching target sequence {}:{}-{} on - strand", target_name, target_start, target_end);
+            debug!(
+                "Fetching target sequence {}:{}-{} on - strand",
+                target_name, target_start, target_end
+            );
 
             match target_fasta_reader.fetch_seq(target_name, target_start, target_end - 1) {
                 Ok(seq) => {
@@ -1499,7 +1532,11 @@ fn process_decompress_chunk(
                 &query_seq,
                 &target_seq,
                 query_start,
-                if  strand == "+" { target_len - target_end } else { target_start },
+                if strand == "+" {
+                    target_len - target_end
+                } else {
+                    target_start
+                },
                 strand == "-",
             )
         } else {
@@ -1582,14 +1619,17 @@ fn process_decompress_chunk(
 
                 // Replace tracepoints with CIGAR
                 new_fields.push(format!("cg:Z:{}", cigar));
-            } else if field.starts_with("gi:f:") || field.starts_with("bi:f:") || field.starts_with("sc:i:") {
+            } else if field.starts_with("gi:f:")
+                || field.starts_with("bi:f:")
+                || field.starts_with("sc:i:")
+            {
                 // Skip existing gi, bi, and sc fields - we've already handled them
                 continue;
             } else {
                 new_fields.push(field.to_string());
             }
         }
-        
+
         println!("{}", new_fields.join("\t"));
     });
 }
