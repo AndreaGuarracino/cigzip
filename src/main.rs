@@ -10,8 +10,9 @@ use lib_tracepoints::{
     cigar_to_mixed_tracepoints, cigar_to_mixed_tracepoints_diagonal, cigar_to_tracepoints,
     cigar_to_tracepoints_diagonal, cigar_to_tracepoints_fastga, cigar_to_tracepoints_raw,
     cigar_to_variable_tracepoints, cigar_to_variable_tracepoints_diagonal,
-    cigar_to_variable_tracepoints_raw, mixed_tracepoints_to_cigar, tracepoints_to_cigar,
-    tracepoints_to_cigar_fastga, variable_tracepoints_to_cigar, DistanceMode, MixedRepresentation,
+    cigar_to_variable_tracepoints_raw, mixed_tracepoints_to_cigar, mixed_tracepoints_to_cigar_diagonal,
+    tracepoints_to_cigar, tracepoints_to_cigar_diagonal, tracepoints_to_cigar_fastga,
+    variable_tracepoints_to_cigar, variable_tracepoints_to_cigar_diagonal, DistanceMode, MixedRepresentation,
 };
 #[cfg(debug_assertions)]
 use lib_wfa2::affine_wavefront::AffineWavefronts;
@@ -46,6 +47,24 @@ impl fmt::Display for TracepointType {
     }
 }
 
+/// Complexity metric type for segmentation
+#[derive(Debug, Clone, ValueEnum)]
+enum ComplexityMetric {
+    /// Edit distance (count mismatches + insertions + deletions)
+    EditDistance,
+    /// Diagonal distance (distance from the main diagonal)
+    DiagonalDistance,
+}
+
+impl fmt::Display for ComplexityMetric {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            ComplexityMetric::EditDistance => write!(f, "edit-distance"),
+            ComplexityMetric::DiagonalDistance => write!(f, "diagonal-distance"),
+        }
+    }
+}
+
 /// Common options shared between all commands
 #[derive(Parser, Debug)]
 struct CommonOpts {
@@ -74,9 +93,13 @@ enum Args {
         #[arg(long = "type", default_value_t = TracepointType::Standard)]
         tp_type: TracepointType,
 
-        /// Max-diff value for tracepoints (default: 32; 100 if type is fastga)
-        #[arg(long)]
-        max_diff: Option<usize>,
+        /// Complexity metric for tracepoint segmentation
+        #[arg(long = "complexity-metric", default_value_t = ComplexityMetric::EditDistance)]
+        complexity_metric: ComplexityMetric,
+
+        /// Maximum complexity value for tracepoint segmentation (default: 32; 100 if type is fastga)
+        #[arg(long = "max-complexity")]
+        max_complexity: Option<usize>,
     },
     /// Decompression of alignments
     Decompress {
@@ -86,6 +109,10 @@ enum Args {
         /// Tracepoint type
         #[arg(long = "type", default_value_t = TracepointType::Standard)]
         tp_type: TracepointType,
+
+        /// Complexity metric for segmentation (must match what was used during compression)
+        #[arg(long = "complexity-metric", default_value_t = ComplexityMetric::EditDistance)]
+        complexity_metric: ComplexityMetric,
 
         /// FASTA file for query sequences
         #[arg(short = 'q', long = "query-fasta")]
@@ -126,9 +153,9 @@ enum Args {
         #[arg(long, default_value = "5,8,2,24,1")]
         penalties: String,
 
-        /// Max-diff value for tracepoints
-        #[arg(long, default_value = "32")]
-        max_diff: usize,
+        /// Maximum complexity value for tracepoint segmentation
+        #[arg(long = "max-complexity", default_value = "32")]
+        max_complexity: usize,
 
         /// Verbosity level (0 = error, 1 = info, 2 = debug)
         #[arg(short, long, default_value = "0")]
@@ -144,23 +171,32 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         Args::Compress {
             common,
             tp_type,
-            max_diff,
+            max_complexity,
+            complexity_metric,
         } => {
             setup_logger(common.verbose);
 
-            // Determine max_diff: use provided value, or default to 100 if fastga, else 32
+            // Determine max_complexity: use provided value, or default to 100 if fastga, else 32
             let is_fastga = matches!(tp_type, TracepointType::Fastga);
-            let max_diff = max_diff.unwrap_or(if is_fastga { 100 } else { 32 });
+            let max_complexity = max_complexity.unwrap_or(if is_fastga { 100 } else { 32 });
+
+            // Validate that complexity-metric is not used with fastga
+            if is_fastga && matches!(complexity_metric, ComplexityMetric::DiagonalDistance) {
+                error!("--complexity-metric cannot be used with --type fastga");
+                error!("FastGA uses its own segmentation algorithm based on trace spacing");
+                std::process::exit(1);
+            }
 
             info!(
-                "Converting CIGAR to {} tracepoints ({}={})",
+                "Converting CIGAR to {} tracepoints ({}={}, complexity-metric={})",
                 tp_type,
                 if is_fastga {
                     "trace_spacing"
                 } else {
-                    "max_diff"
+                    "max_complexity"
                 },
-                max_diff
+                max_complexity,
+                complexity_metric
             );
 
             // Set the thread pool size
@@ -185,7 +221,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
                         if lines.len() >= chunk_size {
                             // Process current chunk in parallel
-                            process_compress_chunk(&lines, &tp_type, max_diff);
+                            process_compress_chunk(&lines, &tp_type, max_complexity, &complexity_metric);
                             lines.clear();
                         }
                     }
@@ -195,7 +231,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
             // Process remaining lines
             if !lines.is_empty() {
-                process_compress_chunk(&lines, &tp_type, max_diff);
+                process_compress_chunk(&lines, &tp_type, max_complexity, &complexity_metric);
             }
         }
         Args::Decompress {
@@ -205,17 +241,26 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             target_fasta,
             penalties,
             trace_spacing,
+            complexity_metric,
         } => {
             setup_logger(common.verbose);
-            info!("Converting {} tracepoints to CIGAR", tp_type);
+
+            // Determine if we're using fastga based on tp_type
+            let is_fastga = matches!(tp_type, TracepointType::Fastga);
+
+            // Validate that complexity-metric is not used with fastga
+            if is_fastga && matches!(complexity_metric, ComplexityMetric::DiagonalDistance) {
+                error!("--complexity-metric cannot be used with --type fastga");
+                error!("FastGA uses its own segmentation algorithm based on trace spacing");
+                std::process::exit(1);
+            }
+
+            info!("Converting {} tracepoints to CIGAR (complexity-metric={})", tp_type, complexity_metric);
 
             // Set the thread pool size
             rayon::ThreadPoolBuilder::new()
                 .num_threads(common.threads)
                 .build_global()?;
-
-            // Determine if we're using fastga based on tp_type
-            let is_fastga = matches!(tp_type, TracepointType::Fastga);
 
             // Validate and apply conditional defaults
             let trace_spacing = if is_fastga {
@@ -271,6 +316,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 gap_ext2,
                                 is_fastga,
                                 trace_spacing,
+                                &complexity_metric,
                             );
                             lines.clear();
                         }
@@ -293,6 +339,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     gap_ext2,
                     is_fastga,
                     trace_spacing,
+                    &complexity_metric,
                 );
             }
         }
@@ -303,7 +350,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             query_fasta,
             target_fasta,
             penalties,
-            max_diff,
+            max_complexity,
             verbose,
         } => {
             setup_logger(verbose);
@@ -390,7 +437,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                     gap_ext1,
                                     gap_open2,
                                     gap_ext2,
-                                    max_diff,
+                                    max_complexity,
                                 );
 
                                 // Update progress bar
@@ -416,7 +463,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         gap_ext1,
                         gap_open2,
                         gap_ext2,
-                        max_diff,
+                        max_complexity,
                     );
 
                     if let Some(ref pb) = progress_bar {
@@ -455,7 +502,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 );
                 let paf_cigar = cigar_ops_to_cigar_string(&paf_cigar);
 
-                let tracepoints = cigar_to_tracepoints(&paf_cigar, max_diff);
+                let tracepoints = cigar_to_tracepoints(&paf_cigar, max_complexity);
 
                 let distance_mode = DistanceMode::Affine2p {
                     mismatch,
@@ -600,7 +647,7 @@ fn process_debug_chunk(
     gap_ext1: i32,
     gap_open2: i32,
     gap_ext2: i32,
-    max_diff: usize,
+    max_complexity: usize,
 ) {
     lines.par_iter().for_each(|line| {
         let fields: Vec<&str> = line.split('\t').collect();
@@ -713,17 +760,17 @@ fn process_debug_chunk(
         // let paf_cigar = &realn_cigar;
 
         // Convert CIGAR to tracepoints using query (A) and target (B) coordinates.
-        let tracepoints = cigar_to_tracepoints(paf_cigar, max_diff);
-        let variable_tracepoints = cigar_to_variable_tracepoints(paf_cigar, max_diff);
+        let tracepoints = cigar_to_tracepoints(paf_cigar, max_complexity);
+        let variable_tracepoints = cigar_to_variable_tracepoints(paf_cigar, max_complexity);
         
         // Also convert using raw functions
-        let tracepoints_raw = cigar_to_tracepoints_raw(paf_cigar, max_diff);
-        let variable_tracepoints_raw = cigar_to_variable_tracepoints_raw(paf_cigar, max_diff);
+        let tracepoints_raw = cigar_to_tracepoints_raw(paf_cigar, max_complexity);
+        let variable_tracepoints_raw = cigar_to_variable_tracepoints_raw(paf_cigar, max_complexity);
         
         // Convert using diagonal distance functions
-        let tracepoints_diagonal = cigar_to_tracepoints_diagonal(paf_cigar, max_diff);
-        let mixed_tracepoints_diagonal = cigar_to_mixed_tracepoints_diagonal(paf_cigar, max_diff);
-        let variable_tracepoints_diagonal = cigar_to_variable_tracepoints_diagonal(paf_cigar, max_diff);
+        let tracepoints_diagonal = cigar_to_tracepoints_diagonal(paf_cigar, max_complexity);
+        let mixed_tracepoints_diagonal = cigar_to_mixed_tracepoints_diagonal(paf_cigar, max_complexity);
+        let variable_tracepoints_diagonal = cigar_to_variable_tracepoints_diagonal(paf_cigar, max_complexity);
 
         // Compare tracepoints (allowing variable tracepoints to have None for second coordinate)
         if tracepoints
@@ -1066,7 +1113,7 @@ fn get_paf_reader(paf: &str) -> io::Result<Box<dyn BufRead>> {
 }
 
 /// Process a chunk of lines in parallel for compression
-fn process_compress_chunk(lines: &[String], tp_type: &TracepointType, max_diff: usize) {
+fn process_compress_chunk(lines: &[String], tp_type: &TracepointType, max_complexity: usize, complexity_metric: &ComplexityMetric) {
     lines.par_iter().for_each(|line| {
         let fields: Vec<&str> = line.split('\t').collect();
         if fields.len() < 12 {
@@ -1103,12 +1150,12 @@ fn process_compress_chunk(lines: &[String], tp_type: &TracepointType, max_diff: 
             process_fastga_with_overflow(
                 &fields,
                 cigar,
-                max_diff,
+                max_complexity,
                 gap_compressed_identity,
                 block_identity,
                 alignment_score,
                 existing_df,
-                cg_field,
+                complexity_metric,
             );
         } else {
             // Handle other tracepoint types (no overflow splitting needed)
@@ -1116,12 +1163,12 @@ fn process_compress_chunk(lines: &[String], tp_type: &TracepointType, max_diff: 
                 &fields,
                 cigar,
                 tp_type,
-                max_diff,
+                max_complexity,
                 gap_compressed_identity,
                 block_identity,
                 alignment_score,
                 existing_df,
-                cg_field,
+                complexity_metric,
             );
         }
     });
@@ -1130,12 +1177,12 @@ fn process_compress_chunk(lines: &[String], tp_type: &TracepointType, max_diff: 
 fn process_fastga_with_overflow(
     fields: &[&str],
     cigar: &str,
-    max_diff: usize,
+    max_complexity: usize,
     gap_compressed_identity: f64,
     block_identity: f64,
     alignment_score: i32,
     existing_df: Option<usize>,
-    cg_field: &str,
+    _complexity_metric: &ComplexityMetric,
 ) {
     // Parse coordinates
     let query_len = fields[1].parse().unwrap_or_else(|_| {
@@ -1167,7 +1214,7 @@ fn process_fastga_with_overflow(
     // Process with overflow handling
     let segments = cigar_to_tracepoints_fastga(
         cigar,
-        max_diff,
+        max_complexity,
         query_start,
         query_end,
         query_len,
@@ -1267,28 +1314,40 @@ fn process_single_record(
     fields: &[&str],
     cigar: &str,
     tp_type: &TracepointType,
-    max_diff: usize,
+    max_complexity: usize,
     gap_compressed_identity: f64,
     block_identity: f64,
     alignment_score: i32,
     existing_df: Option<usize>,
-    cg_field: &str,
+    complexity_metric: &ComplexityMetric,
 ) {
-    // Convert CIGAR based on tracepoint type
-    let (tracepoints_str, df_value) = match tp_type {
-        TracepointType::Mixed => {
-            let tp = cigar_to_mixed_tracepoints(cigar, max_diff);
+    // Convert CIGAR based on tracepoint type and complexity metric
+    let (tracepoints_str, df_value) = match (tp_type, complexity_metric) {
+        (TracepointType::Mixed, ComplexityMetric::EditDistance) => {
+            let tp = cigar_to_mixed_tracepoints(cigar, max_complexity);
             (format_mixed_tracepoints(&tp), None::<usize>)
         }
-        TracepointType::Variable => {
-            let tp = cigar_to_variable_tracepoints(cigar, max_diff);
+        (TracepointType::Mixed, ComplexityMetric::DiagonalDistance) => {
+            let tp = cigar_to_mixed_tracepoints_diagonal(cigar, max_complexity);
+            (format_mixed_tracepoints(&tp), None::<usize>)
+        }
+        (TracepointType::Variable, ComplexityMetric::EditDistance) => {
+            let tp = cigar_to_variable_tracepoints(cigar, max_complexity);
             (format_variable_tracepoints(&tp), None)
         }
-        TracepointType::Standard => {
-            let tp = cigar_to_tracepoints(cigar, max_diff);
+        (TracepointType::Variable, ComplexityMetric::DiagonalDistance) => {
+            let tp = cigar_to_variable_tracepoints_diagonal(cigar, max_complexity);
+            (format_variable_tracepoints(&tp), None)
+        }
+        (TracepointType::Standard, ComplexityMetric::EditDistance) => {
+            let tp = cigar_to_tracepoints(cigar, max_complexity);
             (format_tracepoints(&tp), None)
         }
-        TracepointType::Fastga => {
+        (TracepointType::Standard, ComplexityMetric::DiagonalDistance) => {
+            let tp = cigar_to_tracepoints_diagonal(cigar, max_complexity);
+            (format_tracepoints(&tp), None)
+        }
+        (TracepointType::Fastga, _) => {
             // This should not happen as FastGA is handled separately
             unreachable!("FastGA should be handled by process_fastga_with_overflow")
         }
@@ -1344,6 +1403,7 @@ fn process_decompress_chunk(
     gap_ext2: i32,
     fastga: bool,
     trace_spacing: usize,
+    complexity_metric: &ComplexityMetric,
 ) {
     lines.par_iter().for_each(|line| {
         let fields: Vec<&str> = line.split('\t').collect();
@@ -1539,9 +1599,9 @@ fn process_decompress_chunk(
                 strand == "-",
             )
         } else {
-            match tp_type {
-                TracepointType::Mixed => {
-                    // Mixed representation
+            match (tp_type, complexity_metric) {
+                (TracepointType::Mixed, ComplexityMetric::EditDistance) => {
+                    // Mixed representation with edit distance
                     let mixed_tracepoints = parse_mixed_tracepoints(tracepoints_str);
                     mixed_tracepoints_to_cigar(
                         &mixed_tracepoints,
@@ -1552,8 +1612,20 @@ fn process_decompress_chunk(
                         &distance_mode,
                     )
                 }
-                TracepointType::Variable => {
-                    // Variable tracepoints representation
+                (TracepointType::Mixed, ComplexityMetric::DiagonalDistance) => {
+                    // Mixed representation with diagonal distance
+                    let mixed_tracepoints = parse_mixed_tracepoints(tracepoints_str);
+                    mixed_tracepoints_to_cigar_diagonal(
+                        &mixed_tracepoints,
+                        &query_seq,
+                        &target_seq,
+                        0,
+                        0,
+                        &distance_mode,
+                    )
+                }
+                (TracepointType::Variable, ComplexityMetric::EditDistance) => {
+                    // Variable tracepoints representation with edit distance
                     let variable_tracepoints = parse_variable_tracepoints(tracepoints_str);
                     variable_tracepoints_to_cigar(
                         &variable_tracepoints,
@@ -1564,8 +1636,20 @@ fn process_decompress_chunk(
                         &distance_mode,
                     )
                 }
-                TracepointType::Standard => {
-                    // Standard tracepoints
+                (TracepointType::Variable, ComplexityMetric::DiagonalDistance) => {
+                    // Variable tracepoints representation with diagonal distance
+                    let variable_tracepoints = parse_variable_tracepoints(tracepoints_str);
+                    variable_tracepoints_to_cigar_diagonal(
+                        &variable_tracepoints,
+                        &query_seq,
+                        &target_seq,
+                        0,
+                        0,
+                        &distance_mode,
+                    )
+                }
+                (TracepointType::Standard, ComplexityMetric::EditDistance) => {
+                    // Standard tracepoints with edit distance
                     let tracepoints = parse_tracepoints(tracepoints_str);
                     tracepoints_to_cigar(
                         &tracepoints,
@@ -1576,7 +1660,19 @@ fn process_decompress_chunk(
                         &distance_mode,
                     )
                 }
-                TracepointType::Fastga => {
+                (TracepointType::Standard, ComplexityMetric::DiagonalDistance) => {
+                    // Standard tracepoints with diagonal distance
+                    let tracepoints = parse_tracepoints(tracepoints_str);
+                    tracepoints_to_cigar_diagonal(
+                        &tracepoints,
+                        &query_seq,
+                        &target_seq,
+                        0,
+                        0,
+                        &distance_mode,
+                    )
+                }
+                (TracepointType::Fastga, _) => {
                     // Should not reach here - fastga is handled above
                     error!("Fastga should not be handled in non-fastga path");
                     std::process::exit(1);
