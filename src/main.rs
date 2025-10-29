@@ -1601,20 +1601,6 @@ fn process_decompress_chunk(
 
         // Use specified tracepoint type
         let distance = distance_mode.clone();
-        let heuristic_strategy = if heuristic {
-            let max_edit_distance =
-                heuristic_max_complexity.expect("missing max-complexity with heuristic");
-            Some(compute_banded_static_strategy(
-                query_seq.len(),
-                target_seq.len(),
-                max_edit_distance,
-            ))
-        } else {
-            None
-        };
-        let mut aligner_opt = heuristic_strategy
-            .as_ref()
-            .map(|strategy| distance.create_aligner(Some(strategy)));
 
         let cigar = if fastga {
             // FastGA decoding
@@ -1650,14 +1636,28 @@ fn process_decompress_chunk(
             match (tp_type, complexity_metric) {
                 (TracepointType::Mixed, ComplexityMetric::EditDistance) => {
                     let mixed_tracepoints = parse_mixed_tracepoints(tracepoints_str);
-                    if let Some(aligner) = aligner_opt.as_mut() {
+                    if heuristic {
+                        let tps: Vec<(usize, usize)> = mixed_tracepoints
+                            .iter()
+                            .filter_map(|m| match m {
+                                MixedRepresentation::Tracepoint(a, b) => Some((*a, *b)),
+                                _ => None,
+                            })
+                            .collect();
+                        let strategy = compute_banded_static_strategy(
+                            &tps,
+                            heuristic_max_complexity.expect(
+                                "missing max-complexity with heuristic",
+                            ),
+                        );
+                        let aligner = distance.create_aligner(Some(&strategy));
                         mixed_tracepoints_to_cigar_with_aligner(
                             &mixed_tracepoints,
                             &query_seq,
                             &target_seq,
                             0,
                             0,
-                            aligner,
+                            &aligner,
                         )
                     } else {
                         mixed_tracepoints_to_cigar(
@@ -1683,14 +1683,25 @@ fn process_decompress_chunk(
                 }
                 (TracepointType::Variable, ComplexityMetric::EditDistance) => {
                     let variable_tracepoints = parse_variable_tracepoints(tracepoints_str);
-                    if let Some(aligner) = aligner_opt.as_mut() {
+                    if heuristic {
+                        let tps: Vec<(usize, usize)> = variable_tracepoints
+                            .iter()
+                            .map(|(a, ob)| (*a, ob.unwrap_or(*a)))
+                            .collect();
+                        let strategy = compute_banded_static_strategy(
+                            &tps,
+                            heuristic_max_complexity.expect(
+                                "missing max-complexity with heuristic",
+                            ),
+                        );
+                        let aligner = distance.create_aligner(Some(&strategy));
                         variable_tracepoints_to_cigar_with_aligner(
                             &variable_tracepoints,
                             &query_seq,
                             &target_seq,
                             0,
                             0,
-                            aligner,
+                            &aligner,
                         )
                     } else {
                         variable_tracepoints_to_cigar(
@@ -1716,7 +1727,14 @@ fn process_decompress_chunk(
                 }
                 (TracepointType::Standard, ComplexityMetric::EditDistance) => {
                     let tracepoints = parse_tracepoints(tracepoints_str);
-                    if let Some(aligner) = aligner_opt.as_mut() {
+                    if heuristic {
+                        let strategy = compute_banded_static_strategy(
+                            &tracepoints,
+                            heuristic_max_complexity.expect(
+                                "missing max-complexity with heuristic",
+                            ),
+                        );
+                        let aligner = distance.create_aligner(Some(&strategy));
                         let variable_tracepoints: Vec<(usize, Option<usize>)> = tracepoints
                             .iter()
                             .map(|(a_len, b_len)| (*a_len, Some(*b_len)))
@@ -1727,7 +1745,7 @@ fn process_decompress_chunk(
                             &target_seq,
                             0,
                             0,
-                            aligner,
+                            &aligner,
                         )
                     } else {
                         tracepoints_to_cigar(&tracepoints, &query_seq, &target_seq, 0, 0, &distance)
@@ -1973,32 +1991,31 @@ fn parse_penalties(
 }
 
 fn compute_banded_static_strategy(
-    query_len: usize,
-    target_len: usize,
+    tracepoints: &[(usize, usize)],
     max_edit_distance: usize,
 ) -> HeuristicStrategy {
-    let delta = (query_len as i64 - target_len as i64).unsigned_abs() as usize;
-    let available = if max_edit_distance > delta {
-        max_edit_distance - delta
-    } else {
-        0
-    };
-    let band_width = (available / 2) as i32;
+    let mut band_width = 0;
+    for &(a_len, b_len) in tracepoints {
+        let delta = if a_len > b_len { a_len - b_len } else { b_len - a_len };
+        let available = if max_edit_distance > delta {
+            max_edit_distance - delta
+        } else {
+            0
+        };
+        let seg_band = available / 2;
+        if seg_band > band_width {
+            band_width = seg_band;
+        }
+    }
 
     debug!(
-        "Computed banded static strategy: query_len={}, target_len={}, max_edit_distance={}, delta={}, available={}, min_k={}, max_k={}",
-        query_len,
-        target_len,
-        max_edit_distance,
-        delta,
-        available,
-        -band_width,
-        band_width
+        "Computed banded static strategy from tracepoints: min_k=-{}, max_k={}",
+        band_width, band_width
     );
 
     HeuristicStrategy::BandedStatic {
-        band_min_k: -band_width,
-        band_max_k: band_width,
+        band_min_k: -(band_width as i32),
+        band_max_k: band_width as i32,
     }
 }
 
