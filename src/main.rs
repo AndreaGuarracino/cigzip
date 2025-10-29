@@ -160,6 +160,10 @@ enum Args {
         #[arg(long = "sequence-list", value_name = "FILE")]
         sequence_list: Option<String>,
 
+        /// Keep original gi/bi/sc/sc fields as giold/biold/scold when replacing
+        #[arg(long = "keep-old-stats")]
+        keep_old_stats: bool,
+
         /// Trace spacing for fastga (only used with fastga type, default: 100)
         #[arg(long)]
         trace_spacing: Option<usize>,
@@ -300,6 +304,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             complexity_metric,
             max_complexity,
             heuristic,
+            keep_old_stats,
         } => {
             setup_logger(common.verbose);
 
@@ -453,6 +458,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 &complexity_metric,
                                 heuristic,
                                 heuristic_max_complexity,
+                                keep_old_stats,
                             );
                             lines.clear();
                         }
@@ -473,6 +479,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     &complexity_metric,
                     heuristic,
                     heuristic_max_complexity,
+                    keep_old_stats,
                 );
             }
         }
@@ -1505,6 +1512,7 @@ fn process_decompress_chunk(
     complexity_metric: &ComplexityMetric,
     heuristic: bool,
     heuristic_max_complexity: Option<usize>,
+    keep_old_stats: bool,
 ) {
     lines.par_iter().for_each(|line| {
         let fields: Vec<&str> = line.split('\t').collect();
@@ -1785,18 +1793,20 @@ fn process_decompress_chunk(
 
         for field in fields.iter() {
             if field.starts_with("tp:Z:") {
-                // If there were existing gi/bi/sc fields, rename them with 'old' prefix
-                if let Some(old_gi) = existing_gi {
-                    new_fields.push(format!("giold:f:{}", &old_gi[5..]));
-                }
-                if let Some(old_bi) = existing_bi {
-                    new_fields.push(format!("biold:f:{}", &old_bi[5..]));
-                }
-                if let Some(old_sc) = existing_sc {
-                    new_fields.push(format!("scold:i:{}", &old_sc[5..]));
+                // Optionally keep old values
+                if keep_old_stats {
+                    if let Some(old_gi) = existing_gi {
+                        new_fields.push(format!("giold:f:{}", &old_gi[5..]));
+                    }
+                    if let Some(old_bi) = existing_bi {
+                        new_fields.push(format!("biold:f:{}", &old_bi[5..]));
+                    }
+                    if let Some(old_sc) = existing_sc {
+                        new_fields.push(format!("scold:i:{}", &old_sc[5..]));
+                    }
                 }
 
-                // Add new identity stats and alignment score before the CIGAR
+                // Always add new identity stats and alignment score before the CIGAR
                 new_fields.push(format!("gi:f:{:.12}", gap_compressed_identity));
                 new_fields.push(format!("bi:f:{:.12}", block_identity));
                 new_fields.push(format!("sc:i:{}", alignment_score));
@@ -1807,7 +1817,7 @@ fn process_decompress_chunk(
                 || field.starts_with("bi:f:")
                 || field.starts_with("sc:i:")
             {
-                // Skip existing gi, bi, and sc fields - we've already handled them
+                // Skip existing gi, bi, and sc fields - they will be replaced
                 continue;
             } else {
                 new_fields.push(field.to_string());
