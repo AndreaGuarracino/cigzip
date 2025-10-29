@@ -1,3 +1,6 @@
+mod sequence_index;
+
+use crate::sequence_index::{collect_sequence_paths, SequenceIndex};
 use clap::{Parser, ValueEnum};
 use flate2::read::MultiGzDecoder;
 #[cfg(debug_assertions)]
@@ -21,10 +24,10 @@ use lib_tracepoints::{
 use lib_wfa2::affine_wavefront::{Distance, HeuristicStrategy};
 use log::{debug, error, info, warn};
 use rayon::prelude::*;
-use rust_htslib::faidx::Reader as FastaReader;
 use std::fmt;
 use std::fs::File;
 use std::io::{self, BufRead, BufReader};
+use std::sync::Arc;
 
 /// Tracepoint representation type
 #[derive(Debug, Clone, ValueEnum)]
@@ -108,7 +111,7 @@ struct CommonOpts {
     paf: String,
 
     /// Number of threads to use (default: 4)
-    #[arg(long = "threads", default_value_t = 4)]
+    #[arg(short, long = "threads", default_value_t = 4)]
     threads: usize,
 
     /// Verbosity level (0 = error, 1 = info, 2 = debug)
@@ -149,13 +152,13 @@ enum Args {
         #[arg(long = "complexity-metric", default_value_t = ComplexityMetric::EditDistance)]
         complexity_metric: ComplexityMetric,
 
-        /// FASTA file for query sequences
-        #[arg(short = 'q', long = "query-fasta")]
-        query_fasta: String,
+        /// FASTA files containing sequences referenced in the PAF (repeatable)
+        #[arg(long = "sequence-files", value_name = "FASTA", num_args = 1..)]
+        sequence_files: Vec<String>,
 
-        /// FASTA file for target sequences
-        #[arg(short = 't', long = "target-fasta")]
-        target_fasta: String,
+        /// File listing FASTA paths (one per line)
+        #[arg(long = "sequence-list", value_name = "FILE")]
+        sequence_list: Option<String>,
 
         /// Trace spacing for fastga (only used with fastga type, default: 100)
         #[arg(long)]
@@ -188,13 +191,13 @@ enum Args {
         #[arg(long = "threads", default_value_t = 4)]
         threads: usize,
 
-        /// FASTA file for query sequences
-        #[arg(short = 'q', long = "query-fasta")]
-        query_fasta: Option<String>,
+        /// FASTA files containing sequences referenced in the PAF (repeatable)
+        #[arg(long = "sequence-files", value_name = "FASTA", num_args = 1..)]
+        sequence_files: Vec<String>,
 
-        /// FASTA file for target sequences
-        #[arg(short = 't', long = "target-fasta")]
-        target_fasta: Option<String>,
+        /// File listing FASTA paths (one per line)
+        #[arg(long = "sequence-list", value_name = "FILE")]
+        sequence_list: Option<String>,
 
         /// Gap penalties in the format mismatch,gap_open1,gap_ext1,gap_open2,gap_ext2
         #[arg(long, default_value = "5,8,2,24,1")]
@@ -289,8 +292,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         Args::Decompress {
             common,
             tp_type,
-            query_fasta,
-            target_fasta,
+            sequence_files,
+            sequence_list,
             penalties,
             trace_spacing,
             distance,
@@ -348,6 +351,28 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 std::process::exit(1);
             }
 
+            let sequence_paths = match collect_sequence_paths(sequence_files, sequence_list) {
+                Ok(paths) if !paths.is_empty() => paths,
+                Ok(_) => {
+                    error!(
+                        "At least one FASTA must be provided via --sequence-files or --sequence-list"
+                    );
+                    std::process::exit(1);
+                }
+                Err(msg) => {
+                    error!("{}", msg);
+                    std::process::exit(1);
+                }
+            };
+
+            let sequence_index = match SequenceIndex::build(&sequence_paths) {
+                Ok(index) => index,
+                Err(msg) => {
+                    error!("{}", msg);
+                    std::process::exit(1);
+                }
+            };
+
             let penalties_value = match distance {
                 DistanceChoice::Edit => None,
                 _ => {
@@ -355,6 +380,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     Some(penalties.clone().unwrap_or_else(|| default.to_string()))
                 }
             };
+
+            let sequence_index = Arc::new(sequence_index);
 
             let distance_mode = match parse_distance(distance, penalties_value.as_deref()) {
                 Ok(dist) => dist,
@@ -419,8 +446,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             process_decompress_chunk(
                                 &lines,
                                 &tp_type,
-                                &query_fasta,
-                                &target_fasta,
+                                sequence_index.as_ref(),
                                 &distance_mode,
                                 is_fastga,
                                 trace_spacing,
@@ -440,8 +466,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 process_decompress_chunk(
                     &lines,
                     &tp_type,
-                    &query_fasta,
-                    &target_fasta,
+                    sequence_index.as_ref(),
                     &distance_mode,
                     is_fastga,
                     trace_spacing,
@@ -455,8 +480,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         Args::Debug {
             paf,
             threads,
-            query_fasta,
-            target_fasta,
+            sequence_files,
+            sequence_list,
             penalties,
             max_complexity,
             verbose,
@@ -470,12 +495,31 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 mismatch, gap_open1, gap_ext1, gap_open2, gap_ext2
             );
 
-            if let (Some(paf), Some(query_fasta), Some(target_fasta)) =
-                (paf, query_fasta, target_fasta)
-            {
+            let sequence_paths = match collect_sequence_paths(sequence_files, sequence_list) {
+                Ok(paths) if !paths.is_empty() => paths,
+                Ok(_) => {
+                    error!(
+                        "Debug mode requires at least one FASTA via --sequence-files or --sequence-list"
+                    );
+                    std::process::exit(1);
+                }
+                Err(msg) => {
+                    error!("{}", msg);
+                    std::process::exit(1);
+                }
+            };
+
+            let sequence_index = match SequenceIndex::build(&sequence_paths) {
+                Ok(index) => Arc::new(index),
+                Err(msg) => {
+                    error!("{}", msg);
+                    std::process::exit(1);
+                }
+            };
+
+            if let Some(paf) = paf {
                 info!("PAF file: {}", paf);
-                info!("Query FASTA file: {}", query_fasta);
-                info!("Target FASTA file: {}", target_fasta);
+                info!("Sequence FASTA files: {}", sequence_paths.join(", "));
 
                 // Count total lines for progress bar (if not stdin)
                 let total_lines = if paf != "-" {
@@ -538,8 +582,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 // Process current chunk in parallel
                                 process_debug_chunk(
                                     &lines,
-                                    &query_fasta,
-                                    &target_fasta,
+                                    sequence_index.as_ref(),
                                     mismatch,
                                     gap_open1,
                                     gap_ext1,
@@ -564,8 +607,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 if !lines.is_empty() {
                     process_debug_chunk(
                         &lines,
-                        &query_fasta,
-                        &target_fasta,
+                        sequence_index.as_ref(),
                         mismatch,
                         gap_open1,
                         gap_ext1,
@@ -738,8 +780,7 @@ fn calculate_identity_stats(cigar: &str) -> (f64, f64) {
 #[cfg(debug_assertions)]
 fn process_debug_chunk(
     lines: &[String],
-    query_fasta_path: &str,
-    target_fasta_path: &str,
+    sequence_index: &SequenceIndex,
     mismatch: i32,
     gap_open1: i32,
     gap_ext1: i32,
@@ -787,67 +828,22 @@ fn process_debug_chunk(
             std::process::exit(1);
         });
 
-        // Create thread-local FASTA readers
-        let query_fasta_reader = FastaReader::from_path(query_fasta_path).unwrap_or_else(|e| {
-            error!("Error reading query FASTA file: {}", e);
-            std::process::exit(1);
-        });
-        let target_fasta_reader = FastaReader::from_path(target_fasta_path).unwrap_or_else(|e| {
-            error!("Error reading target FASTA file: {}", e);
-            std::process::exit(1);
-        });
-
-        // Fetch query sequence from query FASTA
-        let query_seq = if strand == "+" {
-            match query_fasta_reader.fetch_seq(query_name, query_start, query_end - 1) {
-                Ok(seq) => {
-                    let mut seq_vec = seq.to_vec();
-                    unsafe { libc::free(seq.as_ptr() as *mut std::ffi::c_void) };
-                    seq_vec
-                        .iter_mut()
-                        .for_each(|byte| *byte = byte.to_ascii_uppercase());
-                    seq_vec
-                }
-                Err(e) => {
-                    error!("Failed to fetch query sequence: {}", e);
-                    std::process::exit(1);
-                }
-            }
-        } else {
-            match query_fasta_reader.fetch_seq(query_name, query_start, query_end - 1) {
-                Ok(seq) => {
-                    let mut rc = reverse_complement(seq);
-                    unsafe { libc::free(seq.as_ptr() as *mut std::ffi::c_void) };
-                    rc.iter_mut()
-                        .for_each(|byte| *byte = byte.to_ascii_uppercase());
-                    rc
-                }
-                Err(e) => {
-                    error!("Failed to fetch query sequence: {}", e);
-                    std::process::exit(1);
-                }
-            }
-        };
-
-        // Fetch target sequence from target FASTA
-        let target_seq = match target_fasta_reader.fetch_seq(
-            target_name,
-            target_start,
-            target_end - 1,
-        ) {
-            Ok(seq) => {
-                let mut seq_vec = seq.to_vec();
-                unsafe { libc::free(seq.as_ptr() as *mut std::ffi::c_void) };
-                seq_vec
-                    .iter_mut()
-                    .for_each(|byte| *byte = byte.to_ascii_uppercase());
-                seq_vec
-            }
-            Err(e) => {
-                error!("Failed to fetch target sequence: {}", e);
+        let mut query_seq = sequence_index
+            .fetch_sequence(query_name, query_start, query_end)
+            .unwrap_or_else(|msg| {
+                error!("{}", message_with_truncate_paf_file(&msg, line));
                 std::process::exit(1);
-            }
-        };
+            });
+        if strand == "-" {
+            query_seq = reverse_complement(&query_seq);
+        }
+
+        let target_seq = sequence_index
+            .fetch_sequence(target_name, target_start, target_end)
+            .unwrap_or_else(|msg| {
+                error!("{}", message_with_truncate_paf_file(&msg, line));
+                std::process::exit(1);
+            });
 
         // Create thread-local aligner
         let distance = Distance::GapAffine2p {
@@ -1502,8 +1498,7 @@ fn process_single_record(
 fn process_decompress_chunk(
     lines: &[String],
     tp_type: &TracepointType,
-    query_fasta_path: &str,
-    target_fasta_path: &str,
+    sequence_index: &SequenceIndex,
     distance_mode: &Distance,
     fastga: bool,
     trace_spacing: usize,
@@ -1570,101 +1565,39 @@ fn process_decompress_chunk(
             std::process::exit(1);
         });
 
-        // Create thread-local FASTA readers for query and target
-        let query_fasta_reader = FastaReader::from_path(query_fasta_path).unwrap_or_else(|e| {
-            error!("Failed to create query FASTA reader: {}", e);
-            std::process::exit(1);
-        });
+        debug!(
+            "Fetching query sequence {}:{}-{} on {} strand",
+            query_name,
+            query_start,
+            query_end,
+            if strand == "-" && !fastga { "-" } else { "+" }
+        );
+        let mut query_seq = sequence_index
+            .fetch_sequence(query_name, query_start, query_end)
+            .unwrap_or_else(|msg| {
+                error!("{}", message_with_truncate_paf_file(&msg, line));
+                std::process::exit(1);
+            });
+        if strand == "-" && !fastga {
+            query_seq = reverse_complement(&query_seq);
+        }
 
-        let target_fasta_reader = FastaReader::from_path(target_fasta_path).unwrap_or_else(|e| {
-            error!("Failed to create target FASTA reader: {}", e);
-            std::process::exit(1);
-        });
-
-        // Fetch query sequence from query FASTA (with FASTGA we always use forward strand for the query)
-        let query_seq = if strand == "+" || fastga {
-            debug!(
-                "Fetching query sequence {}:{}-{} on + strand",
-                query_name, query_start, query_end
-            );
-
-            match query_fasta_reader.fetch_seq(query_name, query_start, query_end - 1) {
-                Ok(seq) => {
-                    let mut seq_vec = seq.to_vec();
-                    unsafe { libc::free(seq.as_ptr() as *mut std::ffi::c_void) }; // Free up memory (bug https://github.com/rust-bio/rust-htslib/issues/401#issuecomment-1704290171)
-                    seq_vec
-                        .iter_mut()
-                        .for_each(|byte| *byte = byte.to_ascii_uppercase());
-                    seq_vec
-                }
-                Err(e) => {
-                    error!("Failed to fetch query sequence: {}", e);
-                    std::process::exit(1);
-                }
-            }
-        } else {
-            debug!(
-                "Fetching query sequence {}:{}-{} on - strand",
-                query_name, query_start, query_end
-            );
-
-            match query_fasta_reader.fetch_seq(query_name, query_start, query_end - 1) {
-                Ok(seq) => {
-                    let mut rc = reverse_complement(seq);
-                    unsafe { libc::free(seq.as_ptr() as *mut std::ffi::c_void) }; // Free up memory (bug https://github.com/rust-bio/rust-htslib/issues/401#issuecomment-1704290171)
-                    rc.iter_mut()
-                        .for_each(|byte| *byte = byte.to_ascii_uppercase());
-                    rc
-                }
-                Err(e) => {
-                    error!("Failed to fetch query sequence: {}", e);
-                    std::process::exit(1);
-                }
-            }
-        };
-
-        // Fetch target sequence from target FASTA (with FASTGA the strand affects the target sequence)
-        let target_seq = if strand == "+" || !fastga {
-            debug!(
-                "Fetching target sequence {}:{}-{} on + strand",
-                target_name, target_start, target_end
-            );
-
-            match target_fasta_reader.fetch_seq(target_name, target_start, target_end - 1) {
-                Ok(seq) => {
-                    let mut seq_vec = seq.to_vec();
-                    unsafe { libc::free(seq.as_ptr() as *mut std::ffi::c_void) }; // Free up memory (bug https://github.com/rust-bio/rust-htslib/issues/401#issuecomment-1704290171)
-                    seq_vec
-                        .iter_mut()
-                        .for_each(|byte| *byte = byte.to_ascii_uppercase());
-                    seq_vec
-                }
-                Err(e) => {
-                    error!("Failed to fetch target sequence: {}", e);
-                    std::process::exit(1);
-                }
-            }
-        } else {
-            //let (target_start, target_end) = (target_len - target_end, target_len - target_start);
-            debug!(
-                "Fetching target sequence {}:{}-{} on - strand",
-                target_name, target_start, target_end
-            );
-
-            match target_fasta_reader.fetch_seq(target_name, target_start, target_end - 1) {
-                Ok(seq) => {
-                    let mut rc = reverse_complement(seq);
-                    unsafe { libc::free(seq.as_ptr() as *mut std::ffi::c_void) }; // Free up memory (bug https://github.com/rust-bio/rust-htslib/issues/401#issuecomment-1704290171)
-                    rc.iter_mut()
-                        .for_each(|byte| *byte = byte.to_ascii_uppercase());
-                    rc
-                }
-                Err(e) => {
-                    error!("Failed to fetch target sequence: {}", e);
-                    std::process::exit(1);
-                }
-            }
-        };
+        debug!(
+            "Fetching target sequence {}:{}-{} on {} strand",
+            target_name,
+            target_start,
+            target_end,
+            if strand == "-" && fastga { "-" } else { "+" }
+        );
+        let mut target_seq = sequence_index
+            .fetch_sequence(target_name, target_start, target_end)
+            .unwrap_or_else(|msg| {
+                error!("{}", message_with_truncate_paf_file(&msg, line));
+                std::process::exit(1);
+            });
+        if fastga && strand == "-" {
+            target_seq = reverse_complement(&target_seq);
+        }
 
         // Use specified tracepoint type
         let distance = distance_mode.clone();
@@ -2053,8 +1986,14 @@ fn compute_banded_static_strategy(
     let band_width = (available / 2) as i32;
 
     debug!(
-        "Computed banded static strategy: min_k={}, max_k={}",
-        -band_width, band_width
+        "Computed banded static strategy: query_len={}, target_len={}, max_edit_distance={}, delta={}, available={}, min_k={}, max_k={}",
+        query_len,
+        target_len,
+        max_edit_distance,
+        delta,
+        available,
+        -band_width,
+        band_width
     );
 
     HeuristicStrategy::BandedStatic {
