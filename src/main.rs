@@ -2012,7 +2012,7 @@ fn compute_banded_static_strategy(
         } else {
             0
         };
-        let seg_band = available / 2;
+        let seg_band = (available / 2) + delta;
         if seg_band > band_width {
             band_width = seg_band;
         }
