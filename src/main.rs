@@ -122,8 +122,8 @@ struct CommonOpts {
 #[derive(Parser, Debug)]
 #[command(author, version, about, disable_help_subcommand = true)]
 enum Args {
-    /// Compression of alignments
-    Compress {
+    /// Encode alignments into tracepoints
+    Encode {
         #[clap(flatten)]
         common: CommonOpts,
 
@@ -139,8 +139,8 @@ enum Args {
         #[arg(long = "max-complexity")]
         max_complexity: Option<usize>,
     },
-    /// Decompression of alignments
-    Decompress {
+    /// Decode tracepoints back to CIGAR
+    Decode {
         #[clap(flatten)]
         common: CommonOpts,
 
@@ -222,7 +222,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args = Args::parse();
 
     match args {
-        Args::Compress {
+        Args::Encode {
             common,
             tp_type,
             max_complexity,
@@ -293,7 +293,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 process_compress_chunk(&lines, &tp_type, max_complexity, &complexity_metric);
             }
         }
-        Args::Decompress {
+        Args::Decode {
             common,
             tp_type,
             sequence_files,
