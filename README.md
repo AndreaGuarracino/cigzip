@@ -16,8 +16,6 @@ Encode and decode alignment CIGARs using tracepoints.
 
 ## Usage
 
-### Cheat Sheet
-
 Encode (CIGAR → tracepoints)
 
 ```sh
