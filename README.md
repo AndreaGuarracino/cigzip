@@ -1,27 +1,41 @@
 # cigzip
 
-A tool for compression and decompression of alignment CIGAR strings using tracepoints.
+Encode and decode alignment CIGARs using tracepoints.
 
 ## Overview
 
-`cigzip` leverages an efficient approach to sequence alignment storage using tracepoints. Instead of storing complete CIGAR strings, alignments are compressed into tracepoints that adapt to the local alignment complexity, reducing storage size while allowing for full reconstruction.
+`cigzip` converts CIGAR strings into compact tracepoints that adapt to local alignment complexity, and reconstructs the original CIGARs on demand.
 
 ## Features
 
-- **Compression**: Convert CIGAR strings to tracepoints for compact storage
-- **Decompression**: Reconstruct full CIGAR strings from tracepoints
+- **Encode**: Convert CIGAR strings to tracepoints (compact storage)
+- **Decode**: Reconstruct full CIGAR strings from tracepoints
 - **Parallel Processing**: Multi-threaded operation with chunk-based processing
-- **Configurable Parameters**: Adjust max-diff, gap penalties, and other settings
+- **Configurable Parameters**: Choose tracepoint type/metric, penalties, and banded heuristics
 - **Support for Compressed Files**: Automatically handles gzipped and bgzipped PAF files
 
 ## Usage
 
 ```shell
-# Compress alignments in a PAF file (convert CIGAR to tracepoints)
-cigzip compress --paf alignments.paf [--max-diff 32] [--threads 4] > alignments.tp.paf
+# Encode: convert CIGAR → tracepoints
+cigzip encode \
+  --paf alignments.paf \
+  [--type standard|mixed|variable|fastga] \
+  [--complexity-metric edit-distance|diagonal-distance] \
+  [--max-complexity 32] \
+  [--threads 4] \
+  > alignments.tp.paf
 
-# Decompress alignments (convert tracepoints back to CIGAR)
-cigzip decompress --paf alignments.tp.paf --query-fasta query.fa --target-fasta target.fa [--penalties "5,8,2,24,1"] [--threads 4] > alignments.cigar.paf
+# Decode: convert tracepoints → CIGAR
+cigzip decode \
+  --paf alignments.tp.paf \
+  --sequence-files ref1.fa[.gz] ref2.fa[.gz] \
+  [--sequence-list paths.txt] \
+  [--distance edit|gap-affine|gap-affine-2p] \
+  [--penalties "5,8,2,24,1"] \
+  [--heuristics --max-complexity 100] \
+  [--threads 4] \
+  > alignments.cigar.paf
 ```
 
 ### Command Options
@@ -31,13 +45,18 @@ cigzip decompress --paf alignments.tp.paf --query-fasta query.fa --target-fasta 
 - `--threads N`: Number of threads to use (default: 4)
 - `--verbose N`: Verbosity level (0=error, 1=info, 2=debug)
 
-#### Compress-specific Options
-- `--max-diff N`: Max-diff value for tracepoints (default: 32)
+#### Encode
+- `--type`: Tracepoint representation (`standard`, `mixed`, `variable`, `fastga`)
+- `--complexity-metric`: `edit-distance` (default) or `diagonal-distance`
+- `--max-complexity N`: Segmentation limit (default: 32; 100 for `fastga`)
 
-#### Decompress-specific Options
-- `--query-fasta FILE`: FASTA file containing query sequences
-- `--target-fasta FILE`: FASTA file containing target sequences
-- `--penalties STRING`: Gap penalties in format "mismatch,gap_open1,gap_ext1,gap_open2,gap_ext2" (default: "5,8,2,24,1")
+#### Decode
+- `--sequence-files`: One or more FASTA files with all referenced sequences
+- `--sequence-list`: File containing additional FASTA paths (one per line)
+- `--distance`: `edit` (unit costs), `gap-affine`, or `gap-affine-2p`
+- `--penalties`: Comma list. For `gap-affine-2p`: `mismatch,gap_open1,gap_ext1,gap_open2,gap_ext2` (default `5,8,2,24,1`)
+- `--heuristics --max-complexity N`: Enable banded static heuristics (works with both metrics). For `diagonal-distance`, the band equals `max-complexity`.
+- `--keep-old-stats`: When replacing fields, also keep previous `gi/bi/sc` as `giold/biold/scold`
 
 ## Building
 
