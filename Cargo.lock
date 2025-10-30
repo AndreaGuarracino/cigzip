@@ -560,7 +560,7 @@ dependencies = [
 [[package]]
 name = "lib_wfa2"
 version = "0.1.0"
-source = "git+https://github.com/AndreaGuarracino/lib_wfa2#29de94f8528c63cf93786838b7554b60474e7571"
+source = "git+https://github.com/AndreaGuarracino/lib_wfa2#f7aeba35b575aee4da3fb4ca02e951f6cc4b388f"
 
 [[package]]
 name = "libc"
