@@ -16,26 +16,38 @@ Encode and decode alignment CIGARs using tracepoints.
 
 ## Usage
 
-```shell
-# Encode: convert CIGAR → tracepoints
-cigzip encode \
-  --paf alignments.paf \
-  [--type standard|mixed|variable|fastga] \
-  [--complexity-metric edit-distance|diagonal-distance] \
-  [--max-complexity 32] \
-  [--threads 4] \
-  > alignments.tp.paf
+### Cheat Sheet
 
-# Decode: convert tracepoints → CIGAR
-cigzip decode \
-  --paf alignments.tp.paf \
-  --sequence-files ref1.fa[.gz] ref2.fa[.gz] \
-  [--sequence-list paths.txt] \
-  [--distance edit|gap-affine|gap-affine-2p] \
-  [--penalties "5,8,2,24,1"] \
-  [--heuristics --max-complexity 100] \
-  [--threads 4] \
-  > alignments.cigar.paf
+Encode (CIGAR → tracepoints)
+
+```sh
+# Standard, default settings
+cigzip encode --paf in.paf > out.tp.paf
+
+# Mixed type, diagonal metric, tighter segments
+cigzip encode --paf in.paf --type mixed --complexity-metric diagonal-distance   --max-complexity 24 > out.mixed.tp.paf
+
+# FastGA (spacing=100 default)
+cigzip encode --paf in.paf --type fastga > out.fastga.tp.paf
+```
+
+Decode (tracepoints → CIGAR)
+
+```sh
+# Edit distance (unit costs)
+cigzip decode --paf out.tp.paf --sequence-files ref.fa > out.cigar.paf
+
+# Gap-affine 2p penalties
+cigzip decode --paf out.tp.paf --sequence-files ref1.fa ref2.fa   --distance gap-affine-2p --penalties 5,8,2,24,1 > out.cigar.paf
+
+# Banded heuristics (band from max-complexity)
+cigzip decode --paf out.tp.paf --sequence-files ref.fa   --heuristics --max-complexity 100 > out.cigar.paf
+
+# Many FASTAs via list file
+cigzip decode --paf out.tp.paf --sequence-list refs.txt > out.cigar.paf
+
+# Keep old stats while replacing gi/bi/sc
+cigzip decode --paf out.tp.paf --sequence-files ref.fa --keep-old-stats > out.cigar.paf
 ```
 
 ### Command Options
