@@ -323,11 +323,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 std::process::exit(1);
             }
 
-            if heuristic && !matches!(complexity_metric, ComplexityMetric::EditDistance) {
-                error!("--heuristic is only supported with --complexity-metric edit-distance");
-                std::process::exit(1);
-            }
-
             let heuristic_max_complexity = if heuristic {
                 Some(max_complexity.unwrap_or_else(|| {
                     error!("--heuristic requires specifying --max-complexity");
@@ -1654,9 +1649,9 @@ fn process_decompress_chunk(
                             .collect();
                         let strategy = compute_banded_static_strategy(
                             &tps,
-                            heuristic_max_complexity.expect(
-                                "missing max-complexity with heuristic",
-                            ),
+                            complexity_metric,
+                            heuristic_max_complexity
+                                .expect("missing max-complexity with heuristic"),
                         );
                         let aligner = distance.create_aligner(Some(&strategy));
                         mixed_tracepoints_to_cigar_with_aligner(
@@ -1698,9 +1693,9 @@ fn process_decompress_chunk(
                             .collect();
                         let strategy = compute_banded_static_strategy(
                             &tps,
-                            heuristic_max_complexity.expect(
-                                "missing max-complexity with heuristic",
-                            ),
+                            complexity_metric,
+                            heuristic_max_complexity
+                                .expect("missing max-complexity with heuristic"),
                         );
                         let aligner = distance.create_aligner(Some(&strategy));
                         variable_tracepoints_to_cigar_with_aligner(
@@ -1738,9 +1733,9 @@ fn process_decompress_chunk(
                     if heuristic {
                         let strategy = compute_banded_static_strategy(
                             &tracepoints,
-                            heuristic_max_complexity.expect(
-                                "missing max-complexity with heuristic",
-                            ),
+                            complexity_metric,
+                            heuristic_max_complexity
+                                .expect("missing max-complexity with heuristic"),
                         );
                         let aligner = distance.create_aligner(Some(&strategy));
                         let variable_tracepoints: Vec<(usize, Option<usize>)> = tracepoints
@@ -2002,30 +1997,35 @@ fn parse_penalties(
 
 fn compute_banded_static_strategy(
     tracepoints: &[(usize, usize)],
-    max_edit_distance: usize,
+    metric: &ComplexityMetric,
+    max_value: usize,
 ) -> HeuristicStrategy {
-    let mut band_width = 0;
-    for &(a_len, b_len) in tracepoints {
-        let delta = if a_len > b_len { a_len - b_len } else { b_len - a_len };
-        let available = if max_edit_distance > delta {
-            max_edit_distance - delta
-        } else {
-            0
-        };
-        let seg_band = (available / 2) + delta;
-        if seg_band > band_width {
-            band_width = seg_band;
+    let band_width: i32 = match metric {
+        ComplexityMetric::EditDistance => {
+            let mut bw = 0usize;
+            for &(a_len, b_len) in tracepoints {
+                let delta = if a_len > b_len { a_len - b_len } else { b_len - a_len };
+                let available = max_value.saturating_sub(delta);
+                let seg_band = available / 2;
+                if seg_band > bw {
+                    bw = seg_band;
+                }
+            }
+            bw as i32
         }
-    }
+        ComplexityMetric::DiagonalDistance => max_value as i32,
+    };
 
     debug!(
-        "Computed banded static strategy from tracepoints: min_k=-{}, max_k={}",
-        band_width, band_width
+        "Computed banded static strategy: metric={}, min_k={}, max_k={}",
+        metric,
+        -band_width,
+        band_width
     );
 
     HeuristicStrategy::BandedStatic {
-        band_min_k: -(band_width as i32),
-        band_max_k: band_width as i32,
+        band_min_k: -band_width,
+        band_max_k: band_width,
     }
 }
 
