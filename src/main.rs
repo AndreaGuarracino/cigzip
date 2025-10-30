@@ -1,3 +1,6 @@
+mod sequence_index;
+
+use crate::sequence_index::{collect_sequence_paths, SequenceIndex};
 use clap::{Parser, ValueEnum};
 use flate2::read::MultiGzDecoder;
 #[cfg(debug_assertions)]
@@ -5,23 +8,26 @@ use indicatif::ProgressBar;
 #[cfg(debug_assertions)]
 use indicatif::ProgressStyle;
 #[cfg(debug_assertions)]
-use lib_tracepoints::{align_sequences_wfa, cigar_ops_to_cigar_string};
+use lib_tracepoints::{
+    align_sequences_wfa, cigar_ops_to_cigar_string, cigar_to_tracepoints_raw,
+    cigar_to_variable_tracepoints_raw,
+};
 use lib_tracepoints::{
     cigar_to_mixed_tracepoints, cigar_to_mixed_tracepoints_diagonal, cigar_to_tracepoints,
-    cigar_to_tracepoints_diagonal, cigar_to_tracepoints_fastga, cigar_to_tracepoints_raw,
-    cigar_to_variable_tracepoints, cigar_to_variable_tracepoints_diagonal,
-    cigar_to_variable_tracepoints_raw, mixed_tracepoints_to_cigar, mixed_tracepoints_to_cigar_diagonal,
+    cigar_to_tracepoints_diagonal, cigar_to_tracepoints_fastga, cigar_to_variable_tracepoints,
+    cigar_to_variable_tracepoints_diagonal, mixed_tracepoints_to_cigar,
+    mixed_tracepoints_to_cigar_diagonal, mixed_tracepoints_to_cigar_with_aligner,
     tracepoints_to_cigar, tracepoints_to_cigar_diagonal, tracepoints_to_cigar_fastga,
-    variable_tracepoints_to_cigar, variable_tracepoints_to_cigar_diagonal, DistanceMode, MixedRepresentation,
+    variable_tracepoints_to_cigar, variable_tracepoints_to_cigar_diagonal,
+    variable_tracepoints_to_cigar_with_aligner, MixedRepresentation,
 };
-#[cfg(debug_assertions)]
-use lib_wfa2::affine_wavefront::AffineWavefronts;
-use log::{debug, error, info};
+use lib_wfa2::affine_wavefront::{Distance, HeuristicStrategy};
+use log::{debug, error, info, warn};
 use rayon::prelude::*;
-use rust_htslib::faidx::Reader as FastaReader;
 use std::fmt;
 use std::fs::File;
 use std::io::{self, BufRead, BufReader};
+use std::sync::Arc;
 
 /// Tracepoint representation type
 #[derive(Debug, Clone, ValueEnum)]
@@ -65,6 +71,38 @@ impl fmt::Display for ComplexityMetric {
     }
 }
 
+/// Distance model used for WFA re-alignment
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+enum DistanceChoice {
+    /// Edit distance (unit costs)
+    Edit,
+    /// Gap-affine with a single gap penalty pair
+    GapAffine,
+    /// Gap-affine with dual gap penalty pairs
+    #[value(alias = "gap-affine2p", alias = "gap-affine-2p")]
+    GapAffine2p,
+}
+
+impl DistanceChoice {
+    fn default_penalties(&self) -> Option<&'static str> {
+        match self {
+            DistanceChoice::Edit => None,
+            DistanceChoice::GapAffine => Some("5,8,2"),
+            DistanceChoice::GapAffine2p => Some("5,8,2,24,1"),
+        }
+    }
+}
+
+impl fmt::Display for DistanceChoice {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            DistanceChoice::Edit => write!(f, "edit"),
+            DistanceChoice::GapAffine => write!(f, "gap-affine"),
+            DistanceChoice::GapAffine2p => write!(f, "gap-affine-2p"),
+        }
+    }
+}
+
 /// Common options shared between all commands
 #[derive(Parser, Debug)]
 struct CommonOpts {
@@ -73,7 +111,7 @@ struct CommonOpts {
     paf: String,
 
     /// Number of threads to use (default: 4)
-    #[arg(long = "threads", default_value_t = 4)]
+    #[arg(short, long = "threads", default_value_t = 4)]
     threads: usize,
 
     /// Verbosity level (0 = error, 1 = info, 2 = debug)
@@ -84,8 +122,8 @@ struct CommonOpts {
 #[derive(Parser, Debug)]
 #[command(author, version, about, disable_help_subcommand = true)]
 enum Args {
-    /// Compression of alignments
-    Compress {
+    /// Encode alignments into tracepoints
+    Encode {
         #[clap(flatten)]
         common: CommonOpts,
 
@@ -101,8 +139,8 @@ enum Args {
         #[arg(long = "max-complexity")]
         max_complexity: Option<usize>,
     },
-    /// Decompression of alignments
-    Decompress {
+    /// Decode tracepoints back to CIGAR
+    Decode {
         #[clap(flatten)]
         common: CommonOpts,
 
@@ -114,21 +152,37 @@ enum Args {
         #[arg(long = "complexity-metric", default_value_t = ComplexityMetric::EditDistance)]
         complexity_metric: ComplexityMetric,
 
-        /// FASTA file for query sequences
-        #[arg(short = 'q', long = "query-fasta")]
-        query_fasta: String,
+        /// FASTA files containing sequences referenced in the PAF (repeatable)
+        #[arg(long = "sequence-files", value_name = "FASTA", num_args = 1..)]
+        sequence_files: Vec<String>,
 
-        /// FASTA file for target sequences
-        #[arg(short = 't', long = "target-fasta")]
-        target_fasta: String,
+        /// File listing FASTA paths (one per line)
+        #[arg(long = "sequence-list", value_name = "FILE")]
+        sequence_list: Option<String>,
 
-        /// Gap penalties in the format mismatch,gap_open1,gap_ext1,gap_open2,gap_ext2 (only used without fastga type, default: 5,8,2,24,1)
-        #[arg(long)]
-        penalties: Option<String>,
+        /// Keep original gi/bi/sc/sc fields as giold/biold/scold when replacing
+        #[arg(long = "keep-old-stats")]
+        keep_old_stats: bool,
 
         /// Trace spacing for fastga (only used with fastga type, default: 100)
         #[arg(long)]
         trace_spacing: Option<usize>,
+
+        /// Distance metric for realignment
+        #[arg(long = "distance", default_value_t = DistanceChoice::Edit)]
+        distance: DistanceChoice,
+
+        /// Gap penalties (only for gap-affine distances; ignored with edit distance)
+        #[arg(long)]
+        penalties: Option<String>,
+
+        /// Use static band heuristic during decompression (edit-distance metric only)
+        #[arg(long)]
+        heuristic: bool,
+
+        /// Maximum complexity value (required when enabling heuristics)
+        #[arg(long = "max-complexity")]
+        max_complexity: Option<usize>,
     },
     /// Run debugging mode (only available in debug builds)
     #[cfg(debug_assertions)]
@@ -141,13 +195,13 @@ enum Args {
         #[arg(long = "threads", default_value_t = 4)]
         threads: usize,
 
-        /// FASTA file for query sequences
-        #[arg(short = 'q', long = "query-fasta")]
-        query_fasta: Option<String>,
+        /// FASTA files containing sequences referenced in the PAF (repeatable)
+        #[arg(long = "sequence-files", value_name = "FASTA", num_args = 1..)]
+        sequence_files: Vec<String>,
 
-        /// FASTA file for target sequences
-        #[arg(short = 't', long = "target-fasta")]
-        target_fasta: Option<String>,
+        /// File listing FASTA paths (one per line)
+        #[arg(long = "sequence-list", value_name = "FILE")]
+        sequence_list: Option<String>,
 
         /// Gap penalties in the format mismatch,gap_open1,gap_ext1,gap_open2,gap_ext2
         #[arg(long, default_value = "5,8,2,24,1")]
@@ -168,7 +222,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args = Args::parse();
 
     match args {
-        Args::Compress {
+        Args::Encode {
             common,
             tp_type,
             max_complexity,
@@ -221,7 +275,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
                         if lines.len() >= chunk_size {
                             // Process current chunk in parallel
-                            process_compress_chunk(&lines, &tp_type, max_complexity, &complexity_metric);
+                            process_compress_chunk(
+                                &lines,
+                                &tp_type,
+                                max_complexity,
+                                &complexity_metric,
+                            );
                             lines.clear();
                         }
                     }
@@ -234,14 +293,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 process_compress_chunk(&lines, &tp_type, max_complexity, &complexity_metric);
             }
         }
-        Args::Decompress {
+        Args::Decode {
             common,
             tp_type,
-            query_fasta,
-            target_fasta,
+            sequence_files,
+            sequence_list,
             penalties,
             trace_spacing,
+            distance,
             complexity_metric,
+            max_complexity,
+            heuristic,
+            keep_old_stats,
         } => {
             setup_logger(common.verbose);
 
@@ -255,7 +318,97 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 std::process::exit(1);
             }
 
-            info!("Converting {} tracepoints to CIGAR (complexity-metric={})", tp_type, complexity_metric);
+            if heuristic && is_fastga {
+                error!("--heuristic cannot be used with --type fastga");
+                std::process::exit(1);
+            }
+
+            let heuristic_max_complexity = if heuristic {
+                Some(max_complexity.unwrap_or_else(|| {
+                    error!("--heuristic requires specifying --max-complexity");
+                    std::process::exit(1);
+                }))
+            } else {
+                if let Some(value) = max_complexity {
+                    warn!(
+                        "Ignoring --max-complexity={} because --heuristic was not requested",
+                        value
+                    );
+                }
+                None
+            };
+
+            if matches!(distance, DistanceChoice::Edit)
+                && penalties.is_some()
+                && !penalties.as_deref().unwrap_or("").is_empty()
+            {
+                error!("--penalties cannot be used with --distance edit (as it uses unit costs)");
+                std::process::exit(1);
+            }
+
+            if is_fastga && penalties.is_some() && !penalties.as_deref().unwrap_or("").is_empty() {
+                error!("--penalties should only be used without --type fastga");
+                std::process::exit(1);
+            }
+
+            let sequence_paths = match collect_sequence_paths(sequence_files, sequence_list) {
+                Ok(paths) if !paths.is_empty() => paths,
+                Ok(_) => {
+                    error!(
+                        "At least one FASTA must be provided via --sequence-files or --sequence-list"
+                    );
+                    std::process::exit(1);
+                }
+                Err(msg) => {
+                    error!("{}", msg);
+                    std::process::exit(1);
+                }
+            };
+
+            let sequence_index = match SequenceIndex::build(&sequence_paths) {
+                Ok(index) => index,
+                Err(msg) => {
+                    error!("{}", msg);
+                    std::process::exit(1);
+                }
+            };
+
+            let penalties_value = match distance {
+                DistanceChoice::Edit => None,
+                _ => {
+                    let default = distance.default_penalties().unwrap();
+                    Some(penalties.clone().unwrap_or_else(|| default.to_string()))
+                }
+            };
+
+            let sequence_index = Arc::new(sequence_index);
+
+            let distance_mode = match parse_distance(distance, penalties_value.as_deref()) {
+                Ok(dist) => dist,
+                Err(msg) => {
+                    error!("Invalid --distance configuration: {}", msg);
+                    std::process::exit(1);
+                }
+            };
+
+            if is_fastga && !matches!(distance, DistanceChoice::GapAffine2p) {
+                warn!(
+                    "--distance {} is ignored with --type fastga (uses edit distance)",
+                    distance
+                );
+            }
+
+            let penalties_summary = penalties_value.as_deref().unwrap_or("n/a");
+
+            info!(
+                "Converting {} tracepoints to CIGAR (complexity-metric={}, distance={}, penalties={}, heuristic={}{})",
+                tp_type,
+                complexity_metric,
+                distance,
+                penalties_summary,
+                if heuristic { "enabled" } else { "disabled" },
+                heuristic_max_complexity.map(|mc| format!(", max-complexity={}", mc)).unwrap_or_default()
+            );
 
             // Set the thread pool size
             rayon::ThreadPoolBuilder::new()
@@ -272,20 +425,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 }
                 0 // Not used when not fastga
             };
-
-            let penalties_str = if is_fastga {
-                if penalties.is_some() {
-                    error!("--penalties should only be used without --type fastga");
-                    std::process::exit(1);
-                }
-                "5,8,2,24,1".to_string()
-            } else {
-                penalties.unwrap_or_else(|| "5,8,2,24,1".to_string())
-            };
-
-            // Parse penalties
-            let (mismatch, gap_open1, gap_ext1, gap_open2, gap_ext2) =
-                parse_penalties(&penalties_str)?;
 
             // Open the PAF file (or use stdin if "-" is provided).
             let paf_reader = get_paf_reader(&common.paf)?;
@@ -307,16 +446,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             process_decompress_chunk(
                                 &lines,
                                 &tp_type,
-                                &query_fasta,
-                                &target_fasta,
-                                mismatch,
-                                gap_open1,
-                                gap_ext1,
-                                gap_open2,
-                                gap_ext2,
+                                sequence_index.as_ref(),
+                                &distance_mode,
                                 is_fastga,
                                 trace_spacing,
                                 &complexity_metric,
+                                heuristic,
+                                heuristic_max_complexity,
+                                keep_old_stats,
                             );
                             lines.clear();
                         }
@@ -330,16 +467,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 process_decompress_chunk(
                     &lines,
                     &tp_type,
-                    &query_fasta,
-                    &target_fasta,
-                    mismatch,
-                    gap_open1,
-                    gap_ext1,
-                    gap_open2,
-                    gap_ext2,
+                    sequence_index.as_ref(),
+                    &distance_mode,
                     is_fastga,
                     trace_spacing,
                     &complexity_metric,
+                    heuristic,
+                    heuristic_max_complexity,
+                    keep_old_stats,
                 );
             }
         }
@@ -347,8 +482,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         Args::Debug {
             paf,
             threads,
-            query_fasta,
-            target_fasta,
+            sequence_files,
+            sequence_list,
             penalties,
             max_complexity,
             verbose,
@@ -362,12 +497,31 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 mismatch, gap_open1, gap_ext1, gap_open2, gap_ext2
             );
 
-            if let (Some(paf), Some(query_fasta), Some(target_fasta)) =
-                (paf, query_fasta, target_fasta)
-            {
+            let sequence_paths = match collect_sequence_paths(sequence_files, sequence_list) {
+                Ok(paths) if !paths.is_empty() => paths,
+                Ok(_) => {
+                    error!(
+                        "Debug mode requires at least one FASTA via --sequence-files or --sequence-list"
+                    );
+                    std::process::exit(1);
+                }
+                Err(msg) => {
+                    error!("{}", msg);
+                    std::process::exit(1);
+                }
+            };
+
+            let sequence_index = match SequenceIndex::build(&sequence_paths) {
+                Ok(index) => Arc::new(index),
+                Err(msg) => {
+                    error!("{}", msg);
+                    std::process::exit(1);
+                }
+            };
+
+            if let Some(paf) = paf {
                 info!("PAF file: {}", paf);
-                info!("Query FASTA file: {}", query_fasta);
-                info!("Target FASTA file: {}", target_fasta);
+                info!("Sequence FASTA files: {}", sequence_paths.join(", "));
 
                 // Count total lines for progress bar (if not stdin)
                 let total_lines = if paf != "-" {
@@ -430,8 +584,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 // Process current chunk in parallel
                                 process_debug_chunk(
                                     &lines,
-                                    &query_fasta,
-                                    &target_fasta,
+                                    sequence_index.as_ref(),
                                     mismatch,
                                     gap_open1,
                                     gap_ext1,
@@ -456,8 +609,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 if !lines.is_empty() {
                     process_debug_chunk(
                         &lines,
-                        &query_fasta,
-                        &target_fasta,
+                        sequence_index.as_ref(),
                         mismatch,
                         gap_open1,
                         gap_ext1,
@@ -492,33 +644,23 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 let b_end = target_seq.len();
 
                 // Create aligner and configure settings
-                let mut aligner = AffineWavefronts::with_penalties_affine2p(
-                    0, mismatch, gap_open1, gap_ext1, gap_open2, gap_ext2,
-                );
+                let distance = Distance::GapAffine2p {
+                    mismatch,
+                    gap_opening1: gap_open1,
+                    gap_extension1: gap_ext1,
+                    gap_opening2: gap_open2,
+                    gap_extension2: gap_ext2,
+                };
+                let aligner = distance.create_aligner(None);
                 let paf_cigar = align_sequences_wfa(
                     &query_seq[a_start..a_end],
                     &target_seq[b_start..b_end],
-                    &mut aligner,
+                    &aligner,
                 );
                 let paf_cigar = cigar_ops_to_cigar_string(&paf_cigar);
-
                 let tracepoints = cigar_to_tracepoints(&paf_cigar, max_complexity);
-
-                let distance_mode = DistanceMode::Affine2p {
-                    mismatch,
-                    gap_open1,
-                    gap_ext1,
-                    gap_open2,
-                    gap_ext2,
-                };
-                let cigar_from_tracepoints = tracepoints_to_cigar(
-                    &tracepoints,
-                    &query_seq,
-                    &target_seq,
-                    0,
-                    0,
-                    &distance_mode,
-                );
+                let cigar_from_tracepoints =
+                    tracepoints_to_cigar(&tracepoints, &query_seq, &target_seq, 0, 0, &distance);
 
                 if false {
                     error!("CIGAR mismatch!");
@@ -640,8 +782,7 @@ fn calculate_identity_stats(cigar: &str) -> (f64, f64) {
 #[cfg(debug_assertions)]
 fn process_debug_chunk(
     lines: &[String],
-    query_fasta_path: &str,
-    target_fasta_path: &str,
+    sequence_index: &SequenceIndex,
     mismatch: i32,
     gap_open1: i32,
     gap_ext1: i32,
@@ -689,84 +830,44 @@ fn process_debug_chunk(
             std::process::exit(1);
         });
 
-        // Create thread-local FASTA readers
-        let query_fasta_reader = FastaReader::from_path(query_fasta_path).unwrap_or_else(|e| {
-            error!("Error reading query FASTA file: {}", e);
-            std::process::exit(1);
-        });
-        let target_fasta_reader = FastaReader::from_path(target_fasta_path).unwrap_or_else(|e| {
-            error!("Error reading target FASTA file: {}", e);
-            std::process::exit(1);
-        });
-
-        // Fetch query sequence from query FASTA
-        let query_seq = if strand == "+" {
-            match query_fasta_reader.fetch_seq(query_name, query_start, query_end - 1) {
-                Ok(seq) => {
-                    let mut seq_vec = seq.to_vec();
-                    unsafe { libc::free(seq.as_ptr() as *mut std::ffi::c_void) };
-                    seq_vec
-                        .iter_mut()
-                        .for_each(|byte| *byte = byte.to_ascii_uppercase());
-                    seq_vec
-                }
-                Err(e) => {
-                    error!("Failed to fetch query sequence: {}", e);
-                    std::process::exit(1);
-                }
-            }
-        } else {
-            match query_fasta_reader.fetch_seq(query_name, query_start, query_end - 1) {
-                Ok(seq) => {
-                    let mut rc = reverse_complement(seq);
-                    unsafe { libc::free(seq.as_ptr() as *mut std::ffi::c_void) };
-                    rc.iter_mut()
-                        .for_each(|byte| *byte = byte.to_ascii_uppercase());
-                    rc
-                }
-                Err(e) => {
-                    error!("Failed to fetch query sequence: {}", e);
-                    std::process::exit(1);
-                }
-            }
-        };
-
-        // Fetch target sequence from target FASTA
-        let target_seq = match target_fasta_reader.fetch_seq(
-            target_name,
-            target_start,
-            target_end - 1,
-        ) {
-            Ok(seq) => {
-                let mut seq_vec = seq.to_vec();
-                unsafe { libc::free(seq.as_ptr() as *mut std::ffi::c_void) };
-                seq_vec
-                    .iter_mut()
-                    .for_each(|byte| *byte = byte.to_ascii_uppercase());
-                seq_vec
-            }
-            Err(e) => {
-                error!("Failed to fetch target sequence: {}", e);
+        let mut query_seq = sequence_index
+            .fetch_sequence(query_name, query_start, query_end)
+            .unwrap_or_else(|msg| {
+                error!("{}", message_with_truncate_paf_file(&msg, line));
                 std::process::exit(1);
-            }
-        };
+            });
+        if strand == "-" {
+            query_seq = reverse_complement(&query_seq);
+        }
+
+        let target_seq = sequence_index
+            .fetch_sequence(target_name, target_start, target_end)
+            .unwrap_or_else(|msg| {
+                error!("{}", message_with_truncate_paf_file(&msg, line));
+                std::process::exit(1);
+            });
 
         // Create thread-local aligner
-        let mut aligner = AffineWavefronts::with_penalties_affine2p(
-            0, mismatch, gap_open1, gap_ext1, gap_open2, gap_ext2,
-        );
-        let realn_cigar = align_sequences_wfa(&query_seq, &target_seq, &mut aligner);
+        let distance = Distance::GapAffine2p {
+            mismatch,
+            gap_opening1: gap_open1,
+            gap_extension1: gap_ext1,
+            gap_opening2: gap_open2,
+            gap_extension2: gap_ext2,
+        };
+        let aligner = distance.create_aligner(None);
+        let realn_cigar = align_sequences_wfa(&query_seq, &target_seq, &aligner);
         let realn_cigar = cigar_ops_to_cigar_string(&realn_cigar);
         // let paf_cigar = &realn_cigar;
 
         // Convert CIGAR to tracepoints using query (A) and target (B) coordinates.
         let tracepoints = cigar_to_tracepoints(paf_cigar, max_complexity);
         let variable_tracepoints = cigar_to_variable_tracepoints(paf_cigar, max_complexity);
-        
+
         // Also convert using raw functions
         let tracepoints_raw = cigar_to_tracepoints_raw(paf_cigar, max_complexity);
         let variable_tracepoints_raw = cigar_to_variable_tracepoints_raw(paf_cigar, max_complexity);
-        
+
         // Convert using diagonal distance functions
         let tracepoints_diagonal = cigar_to_tracepoints_diagonal(paf_cigar, max_complexity);
         let mixed_tracepoints_diagonal = cigar_to_mixed_tracepoints_diagonal(paf_cigar, max_complexity);
@@ -792,12 +893,12 @@ fn process_debug_chunk(
         }
 
         // Reconstruct the CIGAR from tracepoints.
-        let distance_mode = DistanceMode::Affine2p {
+        let distance = Distance::GapAffine2p {
             mismatch,
-            gap_open1,
-            gap_ext1,
-            gap_open2,
-            gap_ext2,
+            gap_opening1: gap_open1,
+            gap_extension1: gap_ext1,
+            gap_opening2: gap_open2,
+            gap_extension2: gap_ext2,
         };
         let cigar_from_tracepoints = tracepoints_to_cigar(
             &tracepoints,
@@ -805,7 +906,7 @@ fn process_debug_chunk(
             &target_seq,
             0,
             0,
-            &distance_mode,
+            &distance,
         );
         let cigar_from_variable_tracepoints = variable_tracepoints_to_cigar(
             &variable_tracepoints,
@@ -813,9 +914,9 @@ fn process_debug_chunk(
             &target_seq,
             0,
             0,
-            &distance_mode,
+            &distance,
         );
-        
+
         // Reconstruct CIGAR from raw tracepoints
         let cigar_from_tracepoints_raw = tracepoints_to_cigar(
             &tracepoints_raw,
@@ -823,7 +924,7 @@ fn process_debug_chunk(
             &target_seq,
             0,
             0,
-            &distance_mode,
+            &distance,
         );
         let cigar_from_variable_tracepoints_raw = variable_tracepoints_to_cigar(
             &variable_tracepoints_raw,
@@ -831,7 +932,7 @@ fn process_debug_chunk(
             &target_seq,
             0,
             0,
-            &distance_mode,
+            &distance,
         );
 
         // Reconstruct CIGAR from diagonal tracepoints
@@ -841,7 +942,7 @@ fn process_debug_chunk(
             &target_seq,
             0,
             0,
-            &distance_mode,
+            &distance,
         );
         let cigar_from_mixed_tracepoints_diagonal = lib_tracepoints::mixed_tracepoints_to_cigar_diagonal(
             &mixed_tracepoints_diagonal,
@@ -849,7 +950,7 @@ fn process_debug_chunk(
             &target_seq,
             0,
             0,
-            &distance_mode,
+            &distance,
         );
         let cigar_from_variable_tracepoints_diagonal = lib_tracepoints::variable_tracepoints_to_cigar_diagonal(
             &variable_tracepoints_diagonal,
@@ -857,7 +958,7 @@ fn process_debug_chunk(
             &target_seq,
             0,
             0,
-            &distance_mode,
+            &distance,
         );
 
         let (matches, mismatches, insertions, inserted_bp, deletions, deleted_bp, paf_gap_compressed_id, paf_block_id) = calculate_cigar_stats(paf_cigar);
@@ -1113,7 +1214,12 @@ fn get_paf_reader(paf: &str) -> io::Result<Box<dyn BufRead>> {
 }
 
 /// Process a chunk of lines in parallel for compression
-fn process_compress_chunk(lines: &[String], tp_type: &TracepointType, max_complexity: usize, complexity_metric: &ComplexityMetric) {
+fn process_compress_chunk(
+    lines: &[String],
+    tp_type: &TracepointType,
+    max_complexity: usize,
+    complexity_metric: &ComplexityMetric,
+) {
     lines.par_iter().for_each(|line| {
         let fields: Vec<&str> = line.split('\t').collect();
         if fields.len() < 12 {
@@ -1329,7 +1435,7 @@ fn process_single_record(
         }
         (TracepointType::Mixed, ComplexityMetric::DiagonalDistance) => {
             let tp = cigar_to_mixed_tracepoints_diagonal(cigar, max_complexity);
-            (format_mixed_tracepoints(&tp), None::<usize>)
+            (format_mixed_tracepoints(&tp), None)
         }
         (TracepointType::Variable, ComplexityMetric::EditDistance) => {
             let tp = cigar_to_variable_tracepoints(cigar, max_complexity);
@@ -1394,16 +1500,14 @@ fn process_single_record(
 fn process_decompress_chunk(
     lines: &[String],
     tp_type: &TracepointType,
-    query_fasta_path: &str,
-    target_fasta_path: &str,
-    mismatch: i32,
-    gap_open1: i32,
-    gap_ext1: i32,
-    gap_open2: i32,
-    gap_ext2: i32,
+    sequence_index: &SequenceIndex,
+    distance_mode: &Distance,
     fastga: bool,
     trace_spacing: usize,
     complexity_metric: &ComplexityMetric,
+    heuristic: bool,
+    heuristic_max_complexity: Option<usize>,
+    keep_old_stats: bool,
 ) {
     lines.par_iter().for_each(|line| {
         let fields: Vec<&str> = line.split('\t').collect();
@@ -1464,110 +1568,43 @@ fn process_decompress_chunk(
             std::process::exit(1);
         });
 
-        // Create thread-local FASTA readers for query and target
-        let query_fasta_reader = FastaReader::from_path(query_fasta_path).unwrap_or_else(|e| {
-            error!("Failed to create query FASTA reader: {}", e);
-            std::process::exit(1);
-        });
+        debug!(
+            "Fetching query sequence {}:{}-{} on {} strand",
+            query_name,
+            query_start,
+            query_end,
+            if strand == "-" && !fastga { "-" } else { "+" }
+        );
+        let mut query_seq = sequence_index
+            .fetch_sequence(query_name, query_start, query_end)
+            .unwrap_or_else(|msg| {
+                error!("{}", message_with_truncate_paf_file(&msg, line));
+                std::process::exit(1);
+            });
+        if strand == "-" && !fastga {
+            query_seq = reverse_complement(&query_seq);
+        }
 
-        let target_fasta_reader = FastaReader::from_path(target_fasta_path).unwrap_or_else(|e| {
-            error!("Failed to create target FASTA reader: {}", e);
-            std::process::exit(1);
-        });
-
-        // Fetch query sequence from query FASTA (with FASTGA we always use forward strand for the query)
-        let query_seq = if strand == "+" || fastga {
-            debug!(
-                "Fetching query sequence {}:{}-{} on + strand",
-                query_name, query_start, query_end
-            );
-
-            match query_fasta_reader.fetch_seq(query_name, query_start, query_end - 1) {
-                Ok(seq) => {
-                    let mut seq_vec = seq.to_vec();
-                    unsafe { libc::free(seq.as_ptr() as *mut std::ffi::c_void) }; // Free up memory (bug https://github.com/rust-bio/rust-htslib/issues/401#issuecomment-1704290171)
-                    seq_vec
-                        .iter_mut()
-                        .for_each(|byte| *byte = byte.to_ascii_uppercase());
-                    seq_vec
-                }
-                Err(e) => {
-                    error!("Failed to fetch query sequence: {}", e);
-                    std::process::exit(1);
-                }
-            }
-        } else {
-            debug!(
-                "Fetching query sequence {}:{}-{} on - strand",
-                query_name, query_start, query_end
-            );
-
-            match query_fasta_reader.fetch_seq(query_name, query_start, query_end - 1) {
-                Ok(seq) => {
-                    let mut rc = reverse_complement(seq);
-                    unsafe { libc::free(seq.as_ptr() as *mut std::ffi::c_void) }; // Free up memory (bug https://github.com/rust-bio/rust-htslib/issues/401#issuecomment-1704290171)
-                    rc.iter_mut()
-                        .for_each(|byte| *byte = byte.to_ascii_uppercase());
-                    rc
-                }
-                Err(e) => {
-                    error!("Failed to fetch query sequence: {}", e);
-                    std::process::exit(1);
-                }
-            }
-        };
-
-        // Fetch target sequence from target FASTA (with FASTGA the strand affects the target sequence)
-        let target_seq = if strand == "+" || !fastga {
-            debug!(
-                "Fetching target sequence {}:{}-{} on + strand",
-                target_name, target_start, target_end
-            );
-
-            match target_fasta_reader.fetch_seq(target_name, target_start, target_end - 1) {
-                Ok(seq) => {
-                    let mut seq_vec = seq.to_vec();
-                    unsafe { libc::free(seq.as_ptr() as *mut std::ffi::c_void) }; // Free up memory (bug https://github.com/rust-bio/rust-htslib/issues/401#issuecomment-1704290171)
-                    seq_vec
-                        .iter_mut()
-                        .for_each(|byte| *byte = byte.to_ascii_uppercase());
-                    seq_vec
-                }
-                Err(e) => {
-                    error!("Failed to fetch target sequence: {}", e);
-                    std::process::exit(1);
-                }
-            }
-        } else {
-            //let (target_start, target_end) = (target_len - target_end, target_len - target_start);
-            debug!(
-                "Fetching target sequence {}:{}-{} on - strand",
-                target_name, target_start, target_end
-            );
-
-            match target_fasta_reader.fetch_seq(target_name, target_start, target_end - 1) {
-                Ok(seq) => {
-                    let mut rc = reverse_complement(seq);
-                    unsafe { libc::free(seq.as_ptr() as *mut std::ffi::c_void) }; // Free up memory (bug https://github.com/rust-bio/rust-htslib/issues/401#issuecomment-1704290171)
-                    rc.iter_mut()
-                        .for_each(|byte| *byte = byte.to_ascii_uppercase());
-                    rc
-                }
-                Err(e) => {
-                    error!("Failed to fetch target sequence: {}", e);
-                    std::process::exit(1);
-                }
-            }
-        };
+        debug!(
+            "Fetching target sequence {}:{}-{} on {} strand",
+            target_name,
+            target_start,
+            target_end,
+            if strand == "-" && fastga { "-" } else { "+" }
+        );
+        let mut target_seq = sequence_index
+            .fetch_sequence(target_name, target_start, target_end)
+            .unwrap_or_else(|msg| {
+                error!("{}", message_with_truncate_paf_file(&msg, line));
+                std::process::exit(1);
+            });
+        if fastga && strand == "-" {
+            target_seq = reverse_complement(&target_seq);
+        }
 
         // Use specified tracepoint type
-        let distance_mode = DistanceMode::Affine2p {
-            mismatch,
-            gap_open1,
-            gap_ext1,
-            gap_open2,
-            gap_ext2,
-        };
+        let distance = distance_mode.clone();
+
         let cigar = if fastga {
             // FastGA decoding
             let tracepoints = parse_tracepoints(tracepoints_str);
@@ -1601,19 +1638,42 @@ fn process_decompress_chunk(
         } else {
             match (tp_type, complexity_metric) {
                 (TracepointType::Mixed, ComplexityMetric::EditDistance) => {
-                    // Mixed representation with edit distance
                     let mixed_tracepoints = parse_mixed_tracepoints(tracepoints_str);
-                    mixed_tracepoints_to_cigar(
-                        &mixed_tracepoints,
-                        &query_seq,
-                        &target_seq,
-                        0,
-                        0,
-                        &distance_mode,
-                    )
+                    if heuristic {
+                        let tps: Vec<(usize, usize)> = mixed_tracepoints
+                            .iter()
+                            .filter_map(|m| match m {
+                                MixedRepresentation::Tracepoint(a, b) => Some((*a, *b)),
+                                _ => None,
+                            })
+                            .collect();
+                        let strategy = compute_banded_static_strategy(
+                            &tps,
+                            complexity_metric,
+                            heuristic_max_complexity
+                                .expect("missing max-complexity with heuristic"),
+                        );
+                        let aligner = distance.create_aligner(Some(&strategy));
+                        mixed_tracepoints_to_cigar_with_aligner(
+                            &mixed_tracepoints,
+                            &query_seq,
+                            &target_seq,
+                            0,
+                            0,
+                            &aligner,
+                        )
+                    } else {
+                        mixed_tracepoints_to_cigar(
+                            &mixed_tracepoints,
+                            &query_seq,
+                            &target_seq,
+                            0,
+                            0,
+                            &distance,
+                        )
+                    }
                 }
                 (TracepointType::Mixed, ComplexityMetric::DiagonalDistance) => {
-                    // Mixed representation with diagonal distance
                     let mixed_tracepoints = parse_mixed_tracepoints(tracepoints_str);
                     mixed_tracepoints_to_cigar_diagonal(
                         &mixed_tracepoints,
@@ -1621,23 +1681,43 @@ fn process_decompress_chunk(
                         &target_seq,
                         0,
                         0,
-                        &distance_mode,
+                        &distance,
                     )
                 }
                 (TracepointType::Variable, ComplexityMetric::EditDistance) => {
-                    // Variable tracepoints representation with edit distance
                     let variable_tracepoints = parse_variable_tracepoints(tracepoints_str);
-                    variable_tracepoints_to_cigar(
-                        &variable_tracepoints,
-                        &query_seq,
-                        &target_seq,
-                        0,
-                        0,
-                        &distance_mode,
-                    )
+                    if heuristic {
+                        let tps: Vec<(usize, usize)> = variable_tracepoints
+                            .iter()
+                            .map(|(a, ob)| (*a, ob.unwrap_or(*a)))
+                            .collect();
+                        let strategy = compute_banded_static_strategy(
+                            &tps,
+                            complexity_metric,
+                            heuristic_max_complexity
+                                .expect("missing max-complexity with heuristic"),
+                        );
+                        let aligner = distance.create_aligner(Some(&strategy));
+                        variable_tracepoints_to_cigar_with_aligner(
+                            &variable_tracepoints,
+                            &query_seq,
+                            &target_seq,
+                            0,
+                            0,
+                            &aligner,
+                        )
+                    } else {
+                        variable_tracepoints_to_cigar(
+                            &variable_tracepoints,
+                            &query_seq,
+                            &target_seq,
+                            0,
+                            0,
+                            &distance,
+                        )
+                    }
                 }
                 (TracepointType::Variable, ComplexityMetric::DiagonalDistance) => {
-                    // Variable tracepoints representation with diagonal distance
                     let variable_tracepoints = parse_variable_tracepoints(tracepoints_str);
                     variable_tracepoints_to_cigar_diagonal(
                         &variable_tracepoints,
@@ -1645,23 +1725,36 @@ fn process_decompress_chunk(
                         &target_seq,
                         0,
                         0,
-                        &distance_mode,
+                        &distance,
                     )
                 }
                 (TracepointType::Standard, ComplexityMetric::EditDistance) => {
-                    // Standard tracepoints with edit distance
                     let tracepoints = parse_tracepoints(tracepoints_str);
-                    tracepoints_to_cigar(
-                        &tracepoints,
-                        &query_seq,
-                        &target_seq,
-                        0,
-                        0,
-                        &distance_mode,
-                    )
+                    if heuristic {
+                        let strategy = compute_banded_static_strategy(
+                            &tracepoints,
+                            complexity_metric,
+                            heuristic_max_complexity
+                                .expect("missing max-complexity with heuristic"),
+                        );
+                        let aligner = distance.create_aligner(Some(&strategy));
+                        let variable_tracepoints: Vec<(usize, Option<usize>)> = tracepoints
+                            .iter()
+                            .map(|(a_len, b_len)| (*a_len, Some(*b_len)))
+                            .collect();
+                        variable_tracepoints_to_cigar_with_aligner(
+                            &variable_tracepoints,
+                            &query_seq,
+                            &target_seq,
+                            0,
+                            0,
+                            &aligner,
+                        )
+                    } else {
+                        tracepoints_to_cigar(&tracepoints, &query_seq, &target_seq, 0, 0, &distance)
+                    }
                 }
                 (TracepointType::Standard, ComplexityMetric::DiagonalDistance) => {
-                    // Standard tracepoints with diagonal distance
                     let tracepoints = parse_tracepoints(tracepoints_str);
                     tracepoints_to_cigar_diagonal(
                         &tracepoints,
@@ -1669,11 +1762,10 @@ fn process_decompress_chunk(
                         &target_seq,
                         0,
                         0,
-                        &distance_mode,
+                        &distance,
                     )
                 }
                 (TracepointType::Fastga, _) => {
-                    // Should not reach here - fastga is handled above
                     error!("Fastga should not be handled in non-fastga path");
                     std::process::exit(1);
                 }
@@ -1696,18 +1788,20 @@ fn process_decompress_chunk(
 
         for field in fields.iter() {
             if field.starts_with("tp:Z:") {
-                // If there were existing gi/bi/sc fields, rename them with 'old' prefix
-                if let Some(old_gi) = existing_gi {
-                    new_fields.push(format!("giold:f:{}", &old_gi[5..]));
-                }
-                if let Some(old_bi) = existing_bi {
-                    new_fields.push(format!("biold:f:{}", &old_bi[5..]));
-                }
-                if let Some(old_sc) = existing_sc {
-                    new_fields.push(format!("scold:i:{}", &old_sc[5..]));
+                // Optionally keep old values
+                if keep_old_stats {
+                    if let Some(old_gi) = existing_gi {
+                        new_fields.push(format!("giold:f:{}", &old_gi[5..]));
+                    }
+                    if let Some(old_bi) = existing_bi {
+                        new_fields.push(format!("biold:f:{}", &old_bi[5..]));
+                    }
+                    if let Some(old_sc) = existing_sc {
+                        new_fields.push(format!("scold:i:{}", &old_sc[5..]));
+                    }
                 }
 
-                // Add new identity stats and alignment score before the CIGAR
+                // Always add new identity stats and alignment score before the CIGAR
                 new_fields.push(format!("gi:f:{:.12}", gap_compressed_identity));
                 new_fields.push(format!("bi:f:{:.12}", block_identity));
                 new_fields.push(format!("sc:i:{}", alignment_score));
@@ -1718,7 +1812,7 @@ fn process_decompress_chunk(
                 || field.starts_with("bi:f:")
                 || field.starts_with("sc:i:")
             {
-                // Skip existing gi, bi, and sc fields - we've already handled them
+                // Skip existing gi, bi, and sc fields - they will be replaced
                 continue;
             } else {
                 new_fields.push(field.to_string());
@@ -1742,6 +1836,7 @@ fn format_tracepoints(tracepoints: &[(usize, usize)]) -> String {
         .collect::<Vec<String>>()
         .join(";")
 }
+
 fn format_mixed_tracepoints(mixed_tracepoints: &[MixedRepresentation]) -> String {
     mixed_tracepoints
         .iter()
@@ -1762,25 +1857,6 @@ fn format_variable_tracepoints(variable_tracepoints: &[(usize, Option<usize>)]) 
         })
         .collect::<Vec<String>>()
         .join(";")
-}
-fn parse_penalties(
-    penalties: &str,
-) -> Result<(i32, i32, i32, i32, i32), Box<dyn std::error::Error>> {
-    let tokens: Vec<&str> = penalties.split(',').collect();
-    if tokens.len() != 5 {
-        error!(
-            "Error: penalties must be provided as mismatch,gap_open1,gap_ext1,gap_open2,gap_ext2"
-        );
-        std::process::exit(1);
-    }
-
-    let mismatch: i32 = tokens[0].parse()?;
-    let gap_open1: i32 = tokens[1].parse()?;
-    let gap_ext1: i32 = tokens[2].parse()?;
-    let gap_open2: i32 = tokens[3].parse()?;
-    let gap_ext2: i32 = tokens[4].parse()?;
-
-    Ok((mismatch, gap_open1, gap_ext1, gap_open2, gap_ext2))
 }
 
 fn parse_tracepoints(tp_str: &str) -> Vec<(usize, usize)> {
@@ -1844,6 +1920,113 @@ fn parse_variable_tracepoints(tp_str: &str) -> Vec<(usize, Option<usize>)> {
             }
         })
         .collect()
+}
+
+fn parse_distance(distance: DistanceChoice, penalties: Option<&str>) -> Result<Distance, String> {
+    match distance {
+        DistanceChoice::Edit => Ok(Distance::Edit {}),
+        DistanceChoice::GapAffine => {
+            let values = parse_penalty_values(penalties, 3, "mismatch,gap_open,gap_ext")?;
+            Ok(Distance::GapAffine {
+                mismatch: values[0],
+                gap_opening: values[1],
+                gap_extension: values[2],
+            })
+        }
+        DistanceChoice::GapAffine2p => {
+            let values = parse_penalty_values(
+                penalties,
+                5,
+                "mismatch,gap_open1,gap_ext1,gap_open2,gap_ext2",
+            )?;
+            Ok(Distance::GapAffine2p {
+                mismatch: values[0],
+                gap_opening1: values[1],
+                gap_extension1: values[2],
+                gap_opening2: values[3],
+                gap_extension2: values[4],
+            })
+        }
+    }
+}
+
+fn parse_penalty_values(
+    penalties: Option<&str>,
+    expected: usize,
+    description: &str,
+) -> Result<Vec<i32>, String> {
+    let Some(penalties) = penalties else {
+        return Err(format!("missing --penalties (expected {})", description));
+    };
+
+    let values: Vec<i32> = penalties
+        .split(',')
+        .map(|token| token.trim())
+        .filter(|token| !token.is_empty())
+        .map(|token| {
+            token
+                .parse::<i32>()
+                .map_err(|e| format!("invalid penalty '{}': {}", token, e))
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+
+    if values.len() != expected {
+        return Err(format!(
+            "expected {} values ({}), found {}",
+            expected,
+            description,
+            values.len()
+        ));
+    }
+
+    Ok(values)
+}
+
+#[cfg(debug_assertions)]
+fn parse_penalties(
+    penalties: &str,
+) -> Result<(i32, i32, i32, i32, i32), Box<dyn std::error::Error>> {
+    let values = parse_penalty_values(
+        Some(penalties),
+        5,
+        "mismatch,gap_open1,gap_ext1,gap_open2,gap_ext2",
+    )
+    .map_err(|msg| -> Box<dyn std::error::Error> { msg.into() })?;
+    Ok((values[0], values[1], values[2], values[3], values[4]))
+}
+
+fn compute_banded_static_strategy(
+    tracepoints: &[(usize, usize)],
+    metric: &ComplexityMetric,
+    max_value: usize,
+) -> HeuristicStrategy {
+    let band_width: i32 = match metric {
+        ComplexityMetric::EditDistance => {
+            let mut bw = 0usize;
+            for &(a_len, b_len) in tracepoints {
+                let delta = if a_len > b_len { a_len - b_len } else { b_len - a_len };
+                let available = max_value.saturating_sub(delta);
+                let seg_band = available / 2;
+                if seg_band > bw {
+                    bw = seg_band;
+                }
+            }
+            bw as i32
+        }
+        ComplexityMetric::DiagonalDistance => max_value as i32,
+    };
+
+    debug!(
+        "Computed banded static strategy: metric={}, min_k={}, max_k={}",
+        metric,
+        -band_width,
+        band_width
+    );
+
+    HeuristicStrategy::BandedStatic {
+        band_min_k: -band_width,
+        band_max_k: band_width,
+    }
 }
 
 #[cfg(debug_assertions)]
