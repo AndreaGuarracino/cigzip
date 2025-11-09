@@ -46,7 +46,6 @@ impl fmt::Display for OutputFormat {
     }
 }
 
-
 /// Distance model used for WFA re-alignment
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
 enum DistanceChoice {
@@ -103,7 +102,7 @@ enum Args {
         #[clap(flatten)]
         common: CommonOpts,
 
-        /// Tracepoint type
+        /// Tracepoint type (standard, mixed, variable, fastga)
         #[arg(
             long = "type",
             default_value = "standard",
@@ -112,7 +111,7 @@ enum Args {
         )]
         tp_type: TracepointType,
 
-        /// Complexity metric for tracepoint segmentation
+        /// Complexity metric for tracepoint segmentation (edit-distance, diagonal-distance)
         #[arg(
             long = "complexity-metric",
             default_value = "edit-distance",
@@ -132,13 +131,17 @@ enum Args {
         /// Output file path (required for binary format, stdout for text)
         #[arg(long = "output-file")]
         output_file: Option<String>,
+
+        /// Compression strategy (varint, huffman; only for binary format)
+        #[arg(long = "strategy", default_value = "varint", value_parser = lib_bpaf::CompressionStrategy::from_str, value_name = "STRATEGY")]
+        strategy: lib_bpaf::CompressionStrategy,
     },
     /// Decode tracepoints back to CIGAR
     Decode {
         #[clap(flatten)]
         common: CommonOpts,
 
-        /// Tracepoint type
+        /// Tracepoint type (standard, mixed, variable, fastga)
         #[arg(
             long = "type",
             default_value = "standard",
@@ -147,7 +150,7 @@ enum Args {
         )]
         tp_type: TracepointType,
 
-        /// Complexity metric for segmentation (must match what was used during compression)
+        /// Complexity metric for tracepoint segmentation (edit-distance, diagonal-distance)
         #[arg(
             long = "complexity-metric",
             default_value = "edit-distance",
@@ -197,6 +200,14 @@ enum Args {
         /// Output binary file
         #[arg(short = 'o', long = "output")]
         output: String,
+
+        /// Compression strategy (varint, huffman; only for binary format)
+        #[arg(long = "strategy", default_value = "varint", value_parser = lib_bpaf::CompressionStrategy::from_str, value_name = "STRATEGY")]
+        strategy: lib_bpaf::CompressionStrategy,
+
+        /// Verbosity level (0 = error, 1 = info, 2 = debug)
+        #[arg(short, long, default_value = "1")]
+        verbose: u8,
     },
     /// Decompress binary PAF to text format with tracepoints
     Decompress {
@@ -207,6 +218,10 @@ enum Args {
         /// Output text PAF file (use "-" for stdout)
         #[arg(short = 'o', long = "output", default_value = "-")]
         output: String,
+
+        /// Verbosity level (0 = error, 1 = info, 2 = debug)
+        #[arg(short, long, default_value = "1")]
+        verbose: u8,
     },
     /// Run debugging mode (only available in debug builds)
     #[cfg(debug_assertions)]
@@ -261,6 +276,7 @@ impl fmt::Debug for Args {
                 max_complexity,
                 output_format,
                 output_file,
+                strategy,
             } => f
                 .debug_struct("Args::Encode")
                 .field("common", common)
@@ -272,6 +288,7 @@ impl fmt::Debug for Args {
                 .field("max_complexity", max_complexity)
                 .field("output_format", output_format)
                 .field("output_file", output_file)
+                .field("strategy", strategy)
                 .finish(),
             Args::Decode {
                 common,
@@ -302,15 +319,18 @@ impl fmt::Debug for Args {
                 .field("heuristic", heuristic)
                 .field("max_complexity", max_complexity)
                 .finish(),
-            Args::Compress { input, output } => f
+            Args::Compress { input, output, strategy, verbose } => f
                 .debug_struct("Args::Compress")
                 .field("input", input)
                 .field("output", output)
+                .field("strategy", strategy)
+                .field("verbose", verbose)
                 .finish(),
-            Args::Decompress { input, output } => f
+            Args::Decompress { input, output, verbose } => f
                 .debug_struct("Args::Decompress")
                 .field("input", input)
                 .field("output", output)
+                .field("verbose", verbose)
                 .finish(),
             #[cfg(debug_assertions)]
             Args::Debug {
@@ -347,6 +367,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             complexity_metric,
             output_format,
             output_file,
+            strategy,
         } => {
             setup_logger(common.verbose);
 
@@ -364,6 +385,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             // Validate output file for binary format
             if matches!(output_format, OutputFormat::Binary) && output_file.is_none() {
                 error!("--output-file is required when using --output-format binary");
+                std::process::exit(1);
+            }
+
+            // Validate that --strategy is only used with binary format
+            if !matches!(strategy, lib_bpaf::CompressionStrategy::Varint) && !matches!(output_format, OutputFormat::Binary) {
+                error!("--strategy can only be used with --output-format binary");
                 std::process::exit(1);
             }
 
@@ -428,17 +455,20 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     // Binary format requires --output-file (no stdout output)
                     // Single-pass: CIGAR → tracepoints → binary file
                     let output_path = output_file.as_ref().unwrap();
+
                     if let Err(e) = lib_bpaf::encode_cigar_to_binary(
                         &common.paf,
                         output_path,
                         &tp_type,
                         max_complexity,
                         &complexity_metric,
+                        strategy,
                     ) {
                         error!("Binary encoding failed: {}", e);
                         std::process::exit(1);
                     }
-                    info!("Binary output written to: {}", output_path);
+
+                    info!("Binary output written to: {} using {} strategy", output_path, strategy);
                 }
             }
         }
@@ -680,18 +710,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 }
             }
         }
-        Args::Compress { input, output } => {
-            setup_logger(1);
+        Args::Compress { input, output, strategy, verbose } => {
+            setup_logger(verbose);
 
-            if let Err(e) = lib_bpaf::compress_paf(&input, &output) {
+            if let Err(e) = lib_bpaf::compress_paf(&input, &output, strategy) {
                 error!("Compression failed: {}", e);
                 std::process::exit(1);
             }
 
-            info!("Compressed {} to {}", input, output);
+            info!("Compressed {} to {} using {} strategy", input, output, strategy);
         }
-        Args::Decompress { input, output } => {
-            setup_logger(1); // Initialize logger with info level
+        Args::Decompress { input, output, verbose } => {
+            setup_logger(verbose);
 
             // Decompress binary PAF to text format with tracepoints
             info!("Decompressing binary PAF to text format...");
