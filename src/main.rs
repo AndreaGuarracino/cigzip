@@ -91,7 +91,7 @@ struct CommonOpts {
     threads: usize,
 
     /// Verbosity level (0 = error, 1 = info, 2 = debug)
-    #[arg(short, long, default_value = "0")]
+    #[arg(short, long, default_value = "1")]
     verbose: u8,
 }
 
