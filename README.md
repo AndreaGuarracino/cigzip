@@ -1,92 +1,178 @@
 # cigzip
 
-Encode and decode alignment CIGARs using tracepoints.
+Convert CIGAR strings to compact tracepoints and back, with efficient binary storage.
 
-## Overview
-
-`cigzip` converts CIGAR strings into compact tracepoints that adapt to local alignment complexity, and reconstructs the original CIGARs on demand.
-
-## Features
-
-- **Encode**: Convert CIGAR strings to tracepoints (compact storage)
-- **Decode**: Reconstruct full CIGAR strings from tracepoints
-- **Parallel Processing**: Multi-threaded operation with chunk-based processing
-- **Configurable Parameters**: Choose tracepoint type/metric, penalties, and banded heuristics
-- **Support for Compressed Files**: Automatically handles gzipped and bgzipped PAF files
-
-## Usage
-
-Encode (CIGAR → tracepoints)
+## Quick Start
 
 ```sh
-# Standard, default settings
-cigzip encode --paf in.paf > out.tp.paf
+# Encode CIGAR to tracepoints
+cigzip encode --paf input.paf > output.tp.paf
 
-# Mixed type, diagonal metric, tighter segments
-cigzip encode --paf in.paf --type mixed --complexity-metric diagonal-distance --max-complexity 24 > out.mixed.tp.paf
+# Decode tracepoints back to CIGAR
+cigzip decode --paf output.tp.paf --sequence-files ref.fa > restored.paf
 
-# FastGA (spacing=100 default)
-cigzip encode --paf in.paf --type fastga > out.fastga.tp.paf
+# Binary compression (6x compression, ~1min for 4GB)
+cigzip compress -i input.paf -o output.bpaf
+
+# Decompress (auto-detects format)
+cigzip decompress -i output.bpaf -o output.paf
 ```
 
-Decode (tracepoints → CIGAR)
+## Commands
+
+### encode - CIGAR to tracepoints
 
 ```sh
-# Edit distance (unit costs)
-cigzip decode --paf out.tp.paf --sequence-files ref.fa > out.cigar.paf
+# Text output (default)
+cigzip encode --paf input.paf > output.tp.paf
 
-# Gap-affine 2p penalties
-cigzip decode --paf out.tp.paf --sequence-files ref1.fa ref2.fa --distance gap-affine-2p --penalties 5,8,2,24,1 > out.cigar.paf
-
-# Banded heuristics (band from max-complexity)
-cigzip decode --paf out.tp.paf --sequence-files ref.fa --heuristics --max-complexity 100 > out.cigar.paf
-
-# Many FASTAs via list file
-cigzip decode --paf out.tp.paf --sequence-list refs.txt > out.cigar.paf
-
-# Keep old stats while replacing gi/bi/sc
-cigzip decode --paf out.tp.paf --sequence-files ref.fa --keep-old-stats > out.cigar.paf
+# Binary output
+cigzip encode --paf input.paf --type fastga \
+  --output-format binary --output-file output.bpaf
 ```
 
-### Command Options
+**Options:**
+- `--type`: `standard` (default), `mixed`, `variable`, `fastga`
+- `--complexity-metric`: `edit-distance` (default), `diagonal-distance`
+- `--max-complexity N`: Segment size limit (default: 32, fastga: 100)
+- `--output-format`: `text` (stdout), `binary` (requires `--output-file`)
+- `--threads N`: Parallel threads (default: 4)
 
-#### Common Options
-- `--paf FILE`: PAF file containing alignments (use "-" for stdin)
-- `--threads N`: Number of threads to use (default: 4)
-- `--verbose N`: Verbosity level (0=error, 1=info, 2=debug)
+### decode - Tracepoints to CIGAR
 
-#### Encode
-- `--type`: Tracepoint representation (`standard`, `mixed`, `variable`, `fastga`)
-- `--complexity-metric`: `edit-distance` (default) or `diagonal-distance`
-- `--max-complexity N`: Segmentation limit (default: 32; 100 for `fastga`)
+```sh
+# Auto-detects text or binary format
+cigzip decode --paf input.paf --sequence-files ref.fa > output.paf
 
-#### Decode
-- `--sequence-files`: One or more FASTA files with all referenced sequences
-- `--sequence-list`: File containing additional FASTA paths (one per line)
-- `--distance`: `edit` (unit costs), `gap-affine`, or `gap-affine-2p`
-- `--penalties`: Comma list. For `gap-affine-2p`: `mismatch,gap_open1,gap_ext1,gap_open2,gap_ext2` (default `5,8,2,24,1`)
-- `--heuristics --max-complexity N`: Enable banded static heuristics (works with both metrics). For `diagonal-distance`, the band equals `max-complexity`.
-- `--keep-old-stats`: When replacing fields, also keep previous `gi/bi/sc` as `giold/biold/scold`
+# FASTA list file
+cigzip decode --paf input.paf --sequence-list refs.txt > output.paf
+
+# Custom gap penalties
+cigzip decode --paf input.paf --sequence-files ref.fa \
+  --distance gap-affine-2p --penalties 5,8,2,24,1 > output.paf
+
+# Banded alignment (faster)
+cigzip decode --paf input.paf --sequence-files ref.fa \
+  --heuristic --max-complexity 100 > output.paf
+```
+
+**Options:**
+- `--sequence-files`: FASTA file(s) with reference sequences
+- `--sequence-list`: File containing FASTA paths (one per line)
+- `--distance`: `edit` (default), `gap-affine`, `gap-affine-2p`
+- `--penalties`: Gap penalty values (default: 5,8,2,24,1)
+- `--heuristic`: Enable banded alignment
+- `--keep-old-stats`: Preserve original gi/bi/sc as giold/biold/scold
+
+### compress - PAF with tracepoints to binary
+
+```sh
+# Compress (delta + varint + zstd)
+cigzip compress -i input.paf -o output.bpaf
+
+# From stdin
+cat input.paf | cigzip compress -i - -o output.bpaf
+```
+
+**Options:**
+- `-i, --input`: Input PAF file with `tp:Z:` tags (or `-` for stdin)
+- `-o, --output`: Output binary file
+
+### decompress - Binary to PAF with tracepoints
+
+```sh
+# To file
+cigzip decompress -i input.bpaf -o output.paf
+
+# To stdout
+cigzip decompress -i input.bpaf -o -
+```
+
+## Library Usage
+
+Use cigzip as a Rust library for programmatic access to BPAF files:
+
+```rust
+use lib_bpaf::BpafReader;
+
+fn main() -> std::io::Result<()> {
+    // Open BPAF file with index
+    let mut reader = BpafReader::open("alignments.bpaf")?;
+    println!("Total records: {}", reader.len());
+
+    // O(1) random access by record ID
+    let record = reader.get_alignment_record(1000)?;
+    let (tracepoints, tp_type, _, _) = reader.get_tracepoints(1000)?;
+
+    match &tracepoints {
+        TracepointData::Standard(tps) => {
+            println!("Standard tracepoints: {} items", tps.len());
+        }
+        TracepointData::Fastga(tps) => {
+            println!("FastGA tracepoints: {} items", tps.len());
+        }
+        _ => {}
+    }
+
+    // Sequential iteration
+    for record in reader.iter_records() {
+        let record = record?;
+        // Process each alignment...
+    }
+
+    Ok(())
+}
+```
+
+Add to `Cargo.toml`:
+```toml
+[dependencies]
+cigzip = { git = "https://github.com/AndreaGuarracino/cigzip" }
+lib_bpaf = { git = "https://github.com/AndreaGuarracino/lib_bpaf" }
+```
+
+See examples:
+- `examples/seek_demo.rs` - O(1) random access
+- `examples/offset_demo.rs` - Offset-based access
 
 ## Building
 
-```shell
+```sh
 git clone https://github.com/AndreaGuarracino/cigzip
 cd cigzip
 cargo build --release
 ```
 
-### For GUIX's slaves
+Binary: `target/release/cigzip`
 
-```bash
-git clone --recursive https://github.com/AndreaGuarracino/cigzip
-cd cigzip/WFA2-lib
-env -i bash -c 'PATH=/usr/local/bin:/usr/bin:/bin ~/.cargo/bin/cargo build --release'
+## Format Details
+
+### Binary Format (BPAF)
+
 ```
+[Header] → [Records] → [StringTable]
+```
+
+- **Compression**: Delta encoding + varint + zstd level 3
+- **Deduplication**: Shared string table for sequence names
+- **Random access**: External `.bpaf.idx` index for O(1) lookup
+- **Backwards compatible**: Reads all format versions
+
+### Index Format
+
+```
+Magic:     BPAI (4 bytes)
+Version:   1 (1 byte)
+Count:     varint (number of records)
+Offsets:   varint[] (byte positions)
+```
+
+Index enables instant access to any alignment without scanning.
 
 ## License
 
-This project is licensed under the MIT License. See the [LICENSE](LICENSE) file for details.
+MIT License - see [LICENSE](LICENSE) file
 
 ## References
-Inspired by Gene Myers' tracepoint concept described in [Recording Alignments with Trace Points](https://dazzlerblog.wordpress.com/2015/11/05/trace-points/).
+
+Inspired by Gene Myers' tracepoint concept: [Recording Alignments with Trace Points](https://dazzlerblog.wordpress.com/2015/11/05/trace-points/)
