@@ -22,3 +22,10 @@ rayon = "1.10.0" # Parallel processing library
 libc = "0.2.177"
 
 indicatif="0.18.2"
+
+# Dependencies for AGC format (for sequences) support
+agc-rs = { git = "https://github.com/pangenome/agc-rs.git", optional = true }
+
+[features]
+default = ["agc"]
+agc = ["agc-rs"]

@@ -67,8 +67,14 @@ cigzip decode --paf input.paf --sequence-files ref.fa \
 ### compress - PAF with tracepoints to binary
 
 ```sh
-# Compress (delta + varint + zstd)
+# Compress with automatic strategy
 cigzip compress -i input.paf -o output.bpaf
+
+# Compress with specific strategy (automatic, varint-zstd, delta-varint-zstd)
+cigzip compress -i input.paf -o output.bpaf --strategy varint-zstd
+
+# Set compression level (1-22, default 3)
+cigzip compress -i input.paf -o output.bpaf --strategy automatic,9
 
 # From stdin
 cat input.paf | cigzip compress -i - -o output.bpaf
@@ -77,6 +83,7 @@ cat input.paf | cigzip compress -i - -o output.bpaf
 **Options:**
 - `-i, --input`: Input PAF file with `tp:Z:` tags (or `-` for stdin)
 - `-o, --output`: Output binary file
+- `--strategy`: `varint` (default, recommended) or `varint-raw`
 
 ### decompress - Binary to PAF with tracepoints
 
@@ -153,9 +160,10 @@ Binary: `target/release/cigzip`
 [Header] → [Records] → [StringTable]
 ```
 
-- **Compression**: Delta encoding + varint + zstd level 3
+- **Fast O(1) random access**: Byte-aligned varint encoding enables instant tracepoint extraction
+- **Compression**: Automatic encoding selection + varint + zstd (configurable level 1-22)
 - **Deduplication**: Shared string table for sequence names
-- **Random access**: External `.bpaf.idx` index for O(1) lookup
+- **Random access**: External `.bpaf.idx` index for O(1) record lookup
 - **Backwards compatible**: Reads all format versions
 
 ### Index Format

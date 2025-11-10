@@ -1,6 +1,6 @@
-mod sequence_index;
+mod sequence;
 
-use crate::sequence_index::{collect_sequence_paths, SequenceIndex};
+use crate::sequence::{collect_sequence_paths, SequenceIndex};
 use lib_bpaf;
 use clap::{Parser, ValueEnum};
 use flate2::read::MultiGzDecoder;
@@ -124,6 +124,14 @@ enum Args {
         #[arg(long = "max-complexity")]
         max_complexity: Option<usize>,
 
+        /// Distance metric for CIGAR reconstruction (only needed for binary format)
+        #[arg(long = "distance", default_value_t = DistanceChoice::Edit)]
+        distance: DistanceChoice,
+
+        /// Gap penalties (only for gap-affine distances; ignored with edit distance)
+        #[arg(long)]
+        penalties: Option<String>,
+
         /// Output format (text or binary)
         #[arg(short = 'o', long = "output-format", default_value_t = OutputFormat::Text)]
         output_format: OutputFormat,
@@ -132,7 +140,7 @@ enum Args {
         #[arg(long = "output-file")]
         output_file: Option<String>,
 
-        /// Compression strategy (varint, huffman; only for binary format)
+        /// Compression strategy (varint or varint-raw); only for binary format
         #[arg(long = "strategy", default_value = "varint", value_parser = lib_bpaf::CompressionStrategy::from_str, value_name = "STRATEGY")]
         strategy: lib_bpaf::CompressionStrategy,
     },
@@ -201,7 +209,35 @@ enum Args {
         #[arg(short = 'o', long = "output")]
         output: String,
 
-        /// Compression strategy (varint, huffman; only for binary format)
+        /// Tracepoint type (standard, mixed, variable, fastga) - REQUIRED
+        #[arg(
+            long = "type",
+            value_parser = TracepointType::from_str,
+            value_name = "TYPE"
+        )]
+        tp_type: TracepointType,
+
+        /// Maximum complexity value (for Standard/Mixed/Variable: max_diff per segment; for FASTGA: trace_spacing) - REQUIRED
+        #[arg(long = "max-complexity")]
+        max_complexity: u64,
+
+        /// Complexity metric (edit-distance, diagonal-distance) - REQUIRED
+        #[arg(
+            long = "complexity-metric",
+            value_parser = ComplexityMetric::from_str,
+            value_name = "METRIC"
+        )]
+        complexity_metric: ComplexityMetric,
+
+        /// Distance metric for CIGAR reconstruction (edit, gap-affine, gap-affine2p) - REQUIRED
+        #[arg(long = "distance")]
+        distance: DistanceChoice,
+
+        /// Gap penalties (only for gap-affine: "mismatch,opening,extension" or gap-affine2p: "mismatch,opening1,extension1,opening2,extension2"; ignored with edit distance)
+        #[arg(long)]
+        penalties: Option<String>,
+
+        /// Compression strategy: varint (recommended), varint-raw (only for binary format)
         #[arg(long = "strategy", default_value = "varint", value_parser = lib_bpaf::CompressionStrategy::from_str, value_name = "STRATEGY")]
         strategy: lib_bpaf::CompressionStrategy,
 
@@ -274,6 +310,8 @@ impl fmt::Debug for Args {
                 tp_type,
                 complexity_metric,
                 max_complexity,
+                distance,
+                penalties,
                 output_format,
                 output_file,
                 strategy,
@@ -281,11 +319,10 @@ impl fmt::Debug for Args {
                 .debug_struct("Args::Encode")
                 .field("common", common)
                 .field("tp_type", tp_type)
-                .field(
-                    "complexity_metric",
-                    complexity_metric,
-                )
+                .field("complexity_metric", complexity_metric)
                 .field("max_complexity", max_complexity)
+                .field("distance", distance)
+                .field("penalties", penalties)
                 .field("output_format", output_format)
                 .field("output_file", output_file)
                 .field("strategy", strategy)
@@ -319,10 +356,15 @@ impl fmt::Debug for Args {
                 .field("heuristic", heuristic)
                 .field("max_complexity", max_complexity)
                 .finish(),
-            Args::Compress { input, output, strategy, verbose } => f
+            Args::Compress { input, output, tp_type, max_complexity, complexity_metric, distance, penalties, strategy, verbose } => f
                 .debug_struct("Args::Compress")
                 .field("input", input)
                 .field("output", output)
+                .field("tp_type", tp_type)
+                .field("max_complexity", max_complexity)
+                .field("complexity_metric", complexity_metric)
+                .field("distance", distance)
+                .field("penalties", penalties)
                 .field("strategy", strategy)
                 .field("verbose", verbose)
                 .finish(),
@@ -365,6 +407,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             tp_type,
             max_complexity,
             complexity_metric,
+            distance,
+            penalties,
             output_format,
             output_file,
             strategy,
@@ -389,7 +433,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
 
             // Validate that --strategy is only used with binary format
-            if !matches!(strategy, lib_bpaf::CompressionStrategy::Varint) && !matches!(output_format, OutputFormat::Binary) {
+            if !matches!(strategy, lib_bpaf::CompressionStrategy::DeltaVarintZstd(_)) && !matches!(output_format, OutputFormat::Binary) {
                 error!("--strategy can only be used with --output-format binary");
                 std::process::exit(1);
             }
@@ -456,12 +500,22 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     // Single-pass: CIGAR → tracepoints → binary file
                     let output_path = output_file.as_ref().unwrap();
 
+                    // Parse distance with penalties
+                    let bpaf_distance = match parse_distance_bpaf(distance, penalties.as_deref()) {
+                        Ok(d) => d,
+                        Err(e) => {
+                            error!("Invalid distance parameters: {}", e);
+                            std::process::exit(1);
+                        }
+                    };
+
                     if let Err(e) = lib_bpaf::encode_cigar_to_binary(
                         &common.paf,
                         output_path,
                         &tp_type,
                         max_complexity,
                         &complexity_metric,
+                        bpaf_distance,
                         strategy,
                     ) {
                         error!("Binary encoding failed: {}", e);
@@ -710,15 +764,25 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 }
             }
         }
-        Args::Compress { input, output, strategy, verbose } => {
+        Args::Compress { input, output, tp_type, max_complexity, complexity_metric, distance, penalties, strategy, verbose } => {
             setup_logger(verbose);
 
-            if let Err(e) = lib_bpaf::compress_paf(&input, &output, strategy) {
+            // Parse distance with penalties
+            let bpaf_distance = match parse_distance_bpaf(distance, penalties.as_deref()) {
+                Ok(d) => d,
+                Err(e) => {
+                    error!("Invalid distance parameters: {}", e);
+                    std::process::exit(1);
+                }
+            };
+
+            if let Err(e) = lib_bpaf::compress_paf(&input, &output, strategy, tp_type, max_complexity, complexity_metric, bpaf_distance) {
                 error!("Compression failed: {}", e);
                 std::process::exit(1);
             }
 
-            info!("Compressed {} to {} using {} strategy", input, output, strategy);
+            info!("Compressed {} to {} using {} strategy (type={}, max_complexity={}, metric={}, distance={})",
+                  input, output, strategy, tp_type, max_complexity, complexity_metric, distance);
         }
         Args::Decompress { input, output, verbose } => {
             setup_logger(verbose);
@@ -2506,7 +2570,7 @@ fn parse_variable_tracepoints(tp_str: &str) -> Vec<(usize, Option<usize>)> {
 
 fn parse_distance(distance: DistanceChoice, penalties: Option<&str>) -> Result<Distance, String> {
     match distance {
-        DistanceChoice::Edit => Ok(Distance::Edit {}),
+        DistanceChoice::Edit => Ok(Distance::Edit),
         DistanceChoice::GapAffine => {
             let values = parse_penalty_values(penalties, 3, "mismatch,gap_open,gap_ext")?;
             Ok(Distance::GapAffine {
@@ -2522,6 +2586,34 @@ fn parse_distance(distance: DistanceChoice, penalties: Option<&str>) -> Result<D
                 "mismatch,gap_open1,gap_ext1,gap_open2,gap_ext2",
             )?;
             Ok(Distance::GapAffine2p {
+                mismatch: values[0],
+                gap_opening1: values[1],
+                gap_extension1: values[2],
+                gap_opening2: values[3],
+                gap_extension2: values[4],
+            })
+        }
+    }
+}
+
+fn parse_distance_bpaf(distance: DistanceChoice, penalties: Option<&str>) -> Result<lib_bpaf::Distance, String> {
+    match distance {
+        DistanceChoice::Edit => Ok(lib_bpaf::Distance::Edit),
+        DistanceChoice::GapAffine => {
+            let values = parse_penalty_values(penalties, 3, "mismatch,gap_open,gap_ext")?;
+            Ok(lib_bpaf::Distance::GapAffine {
+                mismatch: values[0],
+                gap_opening: values[1],
+                gap_extension: values[2],
+            })
+        }
+        DistanceChoice::GapAffine2p => {
+            let values = parse_penalty_values(
+                penalties,
+                5,
+                "mismatch,gap_open1,gap_ext1,gap_open2,gap_ext2",
+            )?;
+            Ok(lib_bpaf::Distance::GapAffine2p {
                 mismatch: values[0],
                 gap_opening1: values[1],
                 gap_extension1: values[2],
