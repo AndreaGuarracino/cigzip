@@ -451,10 +451,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 output_format
             );
 
-            // Set the thread pool size
-            rayon::ThreadPoolBuilder::new()
+            // Set the thread pool size (ignore error if already initialized)
+            let _ = rayon::ThreadPoolBuilder::new()
                 .num_threads(common.threads)
-                .build_global()?;
+                .build_global();
 
             // Process based on output format
             match output_format {
@@ -646,10 +646,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 heuristic_max_complexity.map(|mc| format!(", max-complexity={}", mc)).unwrap_or_default()
             );
 
-            // Set the thread pool size
-            rayon::ThreadPoolBuilder::new()
+            // Set the thread pool size (ignore error if already initialized)
+            let _ = rayon::ThreadPoolBuilder::new()
                 .num_threads(common.threads)
-                .build_global()?;
+                .build_global();
 
             // Validate and apply conditional defaults
             let trace_spacing = if is_fastga {
@@ -883,10 +883,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 // Open the PAF file (or use stdin if "-" is provided).
                 let paf_reader = get_paf_reader(&paf)?;
 
-                // Set the thread pool size
-                rayon::ThreadPoolBuilder::new()
+                // Set the thread pool size (ignore error if already initialized)
+                let _ = rayon::ThreadPoolBuilder::new()
                     .num_threads(threads)
-                    .build_global()?;
+                    .build_global();
 
                 // Process in chunks
                 let chunk_size = 1000; // Or make this configurable
