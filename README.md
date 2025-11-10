@@ -8,13 +8,14 @@ Convert CIGAR strings to compact tracepoints and back, with efficient binary sto
 # Encode CIGAR to tracepoints
 cigzip encode --paf input.paf > output.tp.paf
 
-# Decode tracepoints back to CIGAR
+# Decode tracepoints back to CIGAR (supports FASTA and AGC)
 cigzip decode --paf output.tp.paf --sequence-files ref.fa > restored.paf
+cigzip decode --paf output.tp.paf --sequence-files archive.agc > restored.paf
 
-# Binary compression (6x compression, ~1min for 4GB)
-cigzip compress -i input.paf -o output.bpaf
+# Compress to binary format
+cigzip compress -i input.tp.paf -o output.bpaf
 
-# Decompress (auto-detects format)
+# DecompressS
 cigzip decompress -i output.bpaf -o output.paf
 ```
 
@@ -27,72 +28,119 @@ cigzip decompress -i output.bpaf -o output.paf
 cigzip encode --paf input.paf > output.tp.paf
 
 # Binary output
-cigzip encode --paf input.paf --type fastga \
-  --output-format binary --output-file output.bpaf
+cigzip encode --paf input.paf --type standard \
+  --output-format binary --output-file output.bpaf --strategy varint
 ```
 
 **Options:**
-- `--type`: `standard` (default), `mixed`, `variable`, `fastga`
-- `--complexity-metric`: `edit-distance` (default), `diagonal-distance`
+- `--paf FILE`: Input PAF file with CIGAR strings
+- `--type TYPE`: Tracepoint type - `standard` (default), `mixed`, `variable`, `fastga`
+- `--complexity-metric METRIC`: `edit-distance` (default), `diagonal-distance`
 - `--max-complexity N`: Segment size limit (default: 32, fastga: 100)
-- `--output-format`: `text` (stdout), `binary` (requires `--output-file`)
+- `--output-format FORMAT`: `text` (stdout, default), `binary` (requires `--output-file`)
+- `--output-file FILE`: Output file path (required for binary format)
+- `--strategy STRATEGY`: Compression strategy for binary - `varint` (default), `huffman`
+- `--distance DIST`: Distance metric for alignment - `edit` (default), `gap-affine`, `gap-affine-2p`
+- `--penalties VALUES`: Gap penalty values (format depends on distance)
+- `--heuristic`: Enable banded alignment (edit distance only, requires `--max-complexity`)
 - `--threads N`: Parallel threads (default: 4)
+- `--verbose N`: Verbosity level - 0 (error), 1 (info, default), 2 (debug)
 
 ### decode - Tracepoints to CIGAR
 
 ```sh
 # Auto-detects text or binary format
-cigzip decode --paf input.paf --sequence-files ref.fa > output.paf
+cigzip decode --paf input.tp.paf --sequence-files ref.fa > output.paf
+
+# AGC format (Assembled Genomes Compressor)
+cigzip decode --paf input.tp.paf --sequence-files genomes.agc > output.paf
 
 # FASTA list file
-cigzip decode --paf input.paf --sequence-list refs.txt > output.paf
+cigzip decode --paf input.tp.paf --sequence-list refs.txt > output.paf
 
 # Custom gap penalties
-cigzip decode --paf input.paf --sequence-files ref.fa \
+cigzip decode --paf input.tp.paf --sequence-files ref.fa \
   --distance gap-affine-2p --penalties 5,8,2,24,1 > output.paf
 
 # Banded alignment (faster)
-cigzip decode --paf input.paf --sequence-files ref.fa \
+cigzip decode --paf input.tp.paf --sequence-files ref.fa \
   --heuristic --max-complexity 100 > output.paf
 ```
 
-**Options:**
-- `--sequence-files`: FASTA file(s) with reference sequences
-- `--sequence-list`: File containing FASTA paths (one per line)
-- `--distance`: `edit` (default), `gap-affine`, `gap-affine-2p`
-- `--penalties`: Gap penalty values (default: 5,8,2,24,1)
-- `--heuristic`: Enable banded alignment
-- `--keep-old-stats`: Preserve original gi/bi/sc as giold/biold/scold
+**Sequence File Options:**
+- `--sequence-files FILE...`: Reference sequences (FASTA or AGC format)
+  - FASTA: `.fa`, `.fasta`, `.fna` (optionally gzipped)
+  - AGC: `.agc` archives (query as `contig` or `contig@sample`)
+  - Cannot mix FASTA and AGC files
+- `--sequence-list FILE`: File containing sequence paths (one per line)
 
-### compress - PAF with tracepoints to binary
+**Alignment Options:**
+- `--type TYPE`: Tracepoint type (must match encoding) - `standard` (default), `mixed`, `variable`, `fastga`
+- `--complexity-metric METRIC`: `edit-distance` (default), `diagonal-distance`
+- `--distance DIST`: Distance metric - `edit` (default), `gap-affine`, `gap-affine-2p`
+- `--penalties VALUES`: Gap penalty values (default: 5,8,2,24,1)
+- `--heuristic`: Enable banded alignment (edit distance only, requires `--max-complexity`)
+- `--max-complexity N`: Maximum complexity for heuristic banding
+- `--trace-spacing N`: Trace spacing for fastga type (default: 100)
+
+**Other Options:**
+- `--keep-old-stats`: Preserve original gi/bi/sc as giold/biold/scold
+- `--threads N`: Parallel threads (default: 4)
+- `--verbose N`: Verbosity level - 0 (error), 1 (info, default), 2 (debug)
+
+### compress - Binary PAF compression
+
+Compress PAF files with tracepoints to binary format.
 
 ```sh
-# Compress with automatic strategy
-cigzip compress -i input.paf -o output.bpaf
+# Basic compression
+cigzip compress -i input.tp.paf -o output.bpaf
 
-# Compress with specific strategy (automatic, varint-zstd, delta-varint-zstd)
-cigzip compress -i input.paf -o output.bpaf --strategy varint-zstd
-
-# Set compression level (1-22, default 3)
-cigzip compress -i input.paf -o output.bpaf --strategy automatic,9
+# With specific strategy
+cigzip compress -i input.tp.paf -o output.bpaf --strategy huffman
 
 # From stdin
-cat input.paf | cigzip compress -i - -o output.bpaf
+cat input.tp.paf | cigzip compress -i - -o output.bpaf
 ```
 
 **Options:**
-- `-i, --input`: Input PAF file with `tp:Z:` tags (or `-` for stdin)
-- `-o, --output`: Output binary file
-- `--strategy`: `varint` (default, recommended) or `varint-raw`
+- `-i, --input FILE`: Input PAF file with `tp:Z:` tags (or `-` for stdin)
+- `-o, --output FILE`: Output binary file
+- `--strategy STRATEGY`: Compression strategy - `varint` (default), `huffman`
+- `--verbose N`: Verbosity level - 0 (error), 1 (info, default), 2 (debug)
 
-### decompress - Binary to PAF with tracepoints
+### decompress - Binary to PAF
+
+Decompress binary PAF files to text format with tracepoints.
 
 ```sh
 # To file
-cigzip decompress -i input.bpaf -o output.paf
+cigzip decompress -i input.bpaf -o output.tp.paf
 
 # To stdout
 cigzip decompress -i input.bpaf -o -
+```
+
+**Options:**
+- `-i, --input FILE`: Input binary PAF file
+- `-o, --output FILE`: Output file (or `-` for stdout)
+- `--verbose N`: Verbosity level - 0 (error), 1 (info, default), 2 (debug)
+
+## AGC Format Support
+
+cigzip supports AGC (Assembled Genomes Compressor) archives for sequence files. AGC provides efficient compression for pangenome sequences with multiple samples.
+
+**Query formats:**
+- `contig` - Query by contig name (must be unique across samples)
+- `contig@sample` - Explicitly specify sample name
+
+**Requirements:**
+- All sequence files must be same format (all FASTA or all AGC)
+- AGC support enabled by default (see Building section to disable)
+
+**Example:**
+```sh
+cigzip decode --paf alignments.paf --sequence-files genomes.agc > output.paf
 ```
 
 ## Library Usage
@@ -138,11 +186,9 @@ cigzip = { git = "https://github.com/AndreaGuarracino/cigzip" }
 lib_bpaf = { git = "https://github.com/AndreaGuarracino/lib_bpaf" }
 ```
 
-See examples:
-- `examples/seek_demo.rs` - O(1) random access
-- `examples/offset_demo.rs` - Offset-based access
-
 ## Building
+
+### Standard Build (with AGC support)
 
 ```sh
 git clone https://github.com/AndreaGuarracino/cigzip
@@ -152,6 +198,16 @@ cargo build --release
 
 Binary: `target/release/cigzip`
 
+### Minimal Build (without AGC support)
+
+To build without AGC support (e.g., in resource-constrained environments):
+
+```sh
+cargo build --release --no-default-features
+```
+
+This disables the optional `agc-rs` dependency.
+
 ## Format Details
 
 ### Binary Format (BPAF)
@@ -160,8 +216,9 @@ Binary: `target/release/cigzip`
 [Header] → [Records] → [StringTable]
 ```
 
+**Features:**
 - **Fast O(1) random access**: Byte-aligned varint encoding enables instant tracepoint extraction
-- **Compression**: Automatic encoding selection + varint + zstd (configurable level 1-22)
+- **Compression**: Delta encoding + varint + zstd level 3 (or Huffman + zstd)
 - **Deduplication**: Shared string table for sequence names
 - **Random access**: External `.bpaf.idx` index for O(1) record lookup
 - **Backwards compatible**: Reads all format versions
