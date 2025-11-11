@@ -28,23 +28,6 @@ use std::fs::File;
 use std::io::{self, BufRead, BufReader};
 use std::sync::Arc;
 
-/// Output format for encode command
-#[derive(Debug, Clone, ValueEnum)]
-enum OutputFormat {
-    /// Text PAF format
-    Text,
-    /// Binary PAF format
-    Binary,
-}
-
-impl fmt::Display for OutputFormat {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            OutputFormat::Text => write!(f, "text"),
-            OutputFormat::Binary => write!(f, "binary"),
-        }
-    }
-}
 
 /// Distance model used for WFA re-alignment
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
@@ -97,7 +80,7 @@ struct CommonOpts {
 #[derive(Parser)]
 #[command(author, version, about, disable_help_subcommand = true)]
 enum Args {
-    /// Encode alignments into tracepoints
+    /// Encode CIGAR to tracepoints (text PAF with cg:Z: → text PAF with tp:Z:)
     Encode {
         #[clap(flatten)]
         common: CommonOpts,
@@ -124,25 +107,9 @@ enum Args {
         #[arg(long = "max-complexity")]
         max_complexity: Option<usize>,
 
-        /// Distance metric for CIGAR reconstruction (only needed for binary format)
-        #[arg(long = "distance", default_value_t = DistanceChoice::Edit)]
-        distance: DistanceChoice,
-
-        /// Gap penalties (only for gap-affine distances; ignored with edit distance)
-        #[arg(long)]
-        penalties: Option<String>,
-
-        /// Output format (text or binary)
-        #[arg(short = 'o', long = "output-format", default_value_t = OutputFormat::Text)]
-        output_format: OutputFormat,
-
-        /// Output file path (required for binary format, stdout for text)
-        #[arg(long = "output-file")]
-        output_file: Option<String>,
-
-        /// Compression strategy (varint or varint-raw); only for binary format
-        #[arg(long = "strategy", default_value = "varint", value_parser = lib_bpaf::CompressionStrategy::from_str, value_name = "STRATEGY")]
-        strategy: lib_bpaf::CompressionStrategy,
+        /// Output file path (default: stdout)
+        #[arg(short = 'o', long = "output")]
+        output: Option<String>,
     },
     /// Decode tracepoints back to CIGAR
     Decode {
@@ -199,9 +166,9 @@ enum Args {
         #[arg(long = "max-complexity")]
         max_complexity: Option<usize>,
     },
-    /// Compress PAF with tracepoints to binary format
+    /// Compress PAF to binary format (accepts PAF with cg:Z: or tp:Z: tags)
     Compress {
-        /// Input PAF file with tp:Z: tags
+        /// Input PAF file (auto-detects cg:Z: or tp:Z: tags)
         #[arg(short = 'i', long = "input")]
         input: String,
 
@@ -245,7 +212,7 @@ enum Args {
         #[arg(short, long, default_value = "1")]
         verbose: u8,
     },
-    /// Decompress binary PAF to text format with tracepoints
+    /// Decompress binary PAF to text format (outputs tp:Z: by default, or cg:Z: with --decode)
     Decompress {
         /// Input binary PAF file
         #[arg(short = 'i', long = "input")]
@@ -254,6 +221,22 @@ enum Args {
         /// Output text PAF file (use "-" for stdout)
         #[arg(short = 'o', long = "output", default_value = "-")]
         output: String,
+
+        /// Decode tracepoints back to CIGAR (requires --sequence-files)
+        #[arg(long = "decode")]
+        decode: bool,
+
+        /// FASTA files containing sequences (required if --decode is used)
+        #[arg(long = "sequence-files", value_name = "FASTA", num_args = 1.., required_if_eq("decode", "true"))]
+        sequence_files: Vec<String>,
+
+        /// File listing FASTA paths (one per line)
+        #[arg(long = "sequence-list", value_name = "FILE")]
+        sequence_list: Option<String>,
+
+        /// Keep original gi/bi/sc/sc fields as giold/biold/scold when replacing (only with --decode)
+        #[arg(long = "keep-old-stats")]
+        keep_old_stats: bool,
 
         /// Verbosity level (0 = error, 1 = info, 2 = debug)
         #[arg(short, long, default_value = "1")]
@@ -310,22 +293,14 @@ impl fmt::Debug for Args {
                 tp_type,
                 complexity_metric,
                 max_complexity,
-                distance,
-                penalties,
-                output_format,
-                output_file,
-                strategy,
+                output,
             } => f
                 .debug_struct("Args::Encode")
                 .field("common", common)
                 .field("tp_type", tp_type)
                 .field("complexity_metric", complexity_metric)
                 .field("max_complexity", max_complexity)
-                .field("distance", distance)
-                .field("penalties", penalties)
-                .field("output_format", output_format)
-                .field("output_file", output_file)
-                .field("strategy", strategy)
+                .field("output", output)
                 .finish(),
             Args::Decode {
                 common,
@@ -368,10 +343,14 @@ impl fmt::Debug for Args {
                 .field("strategy", strategy)
                 .field("verbose", verbose)
                 .finish(),
-            Args::Decompress { input, output, verbose } => f
+            Args::Decompress { input, output, decode, sequence_files, sequence_list, keep_old_stats, verbose } => f
                 .debug_struct("Args::Decompress")
                 .field("input", input)
                 .field("output", output)
+                .field("decode", decode)
+                .field("sequence_files", sequence_files)
+                .field("sequence_list", sequence_list)
+                .field("keep_old_stats", keep_old_stats)
                 .field("verbose", verbose)
                 .finish(),
             #[cfg(debug_assertions)]
@@ -407,123 +386,55 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             tp_type,
             max_complexity,
             complexity_metric,
-            distance,
-            penalties,
-            output_format,
-            output_file,
-            strategy,
+            output,
         } => {
             setup_logger(common.verbose);
 
-            // Determine max_complexity: use provided value, or default to 100 if fastga, else 32
             let is_fastga = matches!(tp_type, TracepointType::Fastga);
             let max_complexity = max_complexity.unwrap_or(if is_fastga { 100 } else { 32 });
 
-            // Validate that complexity-metric is not used with fastga
             if is_fastga && matches!(complexity_metric, ComplexityMetric::DiagonalDistance) {
                 error!("--complexity-metric cannot be used with --type fastga");
-                error!("FastGA uses its own segmentation algorithm based on trace spacing");
-                std::process::exit(1);
-            }
-
-            // Validate output file for binary format
-            if matches!(output_format, OutputFormat::Binary) && output_file.is_none() {
-                error!("--output-file is required when using --output-format binary");
-                std::process::exit(1);
-            }
-
-            // Validate that --strategy is only used with binary format
-            if !matches!(strategy, lib_bpaf::CompressionStrategy::DeltaVarintZstd(_)) && !matches!(output_format, OutputFormat::Binary) {
-                error!("--strategy can only be used with --output-format binary");
                 std::process::exit(1);
             }
 
             info!(
-                "Converting CIGAR to {} tracepoints ({}={}, complexity-metric={}, format={:?})",
+                "Encoding CIGAR to {} tracepoints ({}={}, complexity-metric={})",
                 tp_type,
-                if is_fastga {
-                    "trace_spacing"
-                } else {
-                    "max_complexity"
-                },
+                if is_fastga { "trace_spacing" } else { "max_complexity" },
                 max_complexity,
-                complexity_metric,
-                output_format
+                complexity_metric
             );
 
-            // Set the thread pool size (ignore error if already initialized)
             let _ = rayon::ThreadPoolBuilder::new()
                 .num_threads(common.threads)
                 .build_global();
 
-            // Process based on output format
-            match output_format {
-                OutputFormat::Text => {
-                    // Text format always outputs to stdout
-                    // Use shell redirection for file output: cigzip encode ... > output.paf
-                    if output_file.is_some() {
-                        error!("--output-file is only supported with --output-format binary");
-                        error!("For text output to file, use shell redirection: cigzip encode ... > output.paf");
-                        std::process::exit(1);
-                    }
+            if output.is_some() {
+                warn!("--output is not yet supported; outputting to stdout (use shell redirection instead)");
+            }
 
-                    let paf_reader = get_paf_reader(&common.paf)?;
-                    let chunk_size = std::cmp::max(common.threads * 100, 1000);
-                    let mut lines = Vec::with_capacity(chunk_size);
+            let paf_reader = get_paf_reader(&common.paf)?;
+            let chunk_size = std::cmp::max(common.threads * 100, 1000);
+            let mut lines = Vec::with_capacity(chunk_size);
 
-                    for line_result in paf_reader.lines() {
-                        match line_result {
-                            Ok(line) => {
-                                if line.trim().is_empty() || line.starts_with('#') {
-                                    continue;
-                                }
-                                lines.push(line);
-                                if lines.len() >= chunk_size {
-                                    process_compress_chunk(
-                                        &lines,
-                                        &tp_type,
-                                        max_complexity,
-                                        &complexity_metric,
-                                    );
-                                    lines.clear();
-                                }
-                            }
-                            Err(e) => return Err(e.into()),
+            for line_result in paf_reader.lines() {
+                match line_result {
+                    Ok(line) => {
+                        if line.trim().is_empty() || line.starts_with('#') {
+                            continue;
+                        }
+                        lines.push(line);
+                        if lines.len() >= chunk_size {
+                            process_compress_chunk(&lines, &tp_type, max_complexity, &complexity_metric);
+                            lines.clear();
                         }
                     }
-                    if !lines.is_empty() {
-                        process_compress_chunk(&lines, &tp_type, max_complexity, &complexity_metric);
-                    }
+                    Err(e) => return Err(e.into()),
                 }
-                OutputFormat::Binary => {
-                    // Binary format requires --output-file (no stdout output)
-                    // Single-pass: CIGAR → tracepoints → binary file
-                    let output_path = output_file.as_ref().unwrap();
-
-                    // Parse distance with penalties
-                    let bpaf_distance = match parse_distance_bpaf(distance, penalties.as_deref()) {
-                        Ok(d) => d,
-                        Err(e) => {
-                            error!("Invalid distance parameters: {}", e);
-                            std::process::exit(1);
-                        }
-                    };
-
-                    if let Err(e) = lib_bpaf::encode_cigar_to_binary(
-                        &common.paf,
-                        output_path,
-                        &tp_type,
-                        max_complexity,
-                        &complexity_metric,
-                        bpaf_distance,
-                        strategy,
-                    ) {
-                        error!("Binary encoding failed: {}", e);
-                        std::process::exit(1);
-                    }
-
-                    info!("Binary output written to: {} using {} strategy", output_path, strategy);
-                }
+            }
+            if !lines.is_empty() {
+                process_compress_chunk(&lines, &tp_type, max_complexity, &complexity_metric);
             }
         }
         Args::Decode {
@@ -767,7 +678,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         Args::Compress { input, output, tp_type, max_complexity, complexity_metric, distance, penalties, strategy, verbose } => {
             setup_logger(verbose);
 
-            // Parse distance with penalties
             let bpaf_distance = match parse_distance_bpaf(distance, penalties.as_deref()) {
                 Ok(d) => d,
                 Err(e) => {
@@ -776,29 +686,145 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 }
             };
 
-            if let Err(e) = lib_bpaf::compress_paf(&input, &output, strategy, tp_type, max_complexity, complexity_metric, bpaf_distance) {
-                error!("Compression failed: {}", e);
+            // Auto-detect input format by checking first non-empty line
+            let mut has_cigar = false;
+            let mut has_tracepoints = false;
+
+            let reader = get_paf_reader(&input)?;
+            for line_result in reader.lines().take(10) {
+                if let Ok(line) = line_result {
+                    if line.trim().is_empty() || line.starts_with('#') {
+                        continue;
+                    }
+                    has_cigar = line.contains("\tcg:Z:");
+                    has_tracepoints = line.contains("\ttp:Z:");
+                    break;
+                }
+            }
+
+            if has_cigar && has_tracepoints {
+                error!("Input PAF has both cg:Z: and tp:Z: tags; please use only one");
+                std::process::exit(1);
+            } else if has_cigar {
+                info!("Detected CIGAR tags (cg:Z:); encoding to tracepoints then compressing");
+                if let Err(e) = lib_bpaf::compress_paf_with_cigar(&input, &output, strategy, tp_type, max_complexity, complexity_metric, bpaf_distance) {
+                    error!("Compression failed: {}", e);
+                    std::process::exit(1);
+                }
+            } else if has_tracepoints {
+                info!("Detected tracepoint tags (tp:Z:); compressing directly");
+                if let Err(e) = lib_bpaf::compress_paf(&input, &output, strategy, tp_type, max_complexity, complexity_metric, bpaf_distance) {
+                    error!("Compression failed: {}", e);
+                    std::process::exit(1);
+                }
+            } else {
+                error!("Input PAF has neither cg:Z: nor tp:Z: tags");
                 std::process::exit(1);
             }
 
-            info!("Compressed {} to {} using {} strategy (type={}, max_complexity={}, metric={}, distance={})",
-                  input, output, strategy, tp_type, max_complexity, complexity_metric, distance);
+            info!("Compressed {} to {}", input, output);
         }
-        Args::Decompress { input, output, verbose } => {
+        Args::Decompress { input, output, decode, sequence_files, sequence_list, keep_old_stats, verbose } => {
             setup_logger(verbose);
 
-            // Decompress binary PAF to text format with tracepoints
-            info!("Decompressing binary PAF to text format...");
+            if decode {
+                // Decompress and decode: binary → tracepoints → CIGAR
+                info!("Decompressing and decoding binary PAF to CIGAR...");
 
-            if let Err(e) = lib_bpaf::decompress_paf(&input, &output) {
-                error!("Decompression failed: {}", e);
-                std::process::exit(1);
-            }
+                // Validate sequence files
+                let sequence_paths = match collect_sequence_paths(sequence_files, sequence_list) {
+                    Ok(paths) if !paths.is_empty() => paths,
+                    Ok(_) => {
+                        error!("--decode requires sequence files via --sequence-files or --sequence-list");
+                        std::process::exit(1);
+                    }
+                    Err(msg) => {
+                        error!("{}", msg);
+                        std::process::exit(1);
+                    }
+                };
 
-            if output == "-" {
-                info!("Decompressed {} to stdout", input);
+                let sequence_index = match SequenceIndex::build(&sequence_paths) {
+                    Ok(index) => Arc::new(index),
+                    Err(msg) => {
+                        error!("{}", msg);
+                        std::process::exit(1);
+                    }
+                };
+
+                // Read binary PAF
+                let mut reader = match lib_bpaf::BpafReader::open(&input) {
+                    Ok(r) => r,
+                    Err(e) => {
+                        error!("Failed to open binary PAF: {}", e);
+                        std::process::exit(1);
+                    }
+                };
+
+                let header = reader.header();
+                let distance_mode = header.distance();
+                let tp_type = header.tp_type();
+                let complexity_metric = header.complexity_metric();
+                let max_complexity = header.max_complexity() as usize;
+
+                // Collect records
+                let mut all_records = Vec::new();
+                for record_result in reader.iter_records() {
+                    match record_result {
+                        Ok(record) => all_records.push(record),
+                        Err(e) => {
+                            error!("Failed to read record: {}", e);
+                            std::process::exit(1);
+                        }
+                    }
+                }
+
+                let string_table = match reader.string_table() {
+                    Ok(st) => st,
+                    Err(e) => {
+                        error!("Failed to get string table: {}", e);
+                        std::process::exit(1);
+                    }
+                };
+
+                // Process in chunks and decode
+                let chunk_size = 1000;
+                for chunk in all_records.chunks(chunk_size) {
+                    let is_fastga = matches!(tp_type, TracepointType::Fastga);
+                    let trace_spacing = if is_fastga { max_complexity } else { 0 };
+                    process_decompress_chunk_binary(
+                        chunk,
+                        &sequence_index,
+                        &distance_mode,
+                        is_fastga,
+                        trace_spacing,
+                        &complexity_metric,
+                        false, // heuristic
+                        None,  // heuristic_max_complexity
+                        keep_old_stats,
+                        string_table,
+                    );
+                }
+
+                if output == "-" {
+                    info!("Decompressed and decoded {} to stdout", input);
+                } else {
+                    info!("Decompressed and decoded {} to {}", input, output);
+                }
             } else {
-                info!("Decompressed {} to {}", input, output);
+                // Decompress only: binary → tracepoints
+                info!("Decompressing binary PAF to text format with tracepoints...");
+
+                if let Err(e) = lib_bpaf::decompress_paf(&input, &output) {
+                    error!("Decompression failed: {}", e);
+                    std::process::exit(1);
+                }
+
+                if output == "-" {
+                    info!("Decompressed {} to stdout", input);
+                } else {
+                    info!("Decompressed {} to {}", input, output);
+                }
             }
         }
         #[cfg(debug_assertions)]
