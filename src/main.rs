@@ -18,7 +18,7 @@ use lib_tracepoints::{
     cigar_to_variable_tracepoints, mixed_tracepoints_to_cigar,
     mixed_tracepoints_to_cigar_with_aligner, tracepoints_to_cigar, tracepoints_to_cigar_fastga,
     tracepoints_to_cigar_with_aligner, variable_tracepoints_to_cigar,
-    variable_tracepoints_to_cigar_with_aligner, ComplexityMetric, MixedRepresentation, TracepointType,
+    variable_tracepoints_to_cigar_with_aligner, ComplexityMetric, MixedRepresentation, TracepointData, TracepointType,
 };
 use lib_wfa2::affine_wavefront::Distance;
 use log::{debug, error, info, warn};
@@ -27,7 +27,6 @@ use std::fmt;
 use std::fs::File;
 use std::io::{self, BufRead, BufReader, BufWriter, Write};
 use std::sync::{Arc, Mutex};
-
 
 /// Distance model used for WFA re-alignment
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
@@ -400,7 +399,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
             info!(
                 "Encoding CIGAR to {} tracepoints ({}={}, complexity-metric={})",
-                tp_type,
+                tp_type.as_str(),
                 if is_fastga { "trace_spacing" } else { "max_complexity" },
                 max_complexity,
                 complexity_metric
@@ -531,7 +530,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 DistanceChoice::Edit => None,
                 _ => {
                     let default = distance.default_penalties().unwrap();
-                    Some(penalties.clone().unwrap_or_else(|| default.to_string()))
+                    Some(penalties.unwrap_or_else(|| default.to_string()))
                 }
             };
 
@@ -556,7 +555,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
             info!(
                 "Converting {} tracepoints to CIGAR (complexity-metric={}, distance={}, penalties={}, heuristic={}{})",
-                tp_type,
+                tp_type.as_str(),
                 complexity_metric,
                 distance,
                 penalties_summary,
@@ -768,11 +767,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     }
                 };
 
-                // Get header metadata (clone to avoid borrow conflicts)
+                // Get header metadata
                 let (distance_mode, tp_type, complexity_metric, max_complexity) = {
                     let header = reader.header();
                     (
-                        header.distance().clone(),
+                        header.distance(),
                         header.tp_type(),
                         header.complexity_metric(),
                         header.max_complexity() as usize,
@@ -1999,7 +1998,7 @@ fn process_decompress_chunk(
         }
 
         // Use specified tracepoint type
-        let distance = distance_mode.clone();
+        let distance = *distance_mode;
 
         let cigar = if fastga {
             // FastGA decoding
@@ -2269,177 +2268,143 @@ fn process_decompress_chunk_binary(
             target_seq = reverse_complement(&target_seq);
         }
 
-        let distance = distance_mode.clone();
+        let distance = *distance_mode;
 
         // Get target length from string table
         let target_len = string_table.get_length(record.target_name_id).unwrap() as usize;
 
         // Convert tracepoints to CIGAR based on type
         let cigar = match &record.tracepoints {
-            lib_bpaf::TracepointData::Fastga(tps) => {
-                // Already Vec<(u64, u64)>
-                let tracepoints: Vec<(usize, usize)> = tps.iter()
-                    .map(|(pos, score)| (*pos as usize, *score as usize))
-                    .collect();
-
-                tracepoints_to_cigar_fastga(
-                    &tracepoints,
-                    trace_spacing,
+            TracepointData::Fastga(tracepoints) => tracepoints_to_cigar_fastga(
+                tracepoints,
+                trace_spacing,
+                &query_seq,
+                &target_seq,
+                record.query_start as usize,
+                if record.strand == '+' {
+                    target_len - (record.target_end as usize)
+                } else {
+                    record.target_start as usize
+                },
+                record.strand == '-',
+            ),
+            TracepointData::Standard(tracepoints) => match *complexity_metric {
+                ComplexityMetric::EditDistance => {
+                    if heuristic {
+                        let max_value = heuristic_max_complexity
+                            .expect("missing max-complexity with heuristic");
+                        let mut aligner = distance.create_aligner(None);
+                        tracepoints_to_cigar_with_aligner(
+                            tracepoints,
+                            &query_seq,
+                            &target_seq,
+                            0,
+                            0,
+                            ComplexityMetric::EditDistance,
+                            &mut aligner,
+                            true,
+                            max_value,
+                        )
+                    } else {
+                        tracepoints_to_cigar(
+                            tracepoints,
+                            &query_seq,
+                            &target_seq,
+                            0,
+                            0,
+                            ComplexityMetric::EditDistance,
+                            &distance,
+                        )
+                    }
+                }
+                ComplexityMetric::DiagonalDistance => tracepoints_to_cigar(
+                    tracepoints,
                     &query_seq,
                     &target_seq,
-                    record.query_start as usize,
-                    if record.strand == '+' {
-                        target_len - (record.target_end as usize)
+                    0,
+                    0,
+                    ComplexityMetric::DiagonalDistance,
+                    &distance,
+                ),
+            },
+            TracepointData::Mixed(mixed) => match *complexity_metric {
+                ComplexityMetric::EditDistance => {
+                    if heuristic {
+                        let max_value = heuristic_max_complexity
+                            .expect("missing max-complexity with heuristic");
+                        let mut aligner = distance.create_aligner(None);
+                        mixed_tracepoints_to_cigar_with_aligner(
+                            mixed,
+                            &query_seq,
+                            &target_seq,
+                            0,
+                            0,
+                            ComplexityMetric::EditDistance,
+                            &mut aligner,
+                            true,
+                            max_value,
+                        )
                     } else {
-                        record.target_start as usize
-                    },
-                    record.strand == '-',
-                )
-            }
-            lib_bpaf::TracepointData::Standard(tps) => {
-                let tracepoints: Vec<(usize, usize)> = tps.iter()
-                    .map(|(pos, score)| (*pos as usize, *score as usize))
-                    .collect();
-
-                match *complexity_metric {
-                    ComplexityMetric::EditDistance => {
-                        if heuristic {
-                            let max_value = heuristic_max_complexity
-                                .expect("missing max-complexity with heuristic");
-                            let mut aligner = distance.create_aligner(None);
-                            tracepoints_to_cigar_with_aligner(
-                                &tracepoints,
-                                &query_seq,
-                                &target_seq,
-                                0,
-                                0,
-                                ComplexityMetric::EditDistance,
-                                &mut aligner,
-                                true,
-                                max_value,
-                            )
-                        } else {
-                            tracepoints_to_cigar(
-                                &tracepoints,
-                                &query_seq,
-                                &target_seq,
-                                0,
-                                0,
-                                ComplexityMetric::EditDistance,
-                                &distance,
-                            )
-                        }
+                        mixed_tracepoints_to_cigar(
+                            mixed,
+                            &query_seq,
+                            &target_seq,
+                            0,
+                            0,
+                            ComplexityMetric::EditDistance,
+                            &distance,
+                        )
                     }
-                    ComplexityMetric::DiagonalDistance => tracepoints_to_cigar(
-                        &tracepoints,
-                        &query_seq,
-                        &target_seq,
-                        0,
-                        0,
-                        ComplexityMetric::DiagonalDistance,
-                        &distance,
-                    ),
                 }
-            }
-            lib_bpaf::TracepointData::Mixed(tps) => {
-                // Convert Mixed to MixedRepresentation
-                let mixed: Vec<MixedRepresentation> = tps.iter()
-                    .map(|item| match item {
-                        lib_bpaf::MixedTracepointItem::Tracepoint(a, b) => {
-                            MixedRepresentation::Tracepoint(*a as usize, *b as usize)
-                        }
-                        lib_bpaf::MixedTracepointItem::CigarOp(len, op) => {
-                            MixedRepresentation::CigarOp(*len as usize, *op)
-                        }
-                    })
-                    .collect();
-
-                match *complexity_metric {
-                    ComplexityMetric::EditDistance => {
-                        if heuristic {
-                            let max_value = heuristic_max_complexity
-                                .expect("missing max-complexity with heuristic");
-                            let mut aligner = distance.create_aligner(None);
-                            mixed_tracepoints_to_cigar_with_aligner(
-                                &mixed,
-                                &query_seq,
-                                &target_seq,
-                                0,
-                                0,
-                                ComplexityMetric::EditDistance,
-                                &mut aligner,
-                                true,
-                                max_value,
-                            )
-                        } else {
-                            mixed_tracepoints_to_cigar(
-                                &mixed,
-                                &query_seq,
-                                &target_seq,
-                                0,
-                                0,
-                                ComplexityMetric::EditDistance,
-                                &distance,
-                            )
-                        }
+                ComplexityMetric::DiagonalDistance => mixed_tracepoints_to_cigar(
+                    mixed,
+                    &query_seq,
+                    &target_seq,
+                    0,
+                    0,
+                    ComplexityMetric::DiagonalDistance,
+                    &distance,
+                ),
+            },
+            TracepointData::Variable(variable) => match *complexity_metric {
+                ComplexityMetric::EditDistance => {
+                    if heuristic {
+                        let max_value = heuristic_max_complexity
+                            .expect("missing max-complexity with heuristic");
+                        let mut aligner = distance.create_aligner(None);
+                        variable_tracepoints_to_cigar_with_aligner(
+                            variable,
+                            &query_seq,
+                            &target_seq,
+                            0,
+                            0,
+                            ComplexityMetric::EditDistance,
+                            &mut aligner,
+                            true,
+                            max_value,
+                        )
+                    } else {
+                        variable_tracepoints_to_cigar(
+                            variable,
+                            &query_seq,
+                            &target_seq,
+                            0,
+                            0,
+                            ComplexityMetric::EditDistance,
+                            &distance,
+                        )
                     }
-                    ComplexityMetric::DiagonalDistance => mixed_tracepoints_to_cigar(
-                        &mixed,
-                        &query_seq,
-                        &target_seq,
-                        0,
-                        0,
-                        ComplexityMetric::DiagonalDistance,
-                        &distance,
-                    ),
                 }
-            }
-            lib_bpaf::TracepointData::Variable(tps) => {
-                // Variable has Vec<(u64, Option<u64>)>
-                let variable: Vec<(usize, Option<usize>)> = tps.iter()
-                    .map(|(pos, score_opt)| (*pos as usize, score_opt.map(|s| s as usize)))
-                    .collect();
-
-                match *complexity_metric {
-                    ComplexityMetric::EditDistance => {
-                        if heuristic {
-                            let max_value = heuristic_max_complexity
-                                .expect("missing max-complexity with heuristic");
-                            let mut aligner = distance.create_aligner(None);
-                            variable_tracepoints_to_cigar_with_aligner(
-                                &variable,
-                                &query_seq,
-                                &target_seq,
-                                0,
-                                0,
-                                ComplexityMetric::EditDistance,
-                                &mut aligner,
-                                true,
-                                max_value,
-                            )
-                        } else {
-                            variable_tracepoints_to_cigar(
-                                &variable,
-                                &query_seq,
-                                &target_seq,
-                                0,
-                                0,
-                                ComplexityMetric::EditDistance,
-                                &distance,
-                            )
-                        }
-                    }
-                    ComplexityMetric::DiagonalDistance => variable_tracepoints_to_cigar(
-                        &variable,
-                        &query_seq,
-                        &target_seq,
-                        0,
-                        0,
-                        ComplexityMetric::DiagonalDistance,
-                        &distance,
-                    ),
-                }
-            }
+                ComplexityMetric::DiagonalDistance => variable_tracepoints_to_cigar(
+                    variable,
+                    &query_seq,
+                    &target_seq,
+                    0,
+                    0,
+                    ComplexityMetric::DiagonalDistance,
+                    &distance,
+                ),
+            },
         };
 
         // Calculate identity stats from the reconstructed CIGAR

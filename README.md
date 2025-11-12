@@ -15,7 +15,7 @@ cigzip decode --paf output.tp.paf --sequence-files archive.agc > restored.paf
 # Compress to binary format
 cigzip compress -i input.tp.paf -o output.bpaf
 
-# DecompressS
+# Decompress
 cigzip decompress -i output.bpaf -o output.paf
 ```
 
@@ -160,13 +160,18 @@ fn main() -> std::io::Result<()> {
     let (tracepoints, tp_type, _, _) = reader.get_tracepoints(1000)?;
 
     match &tracepoints {
-        TracepointData::Standard(tps) => {
+        TracepointType::Standard(tps) => {
             println!("Standard tracepoints: {} items", tps.len());
         }
-        TracepointData::Fastga(tps) => {
+        TracepointType::Mixed(items) => {
+            println!("Mixed tracepoints: {} items", items.len());
+        }
+        TracepointType::Variable(tps) => {
+            println!("Variable tracepoints: {} items", tps.len());
+        }
+        TracepointType::Fastga(tps) => {
             println!("FastGA tracepoints: {} items", tps.len());
         }
-        _ => {}
     }
 
     // Sequential iteration
