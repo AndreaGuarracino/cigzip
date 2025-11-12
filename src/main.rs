@@ -25,8 +25,8 @@ use log::{debug, error, info, warn};
 use rayon::prelude::*;
 use std::fmt;
 use std::fs::File;
-use std::io::{self, BufRead, BufReader};
-use std::sync::Arc;
+use std::io::{self, BufRead, BufReader, BufWriter, Write};
+use std::sync::{Arc, Mutex};
 
 
 /// Distance model used for WFA re-alignment
@@ -204,8 +204,8 @@ enum Args {
         #[arg(long)]
         penalties: Option<String>,
 
-        /// Compression strategy: varint (recommended), varint-raw (only for binary format)
-        #[arg(long = "strategy", default_value = "varint", value_parser = lib_bpaf::CompressionStrategy::from_str, value_name = "STRATEGY")]
+        /// Compression strategy: automatic (default), raw, zigzag-delta
+        #[arg(long = "strategy", default_value = "automatic", value_parser = lib_bpaf::CompressionStrategy::from_str, value_name = "STRATEGY")]
         strategy: lib_bpaf::CompressionStrategy,
 
         /// Verbosity level (0 = error, 1 = info, 2 = debug)
@@ -410,9 +410,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 .num_threads(common.threads)
                 .build_global();
 
-            if output.is_some() {
-                warn!("--output is not yet supported; outputting to stdout (use shell redirection instead)");
-            }
+            // Create output writer
+            let writer: Arc<Mutex<Box<dyn Write + Send>>> = if let Some(output_path) = output {
+                let file = File::create(&output_path)?;
+                Arc::new(Mutex::new(Box::new(BufWriter::new(file))))
+            } else {
+                Arc::new(Mutex::new(Box::new(BufWriter::new(std::io::stdout()))))
+            };
 
             let paf_reader = get_paf_reader(&common.paf)?;
             let chunk_size = std::cmp::max(common.threads * 100, 1000);
@@ -426,7 +430,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         }
                         lines.push(line);
                         if lines.len() >= chunk_size {
-                            process_compress_chunk(&lines, &tp_type, max_complexity, &complexity_metric);
+                            process_compress_chunk(&lines, &tp_type, max_complexity, &complexity_metric, &writer);
                             lines.clear();
                         }
                     }
@@ -434,8 +438,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 }
             }
             if !lines.is_empty() {
-                process_compress_chunk(&lines, &tp_type, max_complexity, &complexity_metric);
+                process_compress_chunk(&lines, &tp_type, max_complexity, &complexity_metric, &writer);
             }
+
+            // Flush the writer
+            writer.lock().unwrap().flush()?;
         }
         Args::Decode {
             common,
@@ -713,7 +720,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 }
             } else if has_tracepoints {
                 info!("Detected tracepoint tags (tp:Z:); compressing directly");
-                if let Err(e) = lib_bpaf::compress_paf(&input, &output, strategy, tp_type, max_complexity, complexity_metric, bpaf_distance) {
+                if let Err(e) = lib_bpaf::compress_paf_with_tracepoints(&input, &output, strategy, tp_type, max_complexity, complexity_metric, bpaf_distance) {
                     error!("Compression failed: {}", e);
                     std::process::exit(1);
                 }
@@ -761,11 +768,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     }
                 };
 
-                let header = reader.header();
-                let distance_mode = header.distance();
-                let tp_type = header.tp_type();
-                let complexity_metric = header.complexity_metric();
-                let max_complexity = header.max_complexity() as usize;
+                // Get header metadata (clone to avoid borrow conflicts)
+                let (distance_mode, tp_type, complexity_metric, max_complexity) = {
+                    let header = reader.header();
+                    (
+                        header.distance().clone(),
+                        header.tp_type(),
+                        header.complexity_metric(),
+                        header.max_complexity() as usize,
+                    )
+                };
 
                 // Collect records
                 let mut all_records = Vec::new();
@@ -815,7 +827,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 // Decompress only: binary → tracepoints
                 info!("Decompressing binary PAF to text format with tracepoints...");
 
-                if let Err(e) = lib_bpaf::decompress_paf(&input, &output) {
+                if let Err(e) = lib_bpaf::decompress_bpaf(&input, &output) {
                     error!("Decompression failed: {}", e);
                     std::process::exit(1);
                 }
@@ -1608,6 +1620,7 @@ fn process_compress_chunk(
     tp_type: &TracepointType,
     max_complexity: usize,
     complexity_metric: &ComplexityMetric,
+    writer: &Arc<Mutex<Box<dyn Write + Send>>>,
 ) {
     lines.par_iter().for_each(|line| {
         let fields: Vec<&str> = line.split('\t').collect();
@@ -1651,6 +1664,7 @@ fn process_compress_chunk(
                 alignment_score,
                 existing_df,
                 complexity_metric,
+                writer,
             );
         } else {
             // Handle other tracepoint types (no overflow splitting needed)
@@ -1664,6 +1678,7 @@ fn process_compress_chunk(
                 alignment_score,
                 existing_df,
                 complexity_metric,
+                writer,
             );
         }
     });
@@ -1678,6 +1693,7 @@ fn process_fastga_with_overflow(
     alignment_score: i32,
     existing_df: Option<usize>,
     _complexity_metric: &ComplexityMetric,
+    writer: &Arc<Mutex<Box<dyn Write + Send>>>,
 ) {
     // Parse coordinates
     let query_len = fields[1].parse().unwrap_or_else(|_| {
@@ -1801,7 +1817,8 @@ fn process_fastga_with_overflow(
             new_fields.push(format!("sg:i:{}", segment_idx));
         }
 
-        println!("{}", new_fields.join("\t"));
+        let mut w = writer.lock().unwrap();
+        writeln!(w, "{}", new_fields.join("\t")).unwrap();
     }
 }
 
@@ -1815,6 +1832,7 @@ fn process_single_record(
     alignment_score: i32,
     existing_df: Option<usize>,
     complexity_metric: &ComplexityMetric,
+    writer: &Arc<Mutex<Box<dyn Write + Send>>>,
 ) {
     // Convert CIGAR based on tracepoint type and complexity metric
     let (tracepoints_str, df_value) = match tp_type {
@@ -1870,7 +1888,8 @@ fn process_single_record(
         }
     }
 
-    println!("{}", new_fields.join("\t"));
+    let mut w = writer.lock().unwrap();
+    writeln!(w, "{}", new_fields.join("\t")).unwrap();
 }
 
 /// Process a chunk of lines in parallel for decompression
