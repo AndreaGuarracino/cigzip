@@ -13,6 +13,7 @@ lib_wfa2 = { git = "https://github.com/AndreaGuarracino/lib_wfa2"}
 
 #lib_tracepoints = { path = "/home/guarracino/Dropbox/git/lib_tracepoints"}
 lib_tracepoints = { git = "https://github.com/AndreaGuarracino/lib_tracepoints"}
+#lib_bpaf = { path = "/home/guarracino/Dropbox/git/lib_bpaf" }
 lib_bpaf = { git = "https://github.com/AndreaGuarracino/lib_bpaf" }
 
 log = "0.4.28"
