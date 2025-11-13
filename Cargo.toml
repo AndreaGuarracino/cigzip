@@ -13,6 +13,8 @@ lib_wfa2 = { git = "https://github.com/AndreaGuarracino/lib_wfa2"}
 
 #lib_tracepoints = { path = "/home/guarracino/Dropbox/git/lib_tracepoints"}
 lib_tracepoints = { git = "https://github.com/AndreaGuarracino/lib_tracepoints"}
+#lib_bpaf = { path = "/home/guarracino/Dropbox/git/lib_bpaf" }
+lib_bpaf = { git = "https://github.com/AndreaGuarracino/lib_bpaf" }
 
 log = "0.4.28"
 env_logger = "0.11.8"
@@ -21,3 +23,10 @@ rayon = "1.10.0" # Parallel processing library
 libc = "0.2.177"
 
 indicatif="0.18.2"
+
+# Dependencies for AGC format (for sequences) support
+agc-rs = { git = "https://github.com/pangenome/agc-rs.git", optional = true }
+
+[features]
+default = ["agc"]
+agc = ["agc-rs"]

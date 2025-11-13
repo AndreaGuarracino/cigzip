@@ -1,10 +1,10 @@
 use std::collections::HashSet;
 use std::fs;
 
-use crate::faidx::FastaIndex;
+use super::faidx::FastaIndex;
 
 #[cfg(feature = "agc")]
-use crate::agc_index::AgcIndex;
+use super::agc_index::AgcIndex;
 
 pub fn collect_sequence_paths(
     mut files: Vec<String>,
