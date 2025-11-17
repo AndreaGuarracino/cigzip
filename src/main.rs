@@ -140,6 +140,14 @@ enum Args {
         /// Maximum complexity value for tracepoint segmentation (default: 32; 100 if type is fastga)
         #[arg(long = "max-complexity")]
         max_complexity: Option<usize>,
+
+        /// Skip adding identity statistics and alignment scores
+        #[arg(long = "no-stats")]
+        no_stats: bool,
+
+        /// Skip adding df (difference) fields  
+        #[arg(long = "no-df")]
+        no_df: bool,
     },
     /// Decode tracepoints back to CIGAR
     Decode {
@@ -242,6 +250,8 @@ impl fmt::Debug for Args {
                 tp_type,
                 complexity_metric,
                 max_complexity,
+                no_stats,
+                no_df,
             } => f
                 .debug_struct("Args::Encode")
                 .field("common", common)
@@ -314,6 +324,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             tp_type,
             max_complexity,
             complexity_metric,
+            no_stats,
+            no_df,
         } => {
             setup_logger(common.verbose);
 
@@ -367,6 +379,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 &tp_type,
                                 max_complexity,
                                 &complexity_metric,
+                                no_stats,
+                                no_df
                             );
                             lines.clear();
                         }
@@ -377,7 +391,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
             // Process remaining lines
             if !lines.is_empty() {
-                process_compress_chunk(&lines, &tp_type, max_complexity, &complexity_metric);
+                process_compress_chunk(&lines, &tp_type, max_complexity, &complexity_metric, no_stats, no_df);
             }
         }
         Args::Decode {
@@ -1346,6 +1360,8 @@ fn process_compress_chunk(
     tp_type: &TracepointType,
     max_complexity: usize,
     complexity_metric: &ComplexityMetric,
+    no_st: bool,
+    no_df: bool
 ) {
     lines.par_iter().for_each(|line| {
         let fields: Vec<&str> = line.split('\t').collect();
@@ -1402,6 +1418,8 @@ fn process_compress_chunk(
                 alignment_score,
                 existing_df,
                 complexity_metric,
+                no_st,
+                no_df
             );
         }
     });
@@ -1553,6 +1571,8 @@ fn process_single_record(
     alignment_score: i32,
     existing_df: Option<usize>,
     complexity_metric: &ComplexityMetric,
+    no_st: bool,
+    no_df: bool,
 ) {
     // Convert CIGAR based on tracepoint type and complexity metric
     let (tracepoints_str, df_value) = match tp_type {
@@ -1580,19 +1600,21 @@ fn process_single_record(
     for field in fields.iter() {
         if field.starts_with("cg:Z:") {
             // Add identity stats before tracepoints
-            new_fields.push(format!("gi:f:{:.12}", gap_compressed_identity));
-            new_fields.push(format!("bi:f:{:.12}", block_identity));
-
-            // Add df field if needed
-            if let Some(new_df) = df_value {
-                if let Some(old_df) = existing_df {
-                    new_fields.push(format!("dfold:i:{}", old_df));
-                }
-                new_fields.push(format!("df:i:{}", new_df));
+            if !no_st {
+                new_fields.push(format!("gi:f:{:.12}", gap_compressed_identity));
+                new_fields.push(format!("bi:f:{:.12}", block_identity));
+                new_fields.push(format!("sc:i:{}", alignment_score));
             }
 
-            // Add alignment score
-            new_fields.push(format!("sc:i:{}", alignment_score));
+            // Conditionally add df field
+            if !no_df {
+                if let Some(new_df) = df_value {
+                    if let Some(old_df) = existing_df {
+                        new_fields.push(format!("dfold:i:{}", old_df));
+                    }
+                    new_fields.push(format!("df:i:{}", new_df));
+                }
+            }
 
             // Add tracepoints
             new_fields.push(format!("tp:Z:{}", tracepoints_str));
