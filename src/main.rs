@@ -203,9 +203,13 @@ enum Args {
         #[arg(long)]
         penalties: Option<String>,
 
-        /// Compression strategy: automatic (default), raw, zigzag-delta
-        #[arg(long = "strategy", default_value = "automatic", value_parser = lib_bpaf::CompressionStrategy::from_str, value_name = "STRATEGY")]
-        strategy: lib_bpaf::CompressionStrategy,
+        /// Compression strategy (first): automatic (default), raw, zigzag-delta, etc. Optionally with layer suffix: -bgzip, -nocomp
+        #[arg(long = "strategy", default_value = "automatic", value_name = "STRATEGY")]
+        strategy_str: String,
+
+        /// Compression strategy (second, optional): If provided, enables dual-strategy compression where first and second values use different strategies
+        #[arg(long = "strategy-second", value_name = "STRATEGY")]
+        strategy_second_str: Option<String>,
 
         /// Verbosity level (0 = error, 1 = info, 2 = debug)
         #[arg(short, long, default_value = "1")]
@@ -330,7 +334,7 @@ impl fmt::Debug for Args {
                 .field("heuristic", heuristic)
                 .field("max_complexity", max_complexity)
                 .finish(),
-            Args::Compress { input, output, tp_type, max_complexity, complexity_metric, distance, penalties, strategy, verbose } => f
+            Args::Compress { input, output, tp_type, max_complexity, complexity_metric, distance, penalties, strategy_str, strategy_second_str, verbose } => f
                 .debug_struct("Args::Compress")
                 .field("input", input)
                 .field("output", output)
@@ -339,7 +343,8 @@ impl fmt::Debug for Args {
                 .field("complexity_metric", complexity_metric)
                 .field("distance", distance)
                 .field("penalties", penalties)
-                .field("strategy", strategy)
+                .field("strategy_str", strategy_str)
+                .field("strategy_second_str", strategy_second_str)
                 .field("verbose", verbose)
                 .finish(),
             Args::Decompress { input, output, decode, sequence_files, sequence_list, keep_old_stats, verbose } => f
@@ -681,7 +686,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 }
             }
         }
-        Args::Compress { input, output, tp_type, max_complexity, complexity_metric, distance, penalties, strategy, verbose } => {
+        Args::Compress { input, output, tp_type, max_complexity, complexity_metric, distance, penalties, strategy_str, strategy_second_str, verbose } => {
             setup_logger(verbose);
 
             let bpaf_distance = match parse_distance_bpaf(distance, penalties.as_deref()) {
@@ -711,21 +716,77 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             if has_cigar && has_tracepoints {
                 error!("Input PAF has both cg:Z: and tp:Z: tags; please use only one");
                 std::process::exit(1);
-            } else if has_cigar {
-                info!("Detected CIGAR tags (cg:Z:); encoding to tracepoints then compressing");
-                if let Err(e) = lib_bpaf::compress_paf_with_cigar(&input, &output, strategy, tp_type, max_complexity, complexity_metric, bpaf_distance) {
-                    error!("Compression failed: {}", e);
-                    std::process::exit(1);
+            }
+
+            // Check if dual strategy mode is enabled
+            if let Some(second_str) = strategy_second_str {
+                // Dual strategy mode: parse both strategies
+                let (first_strategy, first_layer) = match lib_bpaf::CompressionStrategy::from_str_with_layer(&strategy_str) {
+                    Ok((s, l)) => (s, l),
+                    Err(e) => {
+                        error!("Invalid first strategy '{}': {}", strategy_str, e);
+                        std::process::exit(1);
+                    }
+                };
+
+                let (second_strategy, second_layer) = match lib_bpaf::CompressionStrategy::from_str_with_layer(&second_str) {
+                    Ok((s, l)) => (s, l),
+                    Err(e) => {
+                        error!("Invalid second strategy '{}': {}", second_str, e);
+                        std::process::exit(1);
+                    }
+                };
+
+                // Both strategies should use the same layer
+                let layer = first_layer;
+                if first_layer != second_layer {
+                    warn!("Different compression layers specified; using first layer: {:?}", layer);
                 }
-            } else if has_tracepoints {
-                info!("Detected tracepoint tags (tp:Z:); compressing directly");
-                if let Err(e) = lib_bpaf::compress_paf_with_tracepoints(&input, &output, strategy, tp_type, max_complexity, complexity_metric, bpaf_distance) {
-                    error!("Compression failed: {}", e);
+
+                info!("Dual strategy mode: {} → {}", strategy_str, second_str);
+
+                if has_cigar {
+                    info!("Detected CIGAR tags (cg:Z:); encoding to tracepoints then compressing");
+                    if let Err(e) = lib_bpaf::compress_paf_with_cigar_dual(&input, &output, first_strategy, second_strategy, layer, tp_type, max_complexity, complexity_metric, bpaf_distance) {
+                        error!("Compression failed: {}", e);
+                        std::process::exit(1);
+                    }
+                } else if has_tracepoints {
+                    info!("Detected tracepoint tags (tp:Z:); compressing directly");
+                    if let Err(e) = lib_bpaf::compress_paf_with_tracepoints_dual(&input, &output, first_strategy, second_strategy, layer, tp_type, max_complexity, complexity_metric, bpaf_distance) {
+                        error!("Compression failed: {}", e);
+                        std::process::exit(1);
+                    }
+                } else {
+                    error!("Input PAF has neither cg:Z: nor tp:Z: tags");
                     std::process::exit(1);
                 }
             } else {
-                error!("Input PAF has neither cg:Z: nor tp:Z: tags");
-                std::process::exit(1);
+                // Single strategy mode: parse one strategy
+                let (strategy, layer) = match lib_bpaf::CompressionStrategy::from_str_with_layer(&strategy_str) {
+                    Ok((s, l)) => (s, l),
+                    Err(e) => {
+                        error!("Invalid strategy '{}': {}", strategy_str, e);
+                        std::process::exit(1);
+                    }
+                };
+
+                if has_cigar {
+                    info!("Detected CIGAR tags (cg:Z:); encoding to tracepoints then compressing");
+                    if let Err(e) = lib_bpaf::compress_paf_with_cigar(&input, &output, strategy, layer, tp_type, max_complexity, complexity_metric, bpaf_distance) {
+                        error!("Compression failed: {}", e);
+                        std::process::exit(1);
+                    }
+                } else if has_tracepoints {
+                    info!("Detected tracepoint tags (tp:Z:); compressing directly");
+                    if let Err(e) = lib_bpaf::compress_paf_with_tracepoints(&input, &output, strategy, layer, tp_type, max_complexity, complexity_metric, bpaf_distance) {
+                        error!("Compression failed: {}", e);
+                        std::process::exit(1);
+                    }
+                } else {
+                    error!("Input PAF has neither cg:Z: nor tp:Z: tags");
+                    std::process::exit(1);
+                }
             }
 
             info!("Compressed {} to {}", input, output);
@@ -1164,19 +1225,19 @@ fn process_debug_chunk(
     lines.par_iter().for_each(|line| {
         let fields: Vec<&str> = line.split('\t').collect();
         if fields.len() < 12 {
-            error!(
+            warn!(
                 "{}",
                 message_with_truncate_paf_file("Skipping malformed PAF line", line)
             );
-            std::process::exit(1);
+            return;
         }
 
         let Some(cg_field) = fields.iter().find(|&&s| s.starts_with("cg:Z:")) else {
-            error!(
+            warn!(
                 "{}",
                 message_with_truncate_paf_file("Skipping CIGAR-less PAF line", line)
             );
-            std::process::exit(1);
+            return;
         };
         let paf_cigar = &cg_field[5..];
 
@@ -1624,19 +1685,19 @@ fn process_compress_chunk(
     lines.par_iter().for_each(|line| {
         let fields: Vec<&str> = line.split('\t').collect();
         if fields.len() < 12 {
-            error!(
+            warn!(
                 "{}",
                 message_with_truncate_paf_file("Skipping malformed PAF line", line)
             );
-            std::process::exit(1);
+            return;
         }
 
         let Some(cg_field) = fields.iter().find(|&&s| s.starts_with("cg:Z:")) else {
-            error!(
+            warn!(
                 "{}",
                 message_with_truncate_paf_file("Skipping CIGAR-less PAF line", line)
             );
-            std::process::exit(1);
+            return;
         };
         let cigar = &cg_field[5..];
 
@@ -1907,19 +1968,19 @@ fn process_decompress_chunk(
     lines.par_iter().for_each(|line| {
         let fields: Vec<&str> = line.split('\t').collect();
         if fields.len() < 12 {
-            error!(
+            warn!(
                 "{}",
                 message_with_truncate_paf_file("Skipping malformed PAF line", line)
             );
-            std::process::exit(1);
+            return;
         }
 
         let Some(tp_field) = fields.iter().find(|&&s| s.starts_with("tp:Z:")) else {
-            error!(
+            warn!(
                 "{}",
                 message_with_truncate_paf_file("Skipping tracepoints-less PAF line", line)
             );
-            std::process::exit(1);
+            return;
         };
         let tracepoints_str = &tp_field[5..]; // Direct slice instead of strip_prefix("tp:Z:")
 
