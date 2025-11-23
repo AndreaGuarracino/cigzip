@@ -1397,6 +1397,7 @@ fn process_compress_chunk(
                 alignment_score,
                 existing_df,
                 complexity_metric,
+                minimal
             );
         } else {
             // Handle other tracepoint types (no overflow splitting needed)
@@ -1425,6 +1426,7 @@ fn process_fastga_with_overflow(
     alignment_score: i32,
     existing_df: Option<usize>,
     _complexity_metric: &ComplexityMetric,
+    minimal: bool,
 ) {
     // Parse coordinates
     let query_len = fields[1].parse().unwrap_or_else(|_| {
@@ -1515,17 +1517,19 @@ fn process_fastga_with_overflow(
                 _ => {
                     if field.starts_with("cg:Z:") {
                         // Add identity stats before tracepoints
-                        new_fields.push(format!("gi:f:{:.12}", gap_compressed_identity));
-                        new_fields.push(format!("bi:f:{:.12}", block_identity));
+                        if !minimal {
+                            new_fields.push(format!("gi:f:{:.12}", gap_compressed_identity));
+                            new_fields.push(format!("bi:f:{:.12}", block_identity));
 
-                        // Add df fields
-                        if let Some(old_df) = existing_df {
-                            new_fields.push(format!("dfold:i:{}", old_df));
+                            // Add df fields
+                            if let Some(old_df) = existing_df {
+                                new_fields.push(format!("dfold:i:{}", old_df));
+                            }
+                            new_fields.push(format!("df:i:{}", sum_of_differences));
+
+                            // Add alignment score
+                            new_fields.push(format!("sc:i:{}", alignment_score));
                         }
-                        new_fields.push(format!("df:i:{}", sum_of_differences));
-
-                        // Add alignment score
-                        new_fields.push(format!("sc:i:{}", alignment_score));
 
                         // Add tracepoints
                         new_fields.push(format!("tp:Z:{}", tracepoints_str));
@@ -1617,6 +1621,38 @@ fn process_single_record(
     }
 
     println!("{}", new_fields.join("\t"));
+}
+
+/// Calculate residue_matches and alignment_block_length from CIGAR string
+fn calculate_paf_fields_from_cigar(cigar: &str) -> (usize, usize) {
+    let mut matches = 0;
+    let mut mismatches = 0;
+    let mut insertions = 0;
+    let mut deletions = 0;
+    let mut num_buffer = String::new();
+
+    for c in cigar.chars() {
+        if c.is_ascii_digit() {
+            num_buffer.push(c);
+        } else {
+            let len = num_buffer.parse::<usize>().unwrap_or(0);
+            num_buffer.clear();
+
+            match c {
+                'M' | '=' => matches += len,
+                'X' => mismatches += len,
+                'I' => insertions += len,
+                'D' => deletions += len,
+                'S' | 'H' | 'P' | 'N' => {} // Skip clipping operations
+                _ => {}
+            }
+        }
+    }
+
+    let residue_matches = matches;
+    let alignment_block_length = matches + mismatches + insertions + deletions;
+    
+    (residue_matches, alignment_block_length)
 }
 
 /// Process a chunk of lines in parallel for decompression
@@ -1904,39 +1940,53 @@ fn process_decompress_chunk(
         let existing_bi = fields.iter().find(|&&s| s.starts_with("bi:f:"));
         let existing_sc = fields.iter().find(|&&s| s.starts_with("sc:i:"));
 
+        let (residue_matches, alignment_block_length) = calculate_paf_fields_from_cigar(&cigar);
+
         // Build the new line
         let mut new_fields: Vec<String> = Vec::new();
 
-        for field in fields.iter() {
-            if field.starts_with("tp:Z:") {
-                // Optionally keep old values
-                if keep_old_stats {
-                    if let Some(old_gi) = existing_gi {
-                        new_fields.push(format!("giold:f:{}", &old_gi[5..]));
-                    }
-                    if let Some(old_bi) = existing_bi {
-                        new_fields.push(format!("biold:f:{}", &old_bi[5..]));
-                    }
-                    if let Some(old_sc) = existing_sc {
-                        new_fields.push(format!("scold:i:{}", &old_sc[5..]));
+        for (i, field) in fields.iter().enumerate() {
+            match i {
+                9 => {
+                    // Update residue_matches from reconstructed CIGAR
+                    new_fields.push(residue_matches.to_string());
+                }
+                10 => {
+                    // Update alignment_block_length from reconstructed CIGAR
+                    new_fields.push(alignment_block_length.to_string());
+                }
+                _ => {
+                    if field.starts_with("tp:Z:") {
+                        // Optionally keep old values
+                        if keep_old_stats {
+                            if let Some(old_gi) = existing_gi {
+                                new_fields.push(format!("giold:f:{}", &old_gi[5..]));
+                            }
+                            if let Some(old_bi) = existing_bi {
+                                new_fields.push(format!("biold:f:{}", &old_bi[5..]));
+                            }
+                            if let Some(old_sc) = existing_sc {
+                                new_fields.push(format!("scold:i:{}", &old_sc[5..]));
+                            }
+                        }
+
+                        // Always add new identity stats and alignment score before the CIGAR
+                        new_fields.push(format!("gi:f:{:.12}", gap_compressed_identity));
+                        new_fields.push(format!("bi:f:{:.12}", block_identity));
+                        new_fields.push(format!("sc:i:{}", alignment_score));
+
+                        // Replace tracepoints with CIGAR
+                        new_fields.push(format!("cg:Z:{}", cigar));
+                    } else if field.starts_with("gi:f:")
+                        || field.starts_with("bi:f:")
+                        || field.starts_with("sc:i:")
+                    {
+                        // Skip existing gi, bi, and sc fields - they will be replaced
+                        continue;
+                    } else {
+                        new_fields.push(field.to_string());
                     }
                 }
-
-                // Always add new identity stats and alignment score before the CIGAR
-                new_fields.push(format!("gi:f:{:.12}", gap_compressed_identity));
-                new_fields.push(format!("bi:f:{:.12}", block_identity));
-                new_fields.push(format!("sc:i:{}", alignment_score));
-
-                // Replace tracepoints with CIGAR
-                new_fields.push(format!("cg:Z:{}", cigar));
-            } else if field.starts_with("gi:f:")
-                || field.starts_with("bi:f:")
-                || field.starts_with("sc:i:")
-            {
-                // Skip existing gi, bi, and sc fields - they will be replaced
-                continue;
-            } else {
-                new_fields.push(field.to_string());
             }
         }
 
