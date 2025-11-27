@@ -1809,52 +1809,65 @@ fn process_fastga_with_overflow(
         complement,
     );
 
-    // Output each segment as a separate PAF record
-    for (
-        segment_idx,
-        (tracepoints, (seg_query_start, seg_query_end, seg_target_start, seg_target_end)),
-    ) in segments.iter().enumerate()
+    // Debug: show all segments
+    debug!("Total segments from lib_tracepoints: {}", segments.len());
+    for (i, (tps, (qs, qe, ts, te))) in segments.iter().enumerate() {
+        debug!("  Segment {}: q={}..{}, t={}..{}, {} tracepoints", i, qs, qe, ts, te, tps.len());
+    }
+
+    // For FASTGA mode, output MULTIPLE records (one per segment) like PAFtoALN.c does
+    // Each segment has its own coordinates and tracepoints
+    // Gaps between segments are implicit in coordinate discontinuities
+
+    let mut valid_segment_count = 0;
+    for (segment_idx, (tracepoints, (seg_query_start, seg_query_end, seg_target_start, seg_target_end)))
+        in segments.iter().enumerate()
     {
+        let seg_query_len = seg_query_end.saturating_sub(*seg_query_start);
+        let seg_target_len = seg_target_end.saturating_sub(*seg_target_start);
+
+        // Skip zero-length segments (gap markers with no alignment content)
+        if seg_query_len == 0 && seg_target_len == 0 {
+            info!("Skipping zero-length segment {}", segment_idx);
+            continue;
+        }
+
+        // Warn if segment has no tracepoints (shouldn't happen for valid segments)
+        if tracepoints.is_empty() {
+            warn!(
+                "Segment {} has coordinates (q:{}-{}, t:{}-{}) but no tracepoints",
+                segment_idx, seg_query_start, seg_query_end, seg_target_start, seg_target_end
+            );
+            continue;
+        }
+
+        valid_segment_count += 1;
+
+        // Convert target coordinates back to original space for output
+        let (out_target_start, out_target_end) = if complement {
+            // Reversed space -> Original space
+            (target_len - seg_target_end, target_len - seg_target_start)
+        } else {
+            (*seg_target_start, *seg_target_end)
+        };
+
         // Calculate segment-specific stats
         let sum_of_differences: usize = tracepoints.iter().map(|(diff, _)| diff).sum();
         let tracepoints_str = format_tracepoints(tracepoints);
+        let alignment_length = seg_query_end - seg_query_start;
+        let matches = alignment_length.saturating_sub(sum_of_differences);
 
-        // Create modified fields for this segment
+        // Create output fields for this segment
         let mut new_fields: Vec<String> = Vec::new();
 
         for (i, field) in fields.iter().enumerate() {
             match i {
-                2 => new_fields.push(seg_query_start.to_string()), // query_start
-                3 => new_fields.push(seg_query_end.to_string()),   // query_end
-                7 => {
-                    // Handle target coordinates based on strand
-                    if complement {
-                        // For reverse strand, transform back to PAF coordinates
-                        new_fields.push((target_len - seg_target_end).to_string());
-                    } else {
-                        new_fields.push(seg_target_start.to_string());
-                    }
-                }
-                8 => {
-                    // Handle target coordinates based on strand
-                    if complement {
-                        // For reverse strand, transform back to PAF coordinates
-                        new_fields.push((target_len - seg_target_start).to_string());
-                    } else {
-                        new_fields.push(seg_target_end.to_string());
-                    }
-                }
-                9 => {
-                    // Update residue_matches for this segment
-                    let alignment_length = seg_query_end - seg_query_start;
-                    let matches = alignment_length.saturating_sub(sum_of_differences);
-                    new_fields.push(matches.to_string());
-                }
-                10 => {
-                    // Update alignment_block_length for this segment
-                    let alignment_length = seg_query_end - seg_query_start;
-                    new_fields.push(alignment_length.to_string());
-                }
+                2 => new_fields.push(seg_query_start.to_string()),
+                3 => new_fields.push(seg_query_end.to_string()),
+                7 => new_fields.push(out_target_start.to_string()),
+                8 => new_fields.push(out_target_end.to_string()),
+                9 => new_fields.push(matches.to_string()),
+                10 => new_fields.push(alignment_length.to_string()),
                 _ => {
                     if field.starts_with("cg:Z:") {
                         // Add identity stats before tracepoints
@@ -1886,9 +1899,9 @@ fn process_fastga_with_overflow(
             }
         }
 
-        // Add segment marker if this record was split
+        // Add segment marker if there are multiple valid segments
         if segments.len() > 1 {
-            new_fields.push(format!("sg:i:{}", segment_idx));
+            new_fields.push(format!("sg:i:{}", valid_segment_count - 1));
         }
 
         let mut w = writer.lock().unwrap();
