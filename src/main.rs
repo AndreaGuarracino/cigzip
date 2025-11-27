@@ -745,20 +745,27 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
                 info!("Dual strategy mode: {} → {}", strategy_str, second_str);
 
+                let mut config = lib_bpaf::CompressionConfig::new()
+                    .dual_strategy(first_strategy, second_strategy)
+                    .layer(layer)
+                    .tp_type(tp_type)
+                    .max_complexity(max_complexity)
+                    .complexity_metric(complexity_metric)
+                    .distance(bpaf_distance);
+
                 if has_cigar {
                     info!("Detected CIGAR tags (cg:Z:); encoding to tracepoints then compressing");
-                    if let Err(e) = lib_bpaf::compress_paf_with_cigar_dual(&input, &output, first_strategy, second_strategy, layer, tp_type, max_complexity, complexity_metric, bpaf_distance) {
-                        error!("Compression failed: {}", e);
-                        std::process::exit(1);
-                    }
+                    config = config.from_cigar();
                 } else if has_tracepoints {
                     info!("Detected tracepoint tags (tp:Z:); compressing directly");
-                    if let Err(e) = lib_bpaf::compress_paf_with_tracepoints_dual(&input, &output, first_strategy, second_strategy, layer, tp_type, max_complexity, complexity_metric, bpaf_distance) {
-                        error!("Compression failed: {}", e);
-                        std::process::exit(1);
-                    }
+                    config = config.from_tracepoints();
                 } else {
                     error!("Input PAF has neither cg:Z: nor tp:Z: tags");
+                    std::process::exit(1);
+                }
+
+                if let Err(e) = lib_bpaf::compress_paf_to_bpaf(&input, &output, config) {
+                    error!("Compression failed: {}", e);
                     std::process::exit(1);
                 }
             } else {
