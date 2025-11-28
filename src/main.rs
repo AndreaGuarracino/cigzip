@@ -1,6 +1,7 @@
-mod sequence_index;
+mod sequence;
 
-use crate::sequence_index::{collect_sequence_paths, SequenceIndex};
+use crate::sequence::{collect_sequence_paths, SequenceIndex};
+use lib_bpaf;
 use clap::{Parser, ValueEnum};
 use flate2::read::MultiGzDecoder;
 #[cfg(debug_assertions)]
@@ -8,65 +9,24 @@ use indicatif::ProgressBar;
 #[cfg(debug_assertions)]
 use indicatif::ProgressStyle;
 #[cfg(debug_assertions)]
-use lib_tracepoints::{
+use tracepoints::{
     align_sequences_wfa, cigar_ops_to_cigar_string, cigar_to_tracepoints_raw,
     cigar_to_variable_tracepoints_raw,
 };
-use lib_tracepoints::{
+use tracepoints::{
     cigar_to_mixed_tracepoints, cigar_to_tracepoints, cigar_to_tracepoints_fastga,
     cigar_to_variable_tracepoints, mixed_tracepoints_to_cigar,
     mixed_tracepoints_to_cigar_with_aligner, tracepoints_to_cigar, tracepoints_to_cigar_fastga,
     tracepoints_to_cigar_with_aligner, variable_tracepoints_to_cigar,
-    variable_tracepoints_to_cigar_with_aligner, ComplexityMetric, MixedRepresentation,
+    variable_tracepoints_to_cigar_with_aligner, ComplexityMetric, MixedRepresentation, TracepointData, TracepointType,
 };
 use lib_wfa2::affine_wavefront::Distance;
 use log::{debug, error, info, warn};
 use rayon::prelude::*;
 use std::fmt;
 use std::fs::File;
-use std::io::{self, BufRead, BufReader};
-use std::sync::Arc;
-
-/// Tracepoint representation type
-#[derive(Debug, Clone, ValueEnum)]
-enum TracepointType {
-    /// Standard tracepoints
-    Standard,
-    /// Mixed representation (preserves S/H/P/N CIGAR operations)
-    Mixed,
-    /// Variable tracepoints representation
-    Variable,
-    /// FastGA tracepoints representation
-    Fastga,
-}
-
-impl fmt::Display for TracepointType {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            TracepointType::Standard => write!(f, "standard"),
-            TracepointType::Mixed => write!(f, "mixed"),
-            TracepointType::Variable => write!(f, "variable"),
-            TracepointType::Fastga => write!(f, "fastga"),
-        }
-    }
-}
-
-fn parse_complexity_metric(value: &str) -> Result<ComplexityMetric, String> {
-    match value {
-        "edit-distance" => Ok(ComplexityMetric::EditDistance),
-        "diagonal-distance" => Ok(ComplexityMetric::DiagonalDistance),
-        _ => Err(format!(
-            "invalid complexity metric '{value}', expected 'edit-distance' or 'diagonal-distance'"
-        )),
-    }
-}
-
-fn complexity_metric_to_str(metric: ComplexityMetric) -> &'static str {
-    match metric {
-        ComplexityMetric::EditDistance => "edit-distance",
-        ComplexityMetric::DiagonalDistance => "diagonal-distance",
-    }
-}
+use std::io::{self, BufRead, BufReader, BufWriter, Write};
+use std::sync::{Arc, Mutex};
 
 /// Distance model used for WFA re-alignment
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
@@ -112,27 +72,32 @@ struct CommonOpts {
     threads: usize,
 
     /// Verbosity level (0 = error, 1 = info, 2 = debug)
-    #[arg(short, long, default_value = "0")]
+    #[arg(short, long, default_value = "1")]
     verbose: u8,
 }
 
 #[derive(Parser)]
 #[command(author, version, about, disable_help_subcommand = true)]
 enum Args {
-    /// Encode alignments into tracepoints
+    /// Encode CIGAR to tracepoints (text PAF with cg:Z: → text PAF with tp:Z:)
     Encode {
         #[clap(flatten)]
         common: CommonOpts,
 
-        /// Tracepoint type
-        #[arg(long = "type", default_value_t = TracepointType::Standard)]
+        /// Tracepoint type (standard, mixed, variable, fastga)
+        #[arg(
+            long = "type",
+            default_value = "standard",
+            value_parser = TracepointType::from_str,
+            value_name = "TYPE"
+        )]
         tp_type: TracepointType,
 
-        /// Complexity metric for tracepoint segmentation
+        /// Complexity metric for tracepoint segmentation (edit-distance, diagonal-distance)
         #[arg(
             long = "complexity-metric",
             default_value = "edit-distance",
-            value_parser = parse_complexity_metric,
+            value_parser = ComplexityMetric::from_str,
             value_name = "METRIC"
         )]
         complexity_metric: ComplexityMetric,
@@ -140,6 +105,11 @@ enum Args {
         /// Maximum complexity value for tracepoint segmentation (default: 32; 100 if type is fastga)
         #[arg(long = "max-complexity")]
         max_complexity: Option<usize>,
+
+        /// Output file path (default: stdout)
+        #[arg(short = 'o', long = "output")]
+        output: Option<String>,
+
 
         /// Skip adding optional fields (gi/bi/sc fields)
         #[arg(long = "minimal")]
@@ -150,15 +120,20 @@ enum Args {
         #[clap(flatten)]
         common: CommonOpts,
 
-        /// Tracepoint type
-        #[arg(long = "type", default_value_t = TracepointType::Standard)]
+        /// Tracepoint type (standard, mixed, variable, fastga)
+        #[arg(
+            long = "type",
+            default_value = "standard",
+            value_parser = TracepointType::from_str,
+            value_name = "TYPE"
+        )]
         tp_type: TracepointType,
 
-        /// Complexity metric for segmentation (must match what was used during compression)
+        /// Complexity metric for tracepoint segmentation (edit-distance, diagonal-distance)
         #[arg(
             long = "complexity-metric",
             default_value = "edit-distance",
-            value_parser = parse_complexity_metric,
+            value_parser = ComplexityMetric::from_str,
             value_name = "METRIC"
         )]
         complexity_metric: ComplexityMetric,
@@ -194,6 +169,86 @@ enum Args {
         /// Maximum complexity value (required when enabling heuristics)
         #[arg(long = "max-complexity")]
         max_complexity: Option<usize>,
+    },
+    /// Compress PAF to binary format (accepts PAF with cg:Z: or tp:Z: tags)
+    Compress {
+        /// Input PAF file (auto-detects cg:Z: or tp:Z: tags)
+        #[arg(short = 'i', long = "input")]
+        input: String,
+
+        /// Output binary file
+        #[arg(short = 'o', long = "output")]
+        output: String,
+
+        /// Tracepoint type (standard, mixed, variable, fastga) - REQUIRED
+        #[arg(
+            long = "type",
+            value_parser = TracepointType::from_str,
+            value_name = "TYPE"
+        )]
+        tp_type: TracepointType,
+
+        /// Maximum complexity value (for Standard/Mixed/Variable: max_diff per segment; for FASTGA: trace_spacing) - REQUIRED
+        #[arg(long = "max-complexity")]
+        max_complexity: u64,
+
+        /// Complexity metric (edit-distance, diagonal-distance) - REQUIRED
+        #[arg(
+            long = "complexity-metric",
+            value_parser = ComplexityMetric::from_str,
+            value_name = "METRIC"
+        )]
+        complexity_metric: ComplexityMetric,
+
+        /// Distance metric for CIGAR reconstruction (edit, gap-affine, gap-affine2p) - REQUIRED
+        #[arg(long = "distance")]
+        distance: DistanceChoice,
+
+        /// Gap penalties (only for gap-affine: "mismatch,opening,extension" or gap-affine2p: "mismatch,opening1,extension1,opening2,extension2"; ignored with edit distance)
+        #[arg(long)]
+        penalties: Option<String>,
+
+        /// Compression strategy (first): automatic (default), raw, zigzag-delta, etc. Optionally with layer suffix: -bgzip, -nocomp
+        #[arg(long = "strategy", default_value = "automatic", value_name = "STRATEGY")]
+        strategy_str: String,
+
+        /// Compression strategy (second, optional): If provided, enables dual-strategy compression where first and second values use different strategies
+        #[arg(long = "strategy-second", value_name = "STRATEGY")]
+        strategy_second_str: Option<String>,
+
+        /// Verbosity level (0 = error, 1 = info, 2 = debug)
+        #[arg(short, long, default_value = "1")]
+        verbose: u8,
+    },
+    /// Decompress binary PAF to text format (outputs tp:Z: by default, or cg:Z: with --decode)
+    Decompress {
+        /// Input binary PAF file
+        #[arg(short = 'i', long = "input")]
+        input: String,
+
+        /// Output text PAF file (use "-" for stdout)
+        #[arg(short = 'o', long = "output", default_value = "-")]
+        output: String,
+
+        /// Decode tracepoints back to CIGAR (requires --sequence-files)
+        #[arg(long = "decode")]
+        decode: bool,
+
+        /// FASTA files containing sequences (required if --decode is used)
+        #[arg(long = "sequence-files", value_name = "FASTA", num_args = 1.., required_if_eq("decode", "true"))]
+        sequence_files: Vec<String>,
+
+        /// File listing FASTA paths (one per line)
+        #[arg(long = "sequence-list", value_name = "FILE")]
+        sequence_list: Option<String>,
+
+        /// Keep original gi/bi/sc/sc fields as giold/biold/scold when replacing (only with --decode)
+        #[arg(long = "keep-old-stats")]
+        keep_old_stats: bool,
+
+        /// Verbosity level (0 = error, 1 = info, 2 = debug)
+        #[arg(short, long, default_value = "1")]
+        verbose: u8,
     },
     /// Run debugging mode (only available in debug builds)
     #[cfg(debug_assertions)]
@@ -246,16 +301,16 @@ impl fmt::Debug for Args {
                 tp_type,
                 complexity_metric,
                 max_complexity,
+                output,
                 minimal,
             } => f
                 .debug_struct("Args::Encode")
                 .field("common", common)
                 .field("tp_type", tp_type)
-                .field(
-                    "complexity_metric",
-                    &complexity_metric_to_str(*complexity_metric),
-                )
+                .field("complexity_metric", complexity_metric)
                 .field("max_complexity", max_complexity)
+                .field("output", output)
+                .field("minimal", minimal)
                 .finish(),
             Args::Decode {
                 common,
@@ -275,7 +330,7 @@ impl fmt::Debug for Args {
                 .field("tp_type", tp_type)
                 .field(
                     "complexity_metric",
-                    &complexity_metric_to_str(*complexity_metric),
+                    complexity_metric,
                 )
                 .field("sequence_files", sequence_files)
                 .field("sequence_list", sequence_list)
@@ -285,6 +340,29 @@ impl fmt::Debug for Args {
                 .field("penalties", penalties)
                 .field("heuristic", heuristic)
                 .field("max_complexity", max_complexity)
+                .finish(),
+            Args::Compress { input, output, tp_type, max_complexity, complexity_metric, distance, penalties, strategy_str, strategy_second_str, verbose } => f
+                .debug_struct("Args::Compress")
+                .field("input", input)
+                .field("output", output)
+                .field("tp_type", tp_type)
+                .field("max_complexity", max_complexity)
+                .field("complexity_metric", complexity_metric)
+                .field("distance", distance)
+                .field("penalties", penalties)
+                .field("strategy_str", strategy_str)
+                .field("strategy_second_str", strategy_second_str)
+                .field("verbose", verbose)
+                .finish(),
+            Args::Decompress { input, output, decode, sequence_files, sequence_list, keep_old_stats, verbose } => f
+                .debug_struct("Args::Decompress")
+                .field("input", input)
+                .field("output", output)
+                .field("decode", decode)
+                .field("sequence_files", sequence_files)
+                .field("sequence_list", sequence_list)
+                .field("keep_old_stats", keep_old_stats)
+                .field("verbose", verbose)
                 .finish(),
             #[cfg(debug_assertions)]
             Args::Debug {
@@ -319,53 +397,50 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             tp_type,
             max_complexity,
             complexity_metric,
+            output,
             minimal,
         } => {
             setup_logger(common.verbose);
 
-            // Determine max_complexity: use provided value, or default to 100 if fastga, else 32
             let is_fastga = matches!(tp_type, TracepointType::Fastga);
             let max_complexity = max_complexity.unwrap_or(if is_fastga { 100 } else { 32 });
 
-            // Validate that complexity-metric is not used with fastga
             if is_fastga && matches!(complexity_metric, ComplexityMetric::DiagonalDistance) {
                 error!("--complexity-metric cannot be used with --type fastga");
-                error!("FastGA uses its own segmentation algorithm based on trace spacing");
                 std::process::exit(1);
             }
 
             info!(
-                "Converting CIGAR to {} tracepoints ({}={}, complexity-metric={})",
-                tp_type,
-                if is_fastga {
-                    "trace_spacing"
-                } else {
-                    "max_complexity"
-                },
+                "Encoding CIGAR to {} tracepoints ({}={}, complexity-metric={})",
+                tp_type.as_str(),
+                if is_fastga { "trace_spacing" } else { "max_complexity" },
                 max_complexity,
-                complexity_metric_to_str(complexity_metric)
+                complexity_metric
             );
 
-            // Set the thread pool size
-            rayon::ThreadPoolBuilder::new()
+            let _ = rayon::ThreadPoolBuilder::new()
                 .num_threads(common.threads)
-                .build_global()?;
+                .build_global();
 
-            // Open the PAF file (or use stdin if "-" is provided).
+            // Create output writer
+            let writer: Arc<Mutex<Box<dyn Write + Send>>> = if let Some(output_path) = output {
+                let file = File::create(&output_path)?;
+                Arc::new(Mutex::new(Box::new(BufWriter::new(file))))
+            } else {
+                Arc::new(Mutex::new(Box::new(BufWriter::new(std::io::stdout()))))
+            };
+
             let paf_reader = get_paf_reader(&common.paf)?;
-
-            // Process in chunks
             let chunk_size = std::cmp::max(common.threads * 100, 1000);
             let mut lines = Vec::with_capacity(chunk_size);
+
             for line_result in paf_reader.lines() {
                 match line_result {
                     Ok(line) => {
                         if line.trim().is_empty() || line.starts_with('#') {
                             continue;
                         }
-
                         lines.push(line);
-
                         if lines.len() >= chunk_size {
                             // Process current chunk in parallel
                             process_compress_chunk(
@@ -373,6 +448,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 &tp_type,
                                 max_complexity,
                                 &complexity_metric,
+                                &writer,
                                 minimal
                             );
                             lines.clear();
@@ -381,11 +457,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     Err(e) => return Err(e.into()),
                 }
             }
-
-            // Process remaining lines
             if !lines.is_empty() {
-                process_compress_chunk(&lines, &tp_type, max_complexity, &complexity_metric, minimal);
+                process_compress_chunk(&lines, &tp_type, max_complexity, &complexity_metric, &writer, minimal);
             }
+
+            // Flush the writer
+            writer.lock().unwrap().flush()?;
         }
         Args::Decode {
             common,
@@ -401,6 +478,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             keep_old_stats,
         } => {
             setup_logger(common.verbose);
+
+            // Detect input format
+            let is_binary = lib_bpaf::is_binary_paf(&common.paf).unwrap_or(false);
 
             // Determine if we're using fastga based on tp_type
             let is_fastga = matches!(tp_type, TracepointType::Fastga);
@@ -471,7 +551,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 DistanceChoice::Edit => None,
                 _ => {
                     let default = distance.default_penalties().unwrap();
-                    Some(penalties.clone().unwrap_or_else(|| default.to_string()))
+                    Some(penalties.unwrap_or_else(|| default.to_string()))
                 }
             };
 
@@ -496,18 +576,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
             info!(
                 "Converting {} tracepoints to CIGAR (complexity-metric={}, distance={}, penalties={}, heuristic={}{})",
-                tp_type,
-                complexity_metric_to_str(complexity_metric),
+                tp_type.as_str(),
+                complexity_metric,
                 distance,
                 penalties_summary,
                 if heuristic { "enabled" } else { "disabled" },
                 heuristic_max_complexity.map(|mc| format!(", max-complexity={}", mc)).unwrap_or_default()
             );
 
-            // Set the thread pool size
-            rayon::ThreadPoolBuilder::new()
+            // Set the thread pool size (ignore error if already initialized)
+            let _ = rayon::ThreadPoolBuilder::new()
                 .num_threads(common.threads)
-                .build_global()?;
+                .build_global();
 
             // Validate and apply conditional defaults
             let trace_spacing = if is_fastga {
@@ -520,56 +600,333 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 0 // Not used when not fastga
             };
 
-            // Open the PAF file (or use stdin if "-" is provided).
-            let paf_reader = get_paf_reader(&common.paf)?;
-
-            // Process in chunks
+            // Process based on input format
             let chunk_size = std::cmp::max(common.threads * 100, 1000);
-            let mut lines = Vec::with_capacity(chunk_size);
-            for line_result in paf_reader.lines() {
-                match line_result {
-                    Ok(line) => {
-                        if line.trim().is_empty() || line.starts_with('#') {
-                            continue;
-                        }
 
-                        lines.push(line);
+            if is_binary {
+                // Read directly from binary format (no temp file needed)
+                info!("Reading from binary PAF format...");
+                let mut reader = match lib_bpaf::BpafReader::open(&common.paf) {
+                    Ok(r) => r,
+                    Err(e) => {
+                        error!("Failed to open binary PAF: {}", e);
+                        std::process::exit(1);
+                    }
+                };
 
-                        if lines.len() >= chunk_size {
-                            // Process current chunk in parallel
-                            process_decompress_chunk(
-                                &lines,
-                                &tp_type,
-                                sequence_index.as_ref(),
-                                &distance_mode,
-                                is_fastga,
-                                trace_spacing,
-                                &complexity_metric,
-                                heuristic,
-                                heuristic_max_complexity,
-                                keep_old_stats,
-                            );
-                            lines.clear();
+                // Collect all records first, then process in chunks
+                // This avoids borrow checker issues with the iterator
+                let mut all_records = Vec::new();
+                for record_result in reader.iter_records() {
+                    match record_result {
+                        Ok(record) => all_records.push(record),
+                        Err(e) => {
+                            error!("Failed to read record: {}", e);
+                            std::process::exit(1);
                         }
                     }
-                    Err(e) => return Err(e.into()),
+                }
+
+                // Get string table reference (now that iteration is complete)
+                let string_table = match reader.string_table() {
+                    Ok(st) => st,
+                    Err(e) => {
+                        error!("Failed to get string table: {}", e);
+                        std::process::exit(1);
+                    }
+                };
+
+                // Process in chunks
+                for chunk in all_records.chunks(chunk_size) {
+                    process_decompress_chunk_binary(
+                        chunk,
+                        sequence_index.as_ref(),
+                        &distance_mode,
+                        is_fastga,
+                        trace_spacing,
+                        &complexity_metric,
+                        heuristic,
+                        heuristic_max_complexity,
+                        keep_old_stats,
+                        string_table,
+                    );
+                }
+            } else {
+                // Read from text PAF format
+                let paf_reader = get_paf_reader(&common.paf)?;
+                let mut lines = Vec::with_capacity(chunk_size);
+
+                for line_result in paf_reader.lines() {
+                    match line_result {
+                        Ok(line) => {
+                            if line.trim().is_empty() || line.starts_with('#') {
+                                continue;
+                            }
+
+                            lines.push(line);
+
+                            if lines.len() >= chunk_size {
+                                process_decompress_chunk(
+                                    &lines,
+                                    &tp_type,
+                                    sequence_index.as_ref(),
+                                    &distance_mode,
+                                    is_fastga,
+                                    trace_spacing,
+                                    &complexity_metric,
+                                    heuristic,
+                                    heuristic_max_complexity,
+                                    keep_old_stats,
+                                );
+                                lines.clear();
+                            }
+                        }
+                        Err(e) => return Err(e.into()),
+                    }
+                }
+
+                // Process remaining lines
+                if !lines.is_empty() {
+                    process_decompress_chunk(
+                        &lines,
+                        &tp_type,
+                        sequence_index.as_ref(),
+                        &distance_mode,
+                        is_fastga,
+                        trace_spacing,
+                        &complexity_metric,
+                        heuristic,
+                        heuristic_max_complexity,
+                        keep_old_stats,
+                    );
+                }
+            }
+        }
+        Args::Compress { input, output, tp_type, max_complexity, complexity_metric, distance, penalties, strategy_str, strategy_second_str, verbose } => {
+            setup_logger(verbose);
+
+            let bpaf_distance = match parse_distance_bpaf(distance, penalties.as_deref()) {
+                Ok(d) => d,
+                Err(e) => {
+                    error!("Invalid distance parameters: {}", e);
+                    std::process::exit(1);
+                }
+            };
+
+            // Auto-detect input format by checking first non-empty line
+            let mut has_cigar = false;
+            let mut has_tracepoints = false;
+
+            let reader = get_paf_reader(&input)?;
+            for line_result in reader.lines().take(10) {
+                if let Ok(line) = line_result {
+                    if line.trim().is_empty() || line.starts_with('#') {
+                        continue;
+                    }
+                    has_cigar = line.contains("\tcg:Z:");
+                    has_tracepoints = line.contains("\ttp:Z:");
+                    break;
                 }
             }
 
-            // Process remaining lines
-            if !lines.is_empty() {
-                process_decompress_chunk(
-                    &lines,
-                    &tp_type,
-                    sequence_index.as_ref(),
-                    &distance_mode,
-                    is_fastga,
-                    trace_spacing,
-                    &complexity_metric,
-                    heuristic,
-                    heuristic_max_complexity,
-                    keep_old_stats,
-                );
+            if has_cigar && has_tracepoints {
+                error!("Input PAF has both cg:Z: and tp:Z: tags; please use only one");
+                std::process::exit(1);
+            }
+
+            // Check if dual strategy mode is enabled
+            if let Some(second_str) = strategy_second_str {
+                // Dual strategy mode: parse both strategies
+                let (first_strategy, first_layer) = match lib_bpaf::CompressionStrategy::from_str_with_layer(&strategy_str) {
+                    Ok((s, l)) => (s, l),
+                    Err(e) => {
+                        error!("Invalid first strategy '{}': {}", strategy_str, e);
+                        std::process::exit(1);
+                    }
+                };
+
+                let (second_strategy, second_layer) = match lib_bpaf::CompressionStrategy::from_str_with_layer(&second_str) {
+                    Ok((s, l)) => (s, l),
+                    Err(e) => {
+                        error!("Invalid second strategy '{}': {}", second_str, e);
+                        std::process::exit(1);
+                    }
+                };
+
+                // Both strategies should use the same layer
+                let layer = first_layer;
+                if first_layer != second_layer {
+                    warn!("Different compression layers specified; using first layer: {:?}", layer);
+                }
+
+                info!("Dual strategy mode: {} → {}", strategy_str, second_str);
+
+                let mut config = lib_bpaf::CompressionConfig::new()
+                    .dual_strategy(first_strategy, second_strategy)
+                    .layer(layer)
+                    .tp_type(tp_type)
+                    .max_complexity(max_complexity)
+                    .complexity_metric(complexity_metric)
+                    .distance(bpaf_distance);
+
+                if has_cigar {
+                    info!("Detected CIGAR tags (cg:Z:); encoding to tracepoints then compressing");
+                    config = config.from_cigar();
+                } else if has_tracepoints {
+                    info!("Detected tracepoint tags (tp:Z:); compressing directly");
+                    config = config.from_tracepoints();
+                } else {
+                    error!("Input PAF has neither cg:Z: nor tp:Z: tags");
+                    std::process::exit(1);
+                }
+
+                if let Err(e) = lib_bpaf::compress_paf_to_bpaf(&input, &output, config) {
+                    error!("Compression failed: {}", e);
+                    std::process::exit(1);
+                }
+            } else {
+                // Single strategy mode: parse one strategy
+                let (strategy, layer) = match lib_bpaf::CompressionStrategy::from_str_with_layer(&strategy_str) {
+                    Ok((s, l)) => (s, l),
+                    Err(e) => {
+                        error!("Invalid strategy '{}': {}", strategy_str, e);
+                        std::process::exit(1);
+                    }
+                };
+
+                let mut config = lib_bpaf::CompressionConfig::new()
+                    .strategy(strategy)
+                    .layer(layer)
+                    .tp_type(tp_type)
+                    .max_complexity(max_complexity)
+                    .complexity_metric(complexity_metric)
+                    .distance(bpaf_distance);
+
+                if has_cigar {
+                    info!("Detected CIGAR tags (cg:Z:); encoding to tracepoints then compressing");
+                    config = config.from_cigar();
+                } else if has_tracepoints {
+                    info!("Detected tracepoint tags (tp:Z:); compressing directly");
+                    config = config.from_tracepoints();
+                } else {
+                    error!("Input PAF has neither cg:Z: nor tp:Z: tags");
+                    std::process::exit(1);
+                }
+
+                if let Err(e) = lib_bpaf::compress_paf_to_bpaf(&input, &output, config) {
+                    error!("Compression failed: {}", e);
+                    std::process::exit(1);
+                }
+            }
+
+            info!("Compressed {} to {}", input, output);
+        }
+        Args::Decompress { input, output, decode, sequence_files, sequence_list, keep_old_stats, verbose } => {
+            setup_logger(verbose);
+
+            if decode {
+                // Decompress and decode: binary → tracepoints → CIGAR
+                info!("Decompressing and decoding binary PAF to CIGAR...");
+
+                // Validate sequence files
+                let sequence_paths = match collect_sequence_paths(sequence_files, sequence_list) {
+                    Ok(paths) if !paths.is_empty() => paths,
+                    Ok(_) => {
+                        error!("--decode requires sequence files via --sequence-files or --sequence-list");
+                        std::process::exit(1);
+                    }
+                    Err(msg) => {
+                        error!("{}", msg);
+                        std::process::exit(1);
+                    }
+                };
+
+                let sequence_index = match SequenceIndex::build(&sequence_paths) {
+                    Ok(index) => Arc::new(index),
+                    Err(msg) => {
+                        error!("{}", msg);
+                        std::process::exit(1);
+                    }
+                };
+
+                // Read binary PAF
+                let mut reader = match lib_bpaf::BpafReader::open(&input) {
+                    Ok(r) => r,
+                    Err(e) => {
+                        error!("Failed to open binary PAF: {}", e);
+                        std::process::exit(1);
+                    }
+                };
+
+                // Get header metadata
+                let (distance_mode, tp_type, complexity_metric, max_complexity) = {
+                    let header = reader.header();
+                    (
+                        header.distance(),
+                        header.tp_type(),
+                        header.complexity_metric(),
+                        header.max_complexity() as usize,
+                    )
+                };
+
+                // Collect records
+                let mut all_records = Vec::new();
+                for record_result in reader.iter_records() {
+                    match record_result {
+                        Ok(record) => all_records.push(record),
+                        Err(e) => {
+                            error!("Failed to read record: {}", e);
+                            std::process::exit(1);
+                        }
+                    }
+                }
+
+                let string_table = match reader.string_table() {
+                    Ok(st) => st,
+                    Err(e) => {
+                        error!("Failed to get string table: {}", e);
+                        std::process::exit(1);
+                    }
+                };
+
+                // Process in chunks and decode
+                let chunk_size = 1000;
+                for chunk in all_records.chunks(chunk_size) {
+                    let is_fastga = matches!(tp_type, TracepointType::Fastga);
+                    let trace_spacing = if is_fastga { max_complexity } else { 0 };
+                    process_decompress_chunk_binary(
+                        chunk,
+                        &sequence_index,
+                        &distance_mode,
+                        is_fastga,
+                        trace_spacing,
+                        &complexity_metric,
+                        false, // heuristic
+                        None,  // heuristic_max_complexity
+                        keep_old_stats,
+                        string_table,
+                    );
+                }
+
+                if output == "-" {
+                    info!("Decompressed and decoded {} to stdout", input);
+                } else {
+                    info!("Decompressed and decoded {} to {}", input, output);
+                }
+            } else {
+                // Decompress only: binary → tracepoints
+                info!("Decompressing binary PAF to text format with tracepoints...");
+
+                if let Err(e) = lib_bpaf::decompress_bpaf(&input, &output) {
+                    error!("Decompression failed: {}", e);
+                    std::process::exit(1);
+                }
+
+                if output == "-" {
+                    info!("Decompressed {} to stdout", input);
+                } else {
+                    info!("Decompressed {} to {}", input, output);
+                }
             }
         }
         #[cfg(debug_assertions)]
@@ -654,10 +1011,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 // Open the PAF file (or use stdin if "-" is provided).
                 let paf_reader = get_paf_reader(&paf)?;
 
-                // Set the thread pool size
-                rayon::ThreadPoolBuilder::new()
+                // Set the thread pool size (ignore error if already initialized)
+                let _ = rayon::ThreadPoolBuilder::new()
                     .num_threads(threads)
-                    .build_global()?;
+                    .build_global();
 
                 // Process in chunks
                 let chunk_size = 1000; // Or make this configurable
@@ -898,19 +1255,19 @@ fn process_debug_chunk(
     lines.par_iter().for_each(|line| {
         let fields: Vec<&str> = line.split('\t').collect();
         if fields.len() < 12 {
-            error!(
+            warn!(
                 "{}",
                 message_with_truncate_paf_file("Skipping malformed PAF line", line)
             );
-            std::process::exit(1);
+            return;
         }
 
         let Some(cg_field) = fields.iter().find(|&&s| s.starts_with("cg:Z:")) else {
-            error!(
+            warn!(
                 "{}",
                 message_with_truncate_paf_file("Skipping CIGAR-less PAF line", line)
             );
-            std::process::exit(1);
+            return;
         };
         let paf_cigar = &cg_field[5..];
 
@@ -1353,24 +1710,25 @@ fn process_compress_chunk(
     tp_type: &TracepointType,
     max_complexity: usize,
     complexity_metric: &ComplexityMetric,
+    writer: &Arc<Mutex<Box<dyn Write + Send>>>,
     minimal: bool
 ) {
     lines.par_iter().for_each(|line| {
         let fields: Vec<&str> = line.split('\t').collect();
         if fields.len() < 12 {
-            error!(
+            warn!(
                 "{}",
                 message_with_truncate_paf_file("Skipping malformed PAF line", line)
             );
-            std::process::exit(1);
+            return;
         }
 
         let Some(cg_field) = fields.iter().find(|&&s| s.starts_with("cg:Z:")) else {
-            error!(
+            warn!(
                 "{}",
                 message_with_truncate_paf_file("Skipping CIGAR-less PAF line", line)
             );
-            std::process::exit(1);
+            return;
         };
         let cigar = &cg_field[5..];
 
@@ -1397,6 +1755,7 @@ fn process_compress_chunk(
                 alignment_score,
                 existing_df,
                 complexity_metric,
+                writer,
                 minimal
             );
         } else {
@@ -1411,6 +1770,7 @@ fn process_compress_chunk(
                 alignment_score,
                 existing_df,
                 complexity_metric,
+                writer,
                 minimal
             );
         }
@@ -1426,6 +1786,7 @@ fn process_fastga_with_overflow(
     alignment_score: i32,
     existing_df: Option<usize>,
     _complexity_metric: &ComplexityMetric,
+    writer: &Arc<Mutex<Box<dyn Write + Send>>>,
     minimal: bool,
 ) {
     // Parse coordinates
@@ -1468,52 +1829,47 @@ fn process_fastga_with_overflow(
         complement,
     );
 
-    // Output each segment as a separate PAF record
-    for (
-        segment_idx,
-        (tracepoints, (seg_query_start, seg_query_end, seg_target_start, seg_target_end)),
-    ) in segments.iter().enumerate()
+    // Debug: show all segments
+    debug!("Total segments from tracepoints: {}", segments.len());
+    for (i, (tps, (qs, qe, ts, te))) in segments.iter().enumerate() {
+        debug!("  Segment {}: q={}..{}, t={}..{}, {} tracepoints", i, qs, qe, ts, te, tps.len());
+    }
+
+    // For FASTGA mode, output MULTIPLE records (one per segment) like PAFtoALN.c does
+    // Each segment has its own coordinates and tracepoints
+    // Gaps between segments are implicit in coordinate discontinuities
+
+    let mut valid_segment_count = 0;
+    for (_segment_idx, (tracepoints, (seg_query_start, seg_query_end, seg_target_start, seg_target_end)))
+        in segments.iter().enumerate()
     {
+        valid_segment_count += 1;
+
+        // Convert target coordinates back to original space for output
+        let (out_target_start, out_target_end) = if complement {
+            // Reversed space -> Original space
+            (target_len - seg_target_end, target_len - seg_target_start)
+        } else {
+            (*seg_target_start, *seg_target_end)
+        };
+
         // Calculate segment-specific stats
         let sum_of_differences: usize = tracepoints.iter().map(|(diff, _)| diff).sum();
         let tracepoints_str = format_tracepoints(tracepoints);
+        let alignment_length = seg_query_end - seg_query_start;
+        let matches = alignment_length.saturating_sub(sum_of_differences);
 
-        // Create modified fields for this segment
+        // Create output fields for this segment
         let mut new_fields: Vec<String> = Vec::new();
 
         for (i, field) in fields.iter().enumerate() {
             match i {
-                2 => new_fields.push(seg_query_start.to_string()), // query_start
-                3 => new_fields.push(seg_query_end.to_string()),   // query_end
-                7 => {
-                    // Handle target coordinates based on strand
-                    if complement {
-                        // For reverse strand, transform back to PAF coordinates
-                        new_fields.push((target_len - seg_target_end).to_string());
-                    } else {
-                        new_fields.push(seg_target_start.to_string());
-                    }
-                }
-                8 => {
-                    // Handle target coordinates based on strand
-                    if complement {
-                        // For reverse strand, transform back to PAF coordinates
-                        new_fields.push((target_len - seg_target_start).to_string());
-                    } else {
-                        new_fields.push(seg_target_end.to_string());
-                    }
-                }
-                9 => {
-                    // Update residue_matches for this segment
-                    let alignment_length = seg_query_end - seg_query_start;
-                    let matches = alignment_length.saturating_sub(sum_of_differences);
-                    new_fields.push(matches.to_string());
-                }
-                10 => {
-                    // Update alignment_block_length for this segment
-                    let alignment_length = seg_query_end - seg_query_start;
-                    new_fields.push(alignment_length.to_string());
-                }
+                2 => new_fields.push(seg_query_start.to_string()),
+                3 => new_fields.push(seg_query_end.to_string()),
+                7 => new_fields.push(out_target_start.to_string()),
+                8 => new_fields.push(out_target_end.to_string()),
+                9 => new_fields.push(matches.to_string()),
+                10 => new_fields.push(alignment_length.to_string()),
                 _ => {
                     if field.starts_with("cg:Z:") {
                         // Add identity stats before tracepoints
@@ -1547,12 +1903,13 @@ fn process_fastga_with_overflow(
             }
         }
 
-        // Add segment marker if this record was split
+        // Add segment marker if there are multiple valid segments
         if segments.len() > 1 {
-            new_fields.push(format!("sg:i:{}", segment_idx));
+            new_fields.push(format!("sg:i:{}", valid_segment_count - 1));
         }
 
-        println!("{}", new_fields.join("\t"));
+        let mut w = writer.lock().unwrap();
+        writeln!(w, "{}", new_fields.join("\t")).unwrap();
     }
 }
 
@@ -1566,6 +1923,7 @@ fn process_single_record(
     alignment_score: i32,
     existing_df: Option<usize>,
     complexity_metric: &ComplexityMetric,
+    writer: &Arc<Mutex<Box<dyn Write + Send>>>,
     minimal: bool,
 ) {
     // Convert CIGAR based on tracepoint type and complexity metric
@@ -1620,7 +1978,8 @@ fn process_single_record(
         }
     }
 
-    println!("{}", new_fields.join("\t"));
+    let mut w = writer.lock().unwrap();
+    writeln!(w, "{}", new_fields.join("\t")).unwrap();
 }
 
 /// Calculate residue_matches and alignment_block_length from CIGAR string
@@ -1671,19 +2030,19 @@ fn process_decompress_chunk(
     lines.par_iter().for_each(|line| {
         let fields: Vec<&str> = line.split('\t').collect();
         if fields.len() < 12 {
-            error!(
+            warn!(
                 "{}",
                 message_with_truncate_paf_file("Skipping malformed PAF line", line)
             );
-            std::process::exit(1);
+            return;
         }
 
         let Some(tp_field) = fields.iter().find(|&&s| s.starts_with("tp:Z:")) else {
-            error!(
+            warn!(
                 "{}",
                 message_with_truncate_paf_file("Skipping tracepoints-less PAF line", line)
             );
-            std::process::exit(1);
+            return;
         };
         let tracepoints_str = &tp_field[5..]; // Direct slice instead of strip_prefix("tp:Z:")
 
@@ -1762,7 +2121,7 @@ fn process_decompress_chunk(
         }
 
         // Use specified tracepoint type
-        let distance = distance_mode.clone();
+        let distance = *distance_mode;
 
         let cigar = if fastga {
             // FastGA decoding
@@ -1994,6 +2353,269 @@ fn process_decompress_chunk(
     });
 }
 
+/// Process binary records (directly from BpafReader, no text conversion)
+fn process_decompress_chunk_binary(
+    records: &[lib_bpaf::AlignmentRecord],
+    sequence_index: &SequenceIndex,
+    distance_mode: &Distance,
+    fastga: bool,
+    trace_spacing: usize,
+    complexity_metric: &ComplexityMetric,
+    heuristic: bool,
+    heuristic_max_complexity: Option<usize>,
+    keep_old_stats: bool,
+    string_table: &lib_bpaf::StringTable,
+) {
+    records.par_iter().for_each(|record| {
+        // Get sequence names from string table
+        let query_name = string_table.get(record.query_name_id).unwrap();
+        let target_name = string_table.get(record.target_name_id).unwrap();
+
+        debug!(
+            "Fetching query sequence {}:{}-{} on {} strand",
+            query_name,
+            record.query_start,
+            record.query_end,
+            if record.strand == '-' && !fastga { "-" } else { "+" }
+        );
+        let mut query_seq = sequence_index
+            .fetch_sequence(query_name, record.query_start as usize, record.query_end as usize)
+            .unwrap_or_else(|msg| {
+                error!("{}", msg);
+                std::process::exit(1);
+            });
+        if record.strand == '-' && !fastga {
+            query_seq = reverse_complement(&query_seq);
+        }
+
+        debug!(
+            "Fetching target sequence {}:{}-{} on {} strand",
+            target_name,
+            record.target_start,
+            record.target_end,
+            if record.strand == '-' && fastga { "-" } else { "+" }
+        );
+        let mut target_seq = sequence_index
+            .fetch_sequence(target_name, record.target_start as usize, record.target_end as usize)
+            .unwrap_or_else(|msg| {
+                error!("{}", msg);
+                std::process::exit(1);
+            });
+        if fastga && record.strand == '-' {
+            target_seq = reverse_complement(&target_seq);
+        }
+
+        let distance = *distance_mode;
+
+        // Get target length from string table
+        let target_len = string_table.get_length(record.target_name_id).unwrap() as usize;
+
+        // Convert tracepoints to CIGAR based on type
+        let cigar = match &record.tracepoints {
+            TracepointData::Fastga(tracepoints) => tracepoints_to_cigar_fastga(
+                tracepoints,
+                trace_spacing,
+                &query_seq,
+                &target_seq,
+                record.query_start as usize,
+                if record.strand == '+' {
+                    target_len - (record.target_end as usize)
+                } else {
+                    record.target_start as usize
+                },
+                record.strand == '-',
+            ),
+            TracepointData::Standard(tracepoints) => match *complexity_metric {
+                ComplexityMetric::EditDistance => {
+                    if heuristic {
+                        let max_value = heuristic_max_complexity
+                            .expect("missing max-complexity with heuristic");
+                        let mut aligner = distance.create_aligner(None);
+                        tracepoints_to_cigar_with_aligner(
+                            tracepoints,
+                            &query_seq,
+                            &target_seq,
+                            0,
+                            0,
+                            ComplexityMetric::EditDistance,
+                            &mut aligner,
+                            true,
+                            max_value,
+                        )
+                    } else {
+                        tracepoints_to_cigar(
+                            tracepoints,
+                            &query_seq,
+                            &target_seq,
+                            0,
+                            0,
+                            ComplexityMetric::EditDistance,
+                            &distance,
+                        )
+                    }
+                }
+                ComplexityMetric::DiagonalDistance => tracepoints_to_cigar(
+                    tracepoints,
+                    &query_seq,
+                    &target_seq,
+                    0,
+                    0,
+                    ComplexityMetric::DiagonalDistance,
+                    &distance,
+                ),
+            },
+            TracepointData::Mixed(mixed) => match *complexity_metric {
+                ComplexityMetric::EditDistance => {
+                    if heuristic {
+                        let max_value = heuristic_max_complexity
+                            .expect("missing max-complexity with heuristic");
+                        let mut aligner = distance.create_aligner(None);
+                        mixed_tracepoints_to_cigar_with_aligner(
+                            mixed,
+                            &query_seq,
+                            &target_seq,
+                            0,
+                            0,
+                            ComplexityMetric::EditDistance,
+                            &mut aligner,
+                            true,
+                            max_value,
+                        )
+                    } else {
+                        mixed_tracepoints_to_cigar(
+                            mixed,
+                            &query_seq,
+                            &target_seq,
+                            0,
+                            0,
+                            ComplexityMetric::EditDistance,
+                            &distance,
+                        )
+                    }
+                }
+                ComplexityMetric::DiagonalDistance => mixed_tracepoints_to_cigar(
+                    mixed,
+                    &query_seq,
+                    &target_seq,
+                    0,
+                    0,
+                    ComplexityMetric::DiagonalDistance,
+                    &distance,
+                ),
+            },
+            TracepointData::Variable(variable) => match *complexity_metric {
+                ComplexityMetric::EditDistance => {
+                    if heuristic {
+                        let max_value = heuristic_max_complexity
+                            .expect("missing max-complexity with heuristic");
+                        let mut aligner = distance.create_aligner(None);
+                        variable_tracepoints_to_cigar_with_aligner(
+                            variable,
+                            &query_seq,
+                            &target_seq,
+                            0,
+                            0,
+                            ComplexityMetric::EditDistance,
+                            &mut aligner,
+                            true,
+                            max_value,
+                        )
+                    } else {
+                        variable_tracepoints_to_cigar(
+                            variable,
+                            &query_seq,
+                            &target_seq,
+                            0,
+                            0,
+                            ComplexityMetric::EditDistance,
+                            &distance,
+                        )
+                    }
+                }
+                ComplexityMetric::DiagonalDistance => variable_tracepoints_to_cigar(
+                    variable,
+                    &query_seq,
+                    &target_seq,
+                    0,
+                    0,
+                    ComplexityMetric::DiagonalDistance,
+                    &distance,
+                ),
+            },
+        };
+
+        // Calculate identity stats from the reconstructed CIGAR
+        let (gap_compressed_identity, block_identity) = calculate_identity_stats(&cigar);
+
+        // Calculate alignment score based on edit distance
+        let alignment_score = calculate_alignment_score_edit_distance(&cigar);
+
+        // Build output line - start with core PAF fields
+        let mut new_fields = vec![
+            query_name.to_string(),
+            string_table.get_length(record.query_name_id).unwrap().to_string(),
+            record.query_start.to_string(),
+            record.query_end.to_string(),
+            record.strand.to_string(),
+            target_name.to_string(),
+            string_table.get_length(record.target_name_id).unwrap().to_string(),
+            record.target_start.to_string(),
+            record.target_end.to_string(),
+            record.residue_matches.to_string(),
+            record.alignment_block_len.to_string(),
+            record.mapping_quality.to_string(),
+        ];
+
+        // Add optional tags from binary record (all tags except tp:Z: which we replace with cg:Z:)
+        for tag in &record.tags {
+            let key_str = std::str::from_utf8(&tag.key).unwrap_or("??");
+
+            // Skip tp tag (we're replacing it with cigar)
+            if key_str == "tp" {
+                // Optionally keep old gi/bi/sc as giold/biold/scold
+                if keep_old_stats {
+                    // Look for these in other tags... but for now skip
+                }
+                continue;
+            }
+
+            // Skip gi, bi, sc tags - they will be replaced
+            if key_str == "gi" || key_str == "bi" || key_str == "sc" {
+                if keep_old_stats {
+                    let old_prefix = format!("{}old", key_str);
+                    let type_char = tag.tag_type as char;
+                    let value_str = match &tag.value {
+                        lib_bpaf::TagValue::Int(v) => v.to_string(),
+                        lib_bpaf::TagValue::Float(v) => v.to_string(),
+                        lib_bpaf::TagValue::String(v) => v.clone(),
+                    };
+                    new_fields.push(format!("{}:{}:{}", old_prefix, type_char, value_str));
+                }
+                continue;
+            }
+
+            // Add other tags as-is
+            let type_char = tag.tag_type as char;
+            let value_str = match &tag.value {
+                lib_bpaf::TagValue::Int(v) => v.to_string(),
+                lib_bpaf::TagValue::Float(v) => v.to_string(),
+                lib_bpaf::TagValue::String(v) => v.clone(),
+            };
+            new_fields.push(format!("{}:{}:{}", key_str, type_char, value_str));
+        }
+
+        // Add new identity stats and alignment score
+        new_fields.push(format!("gi:f:{:.12}", gap_compressed_identity));
+        new_fields.push(format!("bi:f:{:.12}", block_identity));
+        new_fields.push(format!("sc:i:{}", alignment_score));
+
+        // Replace tracepoints with CIGAR
+        new_fields.push(format!("cg:Z:{}", cigar));
+
+        println!("{}", new_fields.join("\t"));
+    });
+}
+
 /// Combines a message with the first 9 columns of a PAF line.
 fn message_with_truncate_paf_file(message: &str, line: &str) -> String {
     let truncated_line = line.split('\t').take(9).collect::<Vec<&str>>().join("\t");
@@ -2095,7 +2717,7 @@ fn parse_variable_tracepoints(tp_str: &str) -> Vec<(usize, Option<usize>)> {
 
 fn parse_distance(distance: DistanceChoice, penalties: Option<&str>) -> Result<Distance, String> {
     match distance {
-        DistanceChoice::Edit => Ok(Distance::Edit {}),
+        DistanceChoice::Edit => Ok(Distance::Edit),
         DistanceChoice::GapAffine => {
             let values = parse_penalty_values(penalties, 3, "mismatch,gap_open,gap_ext")?;
             Ok(Distance::GapAffine {
@@ -2111,6 +2733,34 @@ fn parse_distance(distance: DistanceChoice, penalties: Option<&str>) -> Result<D
                 "mismatch,gap_open1,gap_ext1,gap_open2,gap_ext2",
             )?;
             Ok(Distance::GapAffine2p {
+                mismatch: values[0],
+                gap_opening1: values[1],
+                gap_extension1: values[2],
+                gap_opening2: values[3],
+                gap_extension2: values[4],
+            })
+        }
+    }
+}
+
+fn parse_distance_bpaf(distance: DistanceChoice, penalties: Option<&str>) -> Result<lib_bpaf::Distance, String> {
+    match distance {
+        DistanceChoice::Edit => Ok(lib_bpaf::Distance::Edit),
+        DistanceChoice::GapAffine => {
+            let values = parse_penalty_values(penalties, 3, "mismatch,gap_open,gap_ext")?;
+            Ok(lib_bpaf::Distance::GapAffine {
+                mismatch: values[0],
+                gap_opening: values[1],
+                gap_extension: values[2],
+            })
+        }
+        DistanceChoice::GapAffine2p => {
+            let values = parse_penalty_values(
+                penalties,
+                5,
+                "mismatch,gap_open1,gap_ext1,gap_open2,gap_ext2",
+            )?;
+            Ok(lib_bpaf::Distance::GapAffine2p {
                 mismatch: values[0],
                 gap_opening1: values[1],
                 gap_extension1: values[2],
