@@ -1190,7 +1190,7 @@ fn calculate_alignment_score_edit_distance(cigar: &str) -> i32 {
 }
 
 /// Calculate gap-compressed identity and block identity from a CIGAR string
-fn calculate_identity_stats(cigar: &str) -> (f64, f64) {
+fn calculate_identity_stats(cigar: &str) -> (f32, f32) {
     let mut matches = 0;
     let mut mismatches = 0;
     let mut insertions = 0;
@@ -1225,14 +1225,14 @@ fn calculate_identity_stats(cigar: &str) -> (f64, f64) {
     }
 
     let gap_compressed_identity = if matches + mismatches + insertions + deletions > 0 {
-        (matches as f64) / (matches + mismatches + insertions + deletions) as f64
+        (matches as f32) / (matches + mismatches + insertions + deletions) as f32
     } else {
         0.0
     };
 
     let edit_distance = mismatches + inserted_bp + deleted_bp;
     let block_identity = if matches + edit_distance > 0 {
-        (matches as f64) / (matches + edit_distance) as f64
+        (matches as f32) / (matches + edit_distance) as f32
     } else {
         0.0
     };
@@ -1547,7 +1547,7 @@ fn process_debug_chunk(
 
 /// Calculate gap compressed identity and block identity from a CIGAR string
 #[cfg(debug_assertions)]
-fn calculate_cigar_stats(cigar: &str) -> (usize, usize, usize, usize, usize, usize, f64, f64) {
+fn calculate_cigar_stats(cigar: &str) -> (usize, usize, usize, usize, usize, usize, f32, f32) {
     let mut matches = 0;
     let mut mismatches = 0;
     let mut insertions = 0; // Number of insertion events
@@ -1597,7 +1597,7 @@ fn calculate_cigar_stats(cigar: &str) -> (usize, usize, usize, usize, usize, usi
 
     // Calculate gap compressed identity
     let gap_compressed_identity = if matches + mismatches + insertions + deletions > 0 {
-        (matches as f64) / (matches + mismatches + insertions + deletions) as f64
+        (matches as f32) / (matches + mismatches + insertions + deletions) as f32
     } else {
         0.0
     };
@@ -1605,7 +1605,7 @@ fn calculate_cigar_stats(cigar: &str) -> (usize, usize, usize, usize, usize, usi
     // Calculate block identity
     let edit_distance = mismatches + inserted_bp + deleted_bp;
     let block_identity = if matches + edit_distance > 0 {
-        (matches as f64) / (matches + edit_distance) as f64
+        (matches as f32) / (matches + edit_distance) as f32
     } else {
         0.0
     };
@@ -1781,8 +1781,8 @@ fn process_fastga_with_overflow(
     fields: &[&str],
     cigar: &str,
     max_complexity: usize,
-    gap_compressed_identity: f64,
-    block_identity: f64,
+    gap_compressed_identity: f32,
+    block_identity: f32,
     alignment_score: i32,
     existing_df: Option<usize>,
     _complexity_metric: &ComplexityMetric,
@@ -1829,10 +1829,53 @@ fn process_fastga_with_overflow(
         complement,
     );
 
-    // Debug: show all segments
-    debug!("Total segments from tracepoints: {}", segments.len());
-    for (i, (tps, (qs, qe, ts, te))) in segments.iter().enumerate() {
-        debug!("  Segment {}: q={}..{}, t={}..{}, {} tracepoints", i, qs, qe, ts, te, tps.len());
+    // Debug: log when an alignment is split into multiple segments
+    if segments.len() > 1 {
+        debug!(
+            "SPLIT: alignment {}:{}-{} -> {}:{}-{} ({}) split into {} segments (cause: indel overflow >200bp in tracepoint):",
+            fields[0], query_start, query_end,
+            fields[5], target_start, target_end,
+            if complement { "-" } else { "+" },
+            segments.len()
+        );
+        for (i, (tps, (qs, qe, ts, te))) in segments.iter().enumerate() {
+            // Convert target coordinates back to original space for display
+            let (display_ts, display_te) = if complement {
+                (target_len - te, target_len - ts)
+            } else {
+                (*ts, *te)
+            };
+            debug!(
+                "  Segment {}/{}: query {}..{} ({} bp), target {}..{} ({} bp), {} tracepoints",
+                i + 1, segments.len(),
+                qs, qe, qe - qs,
+                display_ts, display_te, display_te - display_ts,
+                tps.len()
+            );
+
+            // Log the gap (overflow-causing indel) between this segment and the next
+            if i + 1 < segments.len() {
+                let (_, (next_qs, _, next_ts, _)) = &segments[i + 1];
+                let query_gap = next_qs.saturating_sub(*qe);
+                let target_gap = if complement {
+                    // In reversed space, target coords go in opposite direction
+                    te.saturating_sub(*next_ts)
+                } else {
+                    next_ts.saturating_sub(*te)
+                };
+
+                let gap_type = if query_gap > 0 && target_gap == 0 {
+                    format!("{}bp insertion", query_gap)
+                } else if target_gap > 0 && query_gap == 0 {
+                    format!("{}bp deletion", target_gap)
+                } else if query_gap > 0 && target_gap > 0 {
+                    format!("{}bp query gap + {}bp target gap", query_gap, target_gap)
+                } else {
+                    "unknown gap".to_string()
+                };
+                debug!("    -> split caused by: {}", gap_type);
+            }
+        }
     }
 
     // For FASTGA mode, output MULTIPLE records (one per segment) like PAFtoALN.c does
@@ -1918,8 +1961,8 @@ fn process_single_record(
     cigar: &str,
     tp_type: &TracepointType,
     max_complexity: usize,
-    gap_compressed_identity: f64,
-    block_identity: f64,
+    gap_compressed_identity: f32,
+    block_identity: f32,
     alignment_score: i32,
     existing_df: Option<usize>,
     complexity_metric: &ComplexityMetric,
