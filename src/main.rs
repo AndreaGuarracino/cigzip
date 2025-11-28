@@ -1482,24 +1482,6 @@ fn process_fastga_with_overflow(
     for (segment_idx, (tracepoints, (seg_query_start, seg_query_end, seg_target_start, seg_target_end)))
         in segments.iter().enumerate()
     {
-        let seg_query_len = seg_query_end.saturating_sub(*seg_query_start);
-        let seg_target_len = seg_target_end.saturating_sub(*seg_target_start);
-
-        // Skip zero-length segments (gap markers with no alignment content)
-        if seg_query_len == 0 && seg_target_len == 0 {
-            info!("Skipping zero-length segment {}", segment_idx);
-            continue;
-        }
-
-        // Warn if segment has no tracepoints (shouldn't happen for valid segments)
-        if tracepoints.is_empty() {
-            warn!(
-                "Segment {} has coordinates (q:{}-{}, t:{}-{}) but no tracepoints",
-                segment_idx, seg_query_start, seg_query_end, seg_target_start, seg_target_end
-            );
-            continue;
-        }
-
         valid_segment_count += 1;
 
         // Convert target coordinates back to original space for output
