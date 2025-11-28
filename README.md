@@ -13,10 +13,10 @@ cigzip decode --paf output.tp.paf --sequence-files ref.fa > restored.paf
 cigzip decode --paf output.tp.paf --sequence-files archive.agc > restored.paf
 
 # Compress to binary format
-cigzip compress -i input.tp.paf -o output.bpaf
+cigzip compress -i input.tp.paf -o output.tpa
 
 # Decompress
-cigzip decompress -i output.bpaf -o output.paf
+cigzip decompress -i output.tpa -o output.paf
 ```
 
 ## Commands
@@ -29,7 +29,7 @@ cigzip encode --paf input.paf > output.tp.paf
 
 # Binary output
 cigzip encode --paf input.paf --type standard \
-  --output-format binary --output-file output.bpaf --strategy varint
+  --output-format binary --output-file output.tpa --strategy varint
 ```
 
 **Options:**
@@ -94,13 +94,13 @@ Compress PAF files with tracepoints to binary format.
 
 ```sh
 # Basic compression
-cigzip compress -i input.tp.paf -o output.bpaf
+cigzip compress -i input.tp.paf -o output.tpa
 
 # With specific strategy
-cigzip compress -i input.tp.paf -o output.bpaf --strategy huffman
+cigzip compress -i input.tp.paf -o output.tpa --strategy huffman
 
 # From stdin
-cat input.tp.paf | cigzip compress -i - -o output.bpaf
+cat input.tp.paf | cigzip compress -i - -o output.tpa
 ```
 
 **Options:**
@@ -115,10 +115,10 @@ Decompress binary PAF files to text format with tracepoints.
 
 ```sh
 # To file
-cigzip decompress -i input.bpaf -o output.tp.paf
+cigzip decompress -i input.tpa -o output.tp.paf
 
 # To stdout
-cigzip decompress -i input.bpaf -o -
+cigzip decompress -i input.tpa -o -
 ```
 
 **Options:**
@@ -145,14 +145,14 @@ cigzip decode --paf alignments.paf --sequence-files genomes.agc > output.paf
 
 ## Library Usage
 
-Use cigzip as a Rust library for programmatic access to BPAF files:
+Use cigzip as a Rust library for programmatic access to TPA files:
 
 ```rust
-use lib_bpaf::BpafReader;
+use tpa::TpaReader;
 
 fn main() -> std::io::Result<()> {
-    // Open BPAF file with index
-    let mut reader = BpafReader::open("alignments.bpaf")?;
+    // Open TPA file with index
+    let mut reader = TpaReader::open("alignments.tpa")?;
     println!("Total records: {}", reader.len());
 
     // O(1) random access by record ID
@@ -188,7 +188,7 @@ Add to `Cargo.toml`:
 ```toml
 [dependencies]
 cigzip = { git = "https://github.com/AndreaGuarracino/cigzip" }
-lib_bpaf = { git = "https://github.com/AndreaGuarracino/lib_bpaf" }
+tpa = { git = "https://github.com/AndreaGuarracino/tpa" }
 ```
 
 ## Building
@@ -215,7 +215,7 @@ This disables the optional `agc-rs` dependency.
 
 ## Format Details
 
-### Binary Format (BPAF)
+### Binary Format (TPA)
 
 ```
 [Header] → [Records] → [StringTable]
@@ -225,7 +225,7 @@ This disables the optional `agc-rs` dependency.
 - **Fast O(1) random access**: Byte-aligned varint encoding enables instant tracepoint extraction
 - **Compression**: Delta encoding + varint + zstd level 3 (or Huffman + zstd)
 - **Deduplication**: Shared string table for sequence names
-- **Random access**: External `.bpaf.idx` index for O(1) record lookup
+- **Random access**: External `.tpa.idx` index for O(1) record lookup
 - **Backwards compatible**: Reads all format versions
 
 ### Index Format

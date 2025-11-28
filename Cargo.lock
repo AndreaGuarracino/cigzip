@@ -149,13 +149,13 @@ dependencies = [
  "env_logger",
  "flate2",
  "indicatif",
- "lib_bpaf",
  "lib_wfa2",
  "libc",
  "log",
  "ragc-reader",
  "rayon",
  "rust-htslib",
+ "tpa",
  "tracepoints",
 ]
 
@@ -583,20 +583,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "bbd2bcb4c963f2ddae06a2efc7e9f3591312473c50c6685e1f298068316e66fe"
 
 [[package]]
-name = "lib_bpaf"
-version = "0.1.0"
-dependencies = [
- "bgzip",
- "env_logger",
- "flate2",
- "lib_wfa2",
- "log",
- "rayon",
- "tracepoints",
- "zstd",
-]
-
-[[package]]
 name = "lib_wfa2"
 version = "0.1.0"
 source = "git+https://github.com/AndreaGuarracino/lib_wfa2#ec37a25059effb8a0a18c8726f236128f51145de"
@@ -988,6 +974,20 @@ checksum = "42d3e9c45c09de15d06dd8acf5f4e0e399e85927b7f00711024eb7ae10fa4869"
 dependencies = [
  "displaydoc",
  "zerovec",
+]
+
+[[package]]
+name = "tpa"
+version = "0.1.0"
+dependencies = [
+ "bgzip",
+ "env_logger",
+ "flate2",
+ "lib_wfa2",
+ "log",
+ "rayon",
+ "tracepoints",
+ "zstd",
 ]
 
 [[package]]

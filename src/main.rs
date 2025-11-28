@@ -1,7 +1,7 @@
 mod sequence;
 
 use crate::sequence::{collect_sequence_paths, SequenceIndex};
-use lib_bpaf;
+use tpa;
 use clap::{Parser, ValueEnum};
 use flate2::read::MultiGzDecoder;
 #[cfg(debug_assertions)]
@@ -480,7 +480,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             setup_logger(common.verbose);
 
             // Detect input format
-            let is_binary = lib_bpaf::is_binary_paf(&common.paf).unwrap_or(false);
+            let is_binary = tpa::is_tpa_file(&common.paf).unwrap_or(false);
 
             // Determine if we're using fastga based on tp_type
             let is_fastga = matches!(tp_type, TracepointType::Fastga);
@@ -606,7 +606,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             if is_binary {
                 // Read directly from binary format (no temp file needed)
                 info!("Reading from binary PAF format...");
-                let mut reader = match lib_bpaf::BpafReader::open(&common.paf) {
+                let mut reader = match tpa::TpaReader::open(&common.paf) {
                     Ok(r) => r,
                     Err(e) => {
                         error!("Failed to open binary PAF: {}", e);
@@ -705,7 +705,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         Args::Compress { input, output, tp_type, max_complexity, complexity_metric, distance, penalties, strategy_str, strategy_second_str, verbose } => {
             setup_logger(verbose);
 
-            let bpaf_distance = match parse_distance_bpaf(distance, penalties.as_deref()) {
+            let tpa_distance = match parse_distance_tpa(distance, penalties.as_deref()) {
                 Ok(d) => d,
                 Err(e) => {
                     error!("Invalid distance parameters: {}", e);
@@ -737,7 +737,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             // Check if dual strategy mode is enabled
             if let Some(second_str) = strategy_second_str {
                 // Dual strategy mode: parse both strategies
-                let (first_strategy, first_layer) = match lib_bpaf::CompressionStrategy::from_str_with_layer(&strategy_str) {
+                let (first_strategy, first_layer) = match tpa::CompressionStrategy::from_str_with_layer(&strategy_str) {
                     Ok((s, l)) => (s, l),
                     Err(e) => {
                         error!("Invalid first strategy '{}': {}", strategy_str, e);
@@ -745,7 +745,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     }
                 };
 
-                let (second_strategy, second_layer) = match lib_bpaf::CompressionStrategy::from_str_with_layer(&second_str) {
+                let (second_strategy, second_layer) = match tpa::CompressionStrategy::from_str_with_layer(&second_str) {
                     Ok((s, l)) => (s, l),
                     Err(e) => {
                         error!("Invalid second strategy '{}': {}", second_str, e);
@@ -761,13 +761,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
                 info!("Dual strategy mode: {} → {}", strategy_str, second_str);
 
-                let mut config = lib_bpaf::CompressionConfig::new()
+                let mut config = tpa::CompressionConfig::new()
                     .dual_strategy(first_strategy, second_strategy)
                     .layer(layer)
                     .tp_type(tp_type)
                     .max_complexity(max_complexity)
                     .complexity_metric(complexity_metric)
-                    .distance(bpaf_distance);
+                    .distance(tpa_distance);
 
                 if has_cigar {
                     info!("Detected CIGAR tags (cg:Z:); encoding to tracepoints then compressing");
@@ -780,13 +780,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     std::process::exit(1);
                 }
 
-                if let Err(e) = lib_bpaf::compress_paf_to_bpaf(&input, &output, config) {
+                if let Err(e) = tpa::compress_paf_to_tpa(&input, &output, config) {
                     error!("Compression failed: {}", e);
                     std::process::exit(1);
                 }
             } else {
                 // Single strategy mode: parse one strategy
-                let (strategy, layer) = match lib_bpaf::CompressionStrategy::from_str_with_layer(&strategy_str) {
+                let (strategy, layer) = match tpa::CompressionStrategy::from_str_with_layer(&strategy_str) {
                     Ok((s, l)) => (s, l),
                     Err(e) => {
                         error!("Invalid strategy '{}': {}", strategy_str, e);
@@ -794,13 +794,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     }
                 };
 
-                let mut config = lib_bpaf::CompressionConfig::new()
+                let mut config = tpa::CompressionConfig::new()
                     .strategy(strategy)
                     .layer(layer)
                     .tp_type(tp_type)
                     .max_complexity(max_complexity)
                     .complexity_metric(complexity_metric)
-                    .distance(bpaf_distance);
+                    .distance(tpa_distance);
 
                 if has_cigar {
                     info!("Detected CIGAR tags (cg:Z:); encoding to tracepoints then compressing");
@@ -813,7 +813,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     std::process::exit(1);
                 }
 
-                if let Err(e) = lib_bpaf::compress_paf_to_bpaf(&input, &output, config) {
+                if let Err(e) = tpa::compress_paf_to_tpa(&input, &output, config) {
                     error!("Compression failed: {}", e);
                     std::process::exit(1);
                 }
@@ -850,7 +850,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 };
 
                 // Read binary PAF
-                let mut reader = match lib_bpaf::BpafReader::open(&input) {
+                let mut reader = match tpa::TpaReader::open(&input) {
                     Ok(r) => r,
                     Err(e) => {
                         error!("Failed to open binary PAF: {}", e);
@@ -917,7 +917,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 // Decompress only: binary → tracepoints
                 info!("Decompressing binary PAF to text format with tracepoints...");
 
-                if let Err(e) = lib_bpaf::decompress_bpaf(&input, &output) {
+                if let Err(e) = tpa::decompress_tpa(&input, &output) {
                     error!("Decompression failed: {}", e);
                     std::process::exit(1);
                 }
@@ -2396,9 +2396,9 @@ fn process_decompress_chunk(
     });
 }
 
-/// Process binary records (directly from BpafReader, no text conversion)
+/// Process binary records (directly from TpaReader, no text conversion)
 fn process_decompress_chunk_binary(
-    records: &[lib_bpaf::AlignmentRecord],
+    records: &[tpa::AlignmentRecord],
     sequence_index: &SequenceIndex,
     distance_mode: &Distance,
     fastga: bool,
@@ -2407,7 +2407,7 @@ fn process_decompress_chunk_binary(
     heuristic: bool,
     heuristic_max_complexity: Option<usize>,
     keep_old_stats: bool,
-    string_table: &lib_bpaf::StringTable,
+    string_table: &tpa::StringTable,
 ) {
     records.par_iter().for_each(|record| {
         // Get sequence names from string table
@@ -2628,9 +2628,9 @@ fn process_decompress_chunk_binary(
                     let old_prefix = format!("{}old", key_str);
                     let type_char = tag.tag_type as char;
                     let value_str = match &tag.value {
-                        lib_bpaf::TagValue::Int(v) => v.to_string(),
-                        lib_bpaf::TagValue::Float(v) => v.to_string(),
-                        lib_bpaf::TagValue::String(v) => v.clone(),
+                        tpa::TagValue::Int(v) => v.to_string(),
+                        tpa::TagValue::Float(v) => v.to_string(),
+                        tpa::TagValue::String(v) => v.clone(),
                     };
                     new_fields.push(format!("{}:{}:{}", old_prefix, type_char, value_str));
                 }
@@ -2640,9 +2640,9 @@ fn process_decompress_chunk_binary(
             // Add other tags as-is
             let type_char = tag.tag_type as char;
             let value_str = match &tag.value {
-                lib_bpaf::TagValue::Int(v) => v.to_string(),
-                lib_bpaf::TagValue::Float(v) => v.to_string(),
-                lib_bpaf::TagValue::String(v) => v.clone(),
+                tpa::TagValue::Int(v) => v.to_string(),
+                tpa::TagValue::Float(v) => v.to_string(),
+                tpa::TagValue::String(v) => v.clone(),
             };
             new_fields.push(format!("{}:{}:{}", key_str, type_char, value_str));
         }
@@ -2786,12 +2786,12 @@ fn parse_distance(distance: DistanceChoice, penalties: Option<&str>) -> Result<D
     }
 }
 
-fn parse_distance_bpaf(distance: DistanceChoice, penalties: Option<&str>) -> Result<lib_bpaf::Distance, String> {
+fn parse_distance_tpa(distance: DistanceChoice, penalties: Option<&str>) -> Result<tpa::Distance, String> {
     match distance {
-        DistanceChoice::Edit => Ok(lib_bpaf::Distance::Edit),
+        DistanceChoice::Edit => Ok(tpa::Distance::Edit),
         DistanceChoice::GapAffine => {
             let values = parse_penalty_values(penalties, 3, "mismatch,gap_open,gap_ext")?;
-            Ok(lib_bpaf::Distance::GapAffine {
+            Ok(tpa::Distance::GapAffine {
                 mismatch: values[0],
                 gap_opening: values[1],
                 gap_extension: values[2],
@@ -2803,7 +2803,7 @@ fn parse_distance_bpaf(distance: DistanceChoice, penalties: Option<&str>) -> Res
                 5,
                 "mismatch,gap_open1,gap_ext1,gap_open2,gap_ext2",
             )?;
-            Ok(lib_bpaf::Distance::GapAffine2p {
+            Ok(tpa::Distance::GapAffine2p {
                 mismatch: values[0],
                 gap_opening1: values[1],
                 gap_extension1: values[2],
