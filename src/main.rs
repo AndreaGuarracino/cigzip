@@ -109,6 +109,10 @@ enum Args {
         /// Output file path (default: stdout)
         #[arg(short = 'o', long = "output")]
         output: Option<String>,
+
+        /// Skip adding optional fields (gi/bi/sc fields)
+        #[arg(long = "minimal")]
+        minimal: bool,
     },
     /// Decode tracepoints back to CIGAR
     Decode {
@@ -297,6 +301,7 @@ impl fmt::Debug for Args {
                 complexity_metric,
                 max_complexity,
                 output,
+                minimal,
             } => f
                 .debug_struct("Args::Encode")
                 .field("common", common)
@@ -304,6 +309,7 @@ impl fmt::Debug for Args {
                 .field("complexity_metric", complexity_metric)
                 .field("max_complexity", max_complexity)
                 .field("output", output)
+                .field("minimal", minimal)
                 .finish(),
             Args::Decode {
                 common,
@@ -391,6 +397,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             max_complexity,
             complexity_metric,
             output,
+            minimal,
         } => {
             setup_logger(common.verbose);
 
@@ -434,7 +441,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         }
                         lines.push(line);
                         if lines.len() >= chunk_size {
-                            process_compress_chunk(&lines, &tp_type, max_complexity, &complexity_metric, &writer);
+                            // Process current chunk in parallel
+                            process_compress_chunk(
+                                &lines,
+                                &tp_type,
+                                max_complexity,
+                                &complexity_metric,
+                                &writer,
+                                minimal
+                            );
                             lines.clear();
                         }
                     }
@@ -442,7 +457,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 }
             }
             if !lines.is_empty() {
-                process_compress_chunk(&lines, &tp_type, max_complexity, &complexity_metric, &writer);
+                process_compress_chunk(&lines, &tp_type, max_complexity, &complexity_metric, &writer, minimal);
             }
 
             // Flush the writer
@@ -1695,6 +1710,7 @@ fn process_compress_chunk(
     max_complexity: usize,
     complexity_metric: &ComplexityMetric,
     writer: &Arc<Mutex<Box<dyn Write + Send>>>,
+    minimal: bool
 ) {
     lines.par_iter().for_each(|line| {
         let fields: Vec<&str> = line.split('\t').collect();
@@ -1739,6 +1755,7 @@ fn process_compress_chunk(
                 existing_df,
                 complexity_metric,
                 writer,
+                minimal
             );
         } else {
             // Handle other tracepoint types (no overflow splitting needed)
@@ -1753,6 +1770,7 @@ fn process_compress_chunk(
                 existing_df,
                 complexity_metric,
                 writer,
+                minimal
             );
         }
     });
@@ -1768,6 +1786,7 @@ fn process_fastga_with_overflow(
     existing_df: Option<usize>,
     _complexity_metric: &ComplexityMetric,
     writer: &Arc<Mutex<Box<dyn Write + Send>>>,
+    minimal: bool,
 ) {
     // Parse coordinates
     let query_len = fields[1].parse().unwrap_or_else(|_| {
@@ -1820,7 +1839,7 @@ fn process_fastga_with_overflow(
     // Gaps between segments are implicit in coordinate discontinuities
 
     let mut valid_segment_count = 0;
-    for (segment_idx, (tracepoints, (seg_query_start, seg_query_end, seg_target_start, seg_target_end)))
+    for (_segment_idx, (tracepoints, (seg_query_start, seg_query_end, seg_target_start, seg_target_end)))
         in segments.iter().enumerate()
     {
         valid_segment_count += 1;
@@ -1853,17 +1872,19 @@ fn process_fastga_with_overflow(
                 _ => {
                     if field.starts_with("cg:Z:") {
                         // Add identity stats before tracepoints
-                        new_fields.push(format!("gi:f:{:.12}", gap_compressed_identity));
-                        new_fields.push(format!("bi:f:{:.12}", block_identity));
+                        if !minimal {
+                            new_fields.push(format!("gi:f:{:.12}", gap_compressed_identity));
+                            new_fields.push(format!("bi:f:{:.12}", block_identity));
 
-                        // Add df fields
-                        if let Some(old_df) = existing_df {
-                            new_fields.push(format!("dfold:i:{}", old_df));
+                            // Add df fields
+                            if let Some(old_df) = existing_df {
+                                new_fields.push(format!("dfold:i:{}", old_df));
+                            }
+                            new_fields.push(format!("df:i:{}", sum_of_differences));
+
+                            // Add alignment score
+                            new_fields.push(format!("sc:i:{}", alignment_score));
                         }
-                        new_fields.push(format!("df:i:{}", sum_of_differences));
-
-                        // Add alignment score
-                        new_fields.push(format!("sc:i:{}", alignment_score));
 
                         // Add tracepoints
                         new_fields.push(format!("tp:Z:{}", tracepoints_str));
@@ -1902,6 +1923,7 @@ fn process_single_record(
     existing_df: Option<usize>,
     complexity_metric: &ComplexityMetric,
     writer: &Arc<Mutex<Box<dyn Write + Send>>>,
+    minimal: bool,
 ) {
     // Convert CIGAR based on tracepoint type and complexity metric
     let (tracepoints_str, df_value) = match tp_type {
@@ -1929,19 +1951,17 @@ fn process_single_record(
     for field in fields.iter() {
         if field.starts_with("cg:Z:") {
             // Add identity stats before tracepoints
-            new_fields.push(format!("gi:f:{:.12}", gap_compressed_identity));
-            new_fields.push(format!("bi:f:{:.12}", block_identity));
-
-            // Add df field if needed
-            if let Some(new_df) = df_value {
-                if let Some(old_df) = existing_df {
-                    new_fields.push(format!("dfold:i:{}", old_df));
+            if !minimal {
+                new_fields.push(format!("gi:f:{:.12}", gap_compressed_identity));
+                new_fields.push(format!("bi:f:{:.12}", block_identity));
+                new_fields.push(format!("sc:i:{}", alignment_score));
+                if let Some(new_df) = df_value {
+                    if let Some(old_df) = existing_df {
+                        new_fields.push(format!("dfold:i:{}", old_df));
+                    }
+                    new_fields.push(format!("df:i:{}", new_df));
                 }
-                new_fields.push(format!("df:i:{}", new_df));
             }
-
-            // Add alignment score
-            new_fields.push(format!("sc:i:{}", alignment_score));
 
             // Add tracepoints
             new_fields.push(format!("tp:Z:{}", tracepoints_str));
@@ -1959,6 +1979,38 @@ fn process_single_record(
 
     let mut w = writer.lock().unwrap();
     writeln!(w, "{}", new_fields.join("\t")).unwrap();
+}
+
+/// Calculate residue_matches and alignment_block_length from CIGAR string
+fn calculate_paf_fields_from_cigar(cigar: &str) -> (usize, usize) {
+    let mut matches = 0;
+    let mut mismatches = 0;
+    let mut insertions = 0;
+    let mut deletions = 0;
+    let mut num_buffer = String::new();
+
+    for c in cigar.chars() {
+        if c.is_ascii_digit() {
+            num_buffer.push(c);
+        } else {
+            let len = num_buffer.parse::<usize>().unwrap_or(0);
+            num_buffer.clear();
+
+            match c {
+                'M' | '=' => matches += len,
+                'X' => mismatches += len,
+                'I' => insertions += len,
+                'D' => deletions += len,
+                'S' | 'H' | 'P' | 'N' => {} // Skip clipping operations
+                _ => {}
+            }
+        }
+    }
+
+    let residue_matches = matches;
+    let alignment_block_length = matches + mismatches + insertions + deletions;
+    
+    (residue_matches, alignment_block_length)
 }
 
 /// Process a chunk of lines in parallel for decompression
@@ -2246,39 +2298,53 @@ fn process_decompress_chunk(
         let existing_bi = fields.iter().find(|&&s| s.starts_with("bi:f:"));
         let existing_sc = fields.iter().find(|&&s| s.starts_with("sc:i:"));
 
+        let (residue_matches, alignment_block_length) = calculate_paf_fields_from_cigar(&cigar);
+
         // Build the new line
         let mut new_fields: Vec<String> = Vec::new();
 
-        for field in fields.iter() {
-            if field.starts_with("tp:Z:") {
-                // Optionally keep old values
-                if keep_old_stats {
-                    if let Some(old_gi) = existing_gi {
-                        new_fields.push(format!("giold:f:{}", &old_gi[5..]));
-                    }
-                    if let Some(old_bi) = existing_bi {
-                        new_fields.push(format!("biold:f:{}", &old_bi[5..]));
-                    }
-                    if let Some(old_sc) = existing_sc {
-                        new_fields.push(format!("scold:i:{}", &old_sc[5..]));
+        for (i, field) in fields.iter().enumerate() {
+            match i {
+                9 => {
+                    // Update residue_matches from reconstructed CIGAR
+                    new_fields.push(residue_matches.to_string());
+                }
+                10 => {
+                    // Update alignment_block_length from reconstructed CIGAR
+                    new_fields.push(alignment_block_length.to_string());
+                }
+                _ => {
+                    if field.starts_with("tp:Z:") {
+                        // Optionally keep old values
+                        if keep_old_stats {
+                            if let Some(old_gi) = existing_gi {
+                                new_fields.push(format!("giold:f:{}", &old_gi[5..]));
+                            }
+                            if let Some(old_bi) = existing_bi {
+                                new_fields.push(format!("biold:f:{}", &old_bi[5..]));
+                            }
+                            if let Some(old_sc) = existing_sc {
+                                new_fields.push(format!("scold:i:{}", &old_sc[5..]));
+                            }
+                        }
+
+                        // Always add new identity stats and alignment score before the CIGAR
+                        new_fields.push(format!("gi:f:{:.12}", gap_compressed_identity));
+                        new_fields.push(format!("bi:f:{:.12}", block_identity));
+                        new_fields.push(format!("sc:i:{}", alignment_score));
+
+                        // Replace tracepoints with CIGAR
+                        new_fields.push(format!("cg:Z:{}", cigar));
+                    } else if field.starts_with("gi:f:")
+                        || field.starts_with("bi:f:")
+                        || field.starts_with("sc:i:")
+                    {
+                        // Skip existing gi, bi, and sc fields - they will be replaced
+                        continue;
+                    } else {
+                        new_fields.push(field.to_string());
                     }
                 }
-
-                // Always add new identity stats and alignment score before the CIGAR
-                new_fields.push(format!("gi:f:{:.12}", gap_compressed_identity));
-                new_fields.push(format!("bi:f:{:.12}", block_identity));
-                new_fields.push(format!("sc:i:{}", alignment_score));
-
-                // Replace tracepoints with CIGAR
-                new_fields.push(format!("cg:Z:{}", cigar));
-            } else if field.starts_with("gi:f:")
-                || field.starts_with("bi:f:")
-                || field.starts_with("sc:i:")
-            {
-                // Skip existing gi, bi, and sc fields - they will be replaced
-                continue;
-            } else {
-                new_fields.push(field.to_string());
             }
         }
 
