@@ -110,6 +110,7 @@ enum Args {
         #[arg(short = 'o', long = "output")]
         output: Option<String>,
 
+
         /// Skip adding optional fields (gi/bi/sc fields)
         #[arg(long = "minimal")]
         minimal: bool,
