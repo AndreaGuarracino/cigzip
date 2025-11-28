@@ -104,7 +104,7 @@ enum Args {
 
         /// Maximum complexity value for tracepoint segmentation (default: 32; 100 if type is fastga)
         #[arg(long = "max-complexity")]
-        max_complexity: Option<usize>,
+        max_complexity: Option<u32>,
 
         /// Output file path (default: stdout)
         #[arg(short = 'o', long = "output")]
@@ -152,7 +152,7 @@ enum Args {
 
         /// Trace spacing for fastga (only used with fastga type, default: 100)
         #[arg(long)]
-        trace_spacing: Option<usize>,
+        trace_spacing: Option<u32>,
 
         /// Distance metric for realignment
         #[arg(long = "distance", default_value_t = DistanceChoice::Edit)]
@@ -168,7 +168,7 @@ enum Args {
 
         /// Maximum complexity value (required when enabling heuristics)
         #[arg(long = "max-complexity")]
-        max_complexity: Option<usize>,
+        max_complexity: Option<u32>,
     },
     /// Compress PAF to binary format (accepts PAF with cg:Z: or tp:Z: tags)
     Compress {
@@ -190,7 +190,7 @@ enum Args {
 
         /// Maximum complexity value (for Standard/Mixed/Variable: max_diff per segment; for FASTGA: trace_spacing) - REQUIRED
         #[arg(long = "max-complexity")]
-        max_complexity: u64,
+        max_complexity: u32,
 
         /// Complexity metric (edit-distance, diagonal-distance) - REQUIRED
         #[arg(
@@ -275,7 +275,7 @@ enum Args {
 
         /// Maximum complexity value for tracepoint segmentation
         #[arg(long = "max-complexity", default_value = "32")]
-        max_complexity: usize,
+        max_complexity: u32,
 
         /// Verbosity level (0 = error, 1 = info, 2 = debug)
         #[arg(short, long, default_value = "0")]
@@ -865,7 +865,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         header.distance(),
                         header.tp_type(),
                         header.complexity_metric(),
-                        header.max_complexity() as usize,
+                        header.max_complexity(),
                     )
                 };
 
@@ -1708,7 +1708,7 @@ fn get_paf_reader(paf: &str) -> io::Result<Box<dyn BufRead>> {
 fn process_compress_chunk(
     lines: &[String],
     tp_type: &TracepointType,
-    max_complexity: usize,
+    max_complexity: u32,
     complexity_metric: &ComplexityMetric,
     writer: &Arc<Mutex<Box<dyn Write + Send>>>,
     minimal: bool
@@ -1780,7 +1780,7 @@ fn process_compress_chunk(
 fn process_fastga_with_overflow(
     fields: &[&str],
     cigar: &str,
-    max_complexity: usize,
+    max_complexity: u32,
     gap_compressed_identity: f32,
     block_identity: f32,
     alignment_score: i32,
@@ -1960,7 +1960,7 @@ fn process_single_record(
     fields: &[&str],
     cigar: &str,
     tp_type: &TracepointType,
-    max_complexity: usize,
+    max_complexity: u32,
     gap_compressed_identity: f32,
     block_identity: f32,
     alignment_score: i32,
@@ -2064,10 +2064,10 @@ fn process_decompress_chunk(
     sequence_index: &SequenceIndex,
     distance_mode: &Distance,
     fastga: bool,
-    trace_spacing: usize,
+    trace_spacing: u32,
     complexity_metric: &ComplexityMetric,
     heuristic: bool,
-    heuristic_max_complexity: Option<usize>,
+    heuristic_max_complexity: Option<u32>,
     keep_old_stats: bool,
 ) {
     lines.par_iter().for_each(|line| {
@@ -2402,10 +2402,10 @@ fn process_decompress_chunk_binary(
     sequence_index: &SequenceIndex,
     distance_mode: &Distance,
     fastga: bool,
-    trace_spacing: usize,
+    trace_spacing: u32,
     complexity_metric: &ComplexityMetric,
     heuristic: bool,
-    heuristic_max_complexity: Option<usize>,
+    heuristic_max_complexity: Option<u32>,
     keep_old_stats: bool,
     string_table: &tpa::StringTable,
 ) {
