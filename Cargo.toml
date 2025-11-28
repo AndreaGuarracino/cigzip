@@ -11,8 +11,8 @@ flate2 = "1.1"
 #lib_wfa2 = { path = "/home/guarracino/Dropbox/git/lib_wfa2"}
 lib_wfa2 = { git = "https://github.com/AndreaGuarracino/lib_wfa2"}
 
-#lib_tracepoints = { path = "/home/guarracino/git/lib_tracepoints"}
-lib_tracepoints = { git = "https://github.com/AndreaGuarracino/lib_tracepoints"}
+#tracepoints = { path = "/home/guarracino/git/tracepoints"}
+tracepoints = { git = "https://github.com/AndreaGuarracino/tracepoints"}
 lib_bpaf = { path = "/home/guarracino/git/lib_bpaf" }
 #lib_bpaf = { git = "https://github.com/AndreaGuarracino/lib_bpaf" }
 
@@ -25,8 +25,7 @@ libc = "0.2"
 indicatif="0.18"
 
 # Dependencies for AGC format (for sequences) support
-agc-rs = { git = "https://github.com/pangenome/agc-rs.git", optional = true }
+ragc-reader = { git = "https://github.com/AndreaGuarracino/ragc", branch = "tweaks" }
 
 [features]
-default = ["agc"]
-agc = ["agc-rs"]
+default = []

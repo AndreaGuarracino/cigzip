@@ -1,10 +1,8 @@
 use std::collections::HashSet;
 use std::fs;
 
-use super::faidx::FastaIndex;
-
-#[cfg(feature = "agc")]
 use super::agc_index::AgcIndex;
+use super::faidx::FastaIndex;
 
 pub fn collect_sequence_paths(
     mut files: Vec<String>,
@@ -40,7 +38,6 @@ fn get_extension(filename: &str) -> &str {
 #[derive(Debug)]
 pub enum SequenceIndex {
     Fasta(FastaIndex),
-    #[cfg(feature = "agc")]
     Agc(AgcIndex),
 }
 
@@ -63,7 +60,6 @@ impl SequenceIndex {
                 let index = FastaIndex::build(files)?;
                 Ok(SequenceIndex::Fasta(index))
             }
-            #[cfg(feature = "agc")]
             "agc" => {
                 let index = AgcIndex::build(files)?;
                 Ok(SequenceIndex::Agc(index))
@@ -84,7 +80,6 @@ impl SequenceIndex {
     ) -> Result<Vec<u8>, String> {
         match self {
             SequenceIndex::Fasta(index) => index.fetch_sequence(seq_name, start, end),
-            #[cfg(feature = "agc")]
             SequenceIndex::Agc(index) => index.fetch_sequence(seq_name, start, end),
         }
     }

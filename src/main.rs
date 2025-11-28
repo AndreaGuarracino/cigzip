@@ -9,11 +9,11 @@ use indicatif::ProgressBar;
 #[cfg(debug_assertions)]
 use indicatif::ProgressStyle;
 #[cfg(debug_assertions)]
-use lib_tracepoints::{
+use tracepoints::{
     align_sequences_wfa, cigar_ops_to_cigar_string, cigar_to_tracepoints_raw,
     cigar_to_variable_tracepoints_raw,
 };
-use lib_tracepoints::{
+use tracepoints::{
     cigar_to_mixed_tracepoints, cigar_to_tracepoints, cigar_to_tracepoints_fastga,
     cigar_to_variable_tracepoints, mixed_tracepoints_to_cigar,
     mixed_tracepoints_to_cigar_with_aligner, tracepoints_to_cigar, tracepoints_to_cigar_fastga,
@@ -1830,7 +1830,7 @@ fn process_fastga_with_overflow(
     );
 
     // Debug: show all segments
-    debug!("Total segments from lib_tracepoints: {}", segments.len());
+    debug!("Total segments from tracepoints: {}", segments.len());
     for (i, (tps, (qs, qe, ts, te))) in segments.iter().enumerate() {
         debug!("  Segment {}: q={}..{}, t={}..{}, {} tracepoints", i, qs, qe, ts, te, tps.len());
     }

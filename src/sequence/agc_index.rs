@@ -1,43 +1,39 @@
-use agc_rs::AGCFile;
+use ragc_reader::{Decompressor, DecompressorConfig};
 use rayon::prelude::*;
 use std::collections::HashMap;
+use std::fmt;
 use std::sync::{Arc, Mutex};
 
-// Wrapper to make AGC operations thread-safe
-#[derive(Clone, Debug)]
-struct ThreadSafeAgc {
-    agc_files: Arc<Mutex<Vec<AGCFile>>>,
-}
-
-// Structure to manage AGC archives
-#[derive(Debug)]
+// Structure to manage AGC archives using ragc-reader
 pub struct AgcIndex {
-    agc_wrapper: ThreadSafeAgc,
+    decompressors: Arc<Mutex<Vec<Decompressor>>>,
     pub agc_paths: Vec<String>,
     sample_contig_to_agc: HashMap<String, usize>,
     // Precomputed mapping from contig name to (sample, full_contig_name, agc_idx)
     contig_to_sample_info: HashMap<String, (String, String, usize)>,
 }
 
+impl fmt::Debug for AgcIndex {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("AgcIndex")
+            .field("agc_paths", &self.agc_paths)
+            .field("num_decompressors", &self.decompressors.lock().unwrap().len())
+            .finish_non_exhaustive()
+    }
+}
+
 impl AgcIndex {
     fn new() -> Self {
         AgcIndex {
-            agc_wrapper: ThreadSafeAgc {
-                agc_files: Arc::new(Mutex::new(Vec::new())),
-            },
+            decompressors: Arc::new(Mutex::new(Vec::new())),
             agc_paths: Vec::new(),
             sample_contig_to_agc: HashMap::default(),
             contig_to_sample_info: HashMap::default(),
         }
     }
 
-    // Helper function to extract the short contig name (before first whitespace)
     fn extract_short_contig_name(full_name: &str) -> &str {
-        // Split on any whitespace character and take the first part
-        full_name
-            .split([' ', '\n', '\r', '\t'])
-            .next()
-            .unwrap_or(full_name)
+        full_name.split_whitespace().next().unwrap_or(full_name)
     }
 
     pub fn build(agc_files: &[String]) -> Result<Self, String> {
@@ -47,36 +43,37 @@ impl AgcIndex {
         let metadata_results: Vec<_> = agc_files
             .par_iter()
             .enumerate()
-            .map(|(agc_idx, agc_path)| -> Result<(usize, String, AGCFile, Vec<(String, Vec<String>)>), String> {
-                let mut agc = AGCFile::new();
-                // Disable AGC prefetching to avoid materializing entire archives in memory up front.
-                if !agc.open(agc_path, false) {
-                    return Err(format!("Failed to open AGC file: {agc_path}"));
-                }
+            .map(|(agc_idx, agc_path)| -> Result<(usize, String, Decompressor, Vec<(String, Vec<String>)>), String> {
+                let config = DecompressorConfig {
+                    verbosity: 0,
+                    max_segment_cache_entries: 1, // ~1MB cache (16 x 60KB segments)
+                };
+                let mut decompressor = Decompressor::open(agc_path, config)
+                    .map_err(|e| format!("Failed to open AGC file: {agc_path}: {e}"))?;
 
                 // Get all samples and their contigs
-                let samples = agc.list_samples();
+                let samples = decompressor.list_samples();
                 let sample_contigs: Vec<_> = samples
                     .into_iter()
                     .map(|sample| {
-                        let contigs = agc.list_contigs(&sample);
+                        let contigs = decompressor.list_contigs(&sample).unwrap_or_default();
                         (sample, contigs)
                     })
                     .collect();
 
-                Ok((agc_idx, agc_path.clone(), agc, sample_contigs))
+                Ok((agc_idx, agc_path.clone(), decompressor, sample_contigs))
             })
             .collect::<Result<Vec<_>, String>>()?;
 
         // Sequential assembly phase to maintain order and avoid shared mutable state issues
-        for (agc_idx, agc_path, agc, sample_contigs) in metadata_results {
+        for (agc_idx, agc_path, decompressor, sample_contigs) in metadata_results {
             index.agc_paths.push(agc_path);
 
             for (sample, contigs) in sample_contigs {
                 for contig in contigs {
                     // Create a key that combines full contig name and sample name
                     let key = format!("{contig}@{sample}");
-                    index.sample_contig_to_agc.insert(key.clone(), agc_idx);
+                    index.sample_contig_to_agc.insert(key, agc_idx);
 
                     // Also insert just the full contig name if it's unique
                     index
@@ -120,8 +117,12 @@ impl AgcIndex {
                 }
             }
 
-            index.agc_wrapper.agc_files.lock().unwrap().push(agc);
+            index.decompressors.lock().unwrap().push(decompressor);
         }
+
+        // Shrink to fit after building
+        index.sample_contig_to_agc.shrink_to_fit();
+        index.contig_to_sample_info.shrink_to_fit();
 
         Ok(index)
     }
@@ -132,16 +133,12 @@ impl AgcIndex {
         // - "contig" -> (sample, contig, agc_idx) if contig is unique
 
         if let Some((contig, sample)) = seq_name.split_once('@') {
-            // Format: contig@sample
-            let key = seq_name;
-            let agc_idx = self.sample_contig_to_agc.get(key).copied();
+            let agc_idx = self.sample_contig_to_agc.get(seq_name).copied();
             (sample.to_string(), contig.to_string(), agc_idx)
+        } else if let Some((sample, full_contig, agc_idx)) = self.contig_to_sample_info.get(seq_name) {
+            (sample.clone(), full_contig.clone(), Some(*agc_idx))
         } else {
-            // Format: just contig name
-            if let Some((sample, full_contig, agc_idx)) = self.contig_to_sample_info.get(seq_name) {
-                return (sample.clone(), full_contig.clone(), Some(*agc_idx));
-            }
-            ("".to_string(), seq_name.to_string(), None)
+            (String::new(), seq_name.to_string(), None)
         }
     }
 
@@ -156,17 +153,24 @@ impl AgcIndex {
             format!("Sequence '{seq_name}' not found in any AGC file")
         })?;
 
-        // AGC uses 0-based coordinates with inclusive end
-        let mut agc_files = self.agc_wrapper.agc_files.lock().unwrap();
-        let sequence = agc_files[agc_idx]
-            .get_contig_sequence(&sample, &contig, start as i32, (end - 1) as i32)
+        // ragc uses 0-based coordinates with exclusive end
+        let mut decompressors = self.decompressors.lock().unwrap();
+        let sequence = decompressors[agc_idx]
+            .get_contig_range(&sample, &contig, start, end)
             .map_err(|e| {
                 format!("Failed to fetch sequence '{contig}@{sample}:{start}:{end}': {e}")
             })?;
 
-        // Convert to uppercase bytes
-        let mut seq_vec = sequence.into_bytes();
-        seq_vec.iter_mut().for_each(|b| *b = b.to_ascii_uppercase());
-        Ok(seq_vec)
+        // Convert from numeric encoding (0-3) to ASCII (A,C,G,T)
+        Ok(sequence
+            .into_iter()
+            .map(|b| match b {
+                0 => b'A',
+                1 => b'C',
+                2 => b'G',
+                3 => b'T',
+                _ => b'N',
+            })
+            .collect())
     }
 }
