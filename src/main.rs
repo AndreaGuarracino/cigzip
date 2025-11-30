@@ -753,17 +753,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     }
                 };
 
-                // Both strategies should use the same layer
-                let layer = first_layer;
-                if first_layer != second_layer {
-                    warn!("Different compression layers specified; using first layer: {:?}", layer);
-                }
-
-                info!("Dual strategy mode: {} → {}", strategy_str, second_str);
+                info!("Dual strategy mode: {} ({:?}) → {} ({:?})",
+                    strategy_str, first_layer, second_str, second_layer);
 
                 let mut config = tpa::CompressionConfig::new()
                     .dual_strategy(first_strategy, second_strategy)
-                    .layer(layer)
+                    .dual_layer(first_layer, second_layer)
                     .tp_type(tp_type)
                     .max_complexity(max_complexity)
                     .complexity_metric(complexity_metric)
