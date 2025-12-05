@@ -110,6 +110,13 @@ enum Args {
         #[arg(short = 'o', long = "output")]
         output: Option<String>,
 
+        /// Distance metric for score calculation
+        #[arg(long = "distance", default_value_t = DistanceChoice::Edit)]
+        distance: DistanceChoice,
+
+        /// Gap penalties (only for gap-affine distances; ignored with edit distance)
+        #[arg(long)]
+        penalties: Option<String>,
 
         /// Skip adding optional fields (gi/bi/sc fields)
         #[arg(long = "minimal")]
@@ -302,6 +309,8 @@ impl fmt::Debug for Args {
                 complexity_metric,
                 max_complexity,
                 output,
+                distance,
+                penalties,
                 minimal,
             } => f
                 .debug_struct("Args::Encode")
@@ -310,6 +319,8 @@ impl fmt::Debug for Args {
                 .field("complexity_metric", complexity_metric)
                 .field("max_complexity", max_complexity)
                 .field("output", output)
+                .field("distance", distance)
+                .field("penalties", penalties)
                 .field("minimal", minimal)
                 .finish(),
             Args::Decode {
@@ -398,6 +409,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             max_complexity,
             complexity_metric,
             output,
+            distance,
+            penalties,
             minimal,
         } => {
             setup_logger(common.verbose);
@@ -409,6 +422,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 error!("--complexity-metric cannot be used with --type fastga");
                 std::process::exit(1);
             }
+
+            // Parse distance model for score calculation
+            let distance_mode = match parse_distance(distance, penalties.as_deref()) {
+                Ok(dist) => dist,
+                Err(msg) => {
+                    error!("{}", msg);
+                    std::process::exit(1);
+                }
+            };
 
             info!(
                 "Encoding CIGAR to {} tracepoints ({}={}, complexity-metric={})",
@@ -448,6 +470,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 &tp_type,
                                 max_complexity,
                                 &complexity_metric,
+                                &distance_mode,
                                 &writer,
                                 minimal
                             );
@@ -458,7 +481,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 }
             }
             if !lines.is_empty() {
-                process_compress_chunk(&lines, &tp_type, max_complexity, &complexity_metric, &writer, minimal);
+                process_compress_chunk(&lines, &tp_type, max_complexity, &complexity_metric, &distance_mode, &writer, minimal);
             }
 
             // Flush the writer
@@ -1155,84 +1178,134 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-/// Calculate alignment score based on edit distance from a CIGAR string
-/// Alignment score = -(mismatches + inserted_bp + deleted_bp)
-fn calculate_alignment_score_edit_distance(cigar: &str) -> i32 {
-    let mut mismatches = 0;
-    let mut inserted_bp = 0;
-    let mut deleted_bp = 0;
+/// Statistics extracted from a CIGAR string
+#[derive(Debug, Clone, Default)]
+struct CigarStats {
+    matches: usize,
+    mismatches: usize,
+    insertions: usize,      // Number of insertion events
+    inserted_bp: usize,     // Total inserted base pairs
+    deletions: usize,       // Number of deletion events
+    deleted_bp: usize,      // Total deleted base pairs
+}
 
-    let mut num_buffer = String::new();
+impl CigarStats {
+    /// Parse a CIGAR string and extract all statistics
+    fn from_cigar(cigar: &str) -> Self {
+        let mut stats = CigarStats::default();
+        let mut num_buffer = String::new();
 
-    for c in cigar.chars() {
-        if c.is_ascii_digit() {
-            num_buffer.push(c);
-        } else {
-            let len = num_buffer.parse::<usize>().unwrap_or(0);
-            num_buffer.clear();
+        for c in cigar.chars() {
+            if c.is_ascii_digit() {
+                num_buffer.push(c);
+            } else {
+                let len = num_buffer.parse::<usize>().unwrap_or(0);
+                num_buffer.clear();
 
-            match c {
-                'X' => mismatches += len,
-                'I' => inserted_bp += len,
-                'D' => deleted_bp += len,
-                _ => {}
+                match c {
+                    'M' | '=' => stats.matches += len,
+                    'X' => stats.mismatches += len,
+                    'I' => {
+                        stats.insertions += 1;
+                        stats.inserted_bp += len;
+                    }
+                    'D' => {
+                        stats.deletions += 1;
+                        stats.deleted_bp += len;
+                    }
+                    'S' | 'H' | 'P' | 'N' => {}
+                    _ => {}
+                }
             }
+        }
+
+        stats
+    }
+
+    /// Calculate gap-compressed identity: matches / (matches + mismatches + gap_events)
+    fn gap_compressed_identity(&self) -> f32 {
+        let denom = self.matches + self.mismatches + self.insertions + self.deletions;
+        if denom > 0 {
+            (self.matches as f32) / (denom as f32)
+        } else {
+            0.0
         }
     }
 
-    let edit_distance = mismatches + inserted_bp + deleted_bp;
-    -(edit_distance as i32)
+    /// Calculate block identity: matches / (matches + edit_distance)
+    fn block_identity(&self) -> f32 {
+        let edit_distance = self.mismatches + self.inserted_bp + self.deleted_bp;
+        let denom = self.matches + edit_distance;
+        if denom > 0 {
+            (self.matches as f32) / (denom as f32)
+        } else {
+            0.0
+        }
+    }
+
+    /// Calculate alignment score using the specified distance model
+    fn alignment_score(&self, distance: &Distance) -> i32 {
+        let mismatches = self.mismatches as i32;
+        let insertions = self.insertions as i32;
+        let inserted_bp = self.inserted_bp as i32;
+        let deletions = self.deletions as i32;
+        let deleted_bp = self.deleted_bp as i32;
+
+        match distance {
+            Distance::Edit => {
+                // Edit distance: unit cost for each mismatch, insertion, and deletion base
+                -(mismatches + inserted_bp + deleted_bp)
+            }
+            Distance::GapAffine {
+                mismatch,
+                gap_opening,
+                gap_extension,
+            } => {
+                // Gap-affine: mismatch penalty + gap_open per gap + gap_ext per base
+                let mismatch_penalty = mismatch * mismatches;
+                let insertion_penalty = gap_opening * insertions + gap_extension * inserted_bp;
+                let deletion_penalty = gap_opening * deletions + gap_extension * deleted_bp;
+                -(mismatch_penalty + insertion_penalty + deletion_penalty)
+            }
+            Distance::GapAffine2p {
+                mismatch,
+                gap_opening1,
+                gap_extension1,
+                gap_opening2,
+                gap_extension2,
+            } => {
+                // Dual gap-affine: choose the better (lower) penalty for each gap
+                let mismatch_penalty = mismatch * mismatches;
+
+                // For insertions: compare both gap models and pick the better one
+                let ins_penalty1 = gap_opening1 * insertions + gap_extension1 * inserted_bp;
+                let ins_penalty2 = gap_opening2 * insertions + gap_extension2 * inserted_bp;
+                let insertion_penalty = std::cmp::min(ins_penalty1, ins_penalty2);
+
+                // For deletions: compare both gap models and pick the better one
+                let del_penalty1 = gap_opening1 * deletions + gap_extension1 * deleted_bp;
+                let del_penalty2 = gap_opening2 * deletions + gap_extension2 * deleted_bp;
+                let deletion_penalty = std::cmp::min(del_penalty1, del_penalty2);
+
+                -(mismatch_penalty + insertion_penalty + deletion_penalty)
+            }
+        }
+    }
+}
+
+/// Calculate alignment score from a CIGAR string using the specified distance model.
+///
+/// For Edit distance: score = -(mismatches + inserted_bp + deleted_bp)
+/// For GapAffine: score = -(mismatch * X_count + gap_open * gaps + gap_ext * gap_bp)
+/// For GapAffine2p: uses dual gap model, choosing the better penalty for each gap
+fn calculate_alignment_score(cigar: &str, distance: &Distance) -> i32 {
+    CigarStats::from_cigar(cigar).alignment_score(distance)
 }
 
 /// Calculate gap-compressed identity and block identity from a CIGAR string
 fn calculate_identity_stats(cigar: &str) -> (f32, f32) {
-    let mut matches = 0;
-    let mut mismatches = 0;
-    let mut insertions = 0;
-    let mut inserted_bp = 0;
-    let mut deletions = 0;
-    let mut deleted_bp = 0;
-
-    let mut num_buffer = String::new();
-
-    for c in cigar.chars() {
-        if c.is_ascii_digit() {
-            num_buffer.push(c);
-        } else {
-            let len = num_buffer.parse::<usize>().unwrap_or(0);
-            num_buffer.clear();
-
-            match c {
-                'M' | '=' => matches += len,
-                'X' => mismatches += len,
-                'I' => {
-                    insertions += 1;
-                    inserted_bp += len;
-                }
-                'D' => {
-                    deletions += 1;
-                    deleted_bp += len;
-                }
-                'S' | 'H' | 'P' | 'N' => {}
-                _ => {}
-            }
-        }
-    }
-
-    let gap_compressed_identity = if matches + mismatches + insertions + deletions > 0 {
-        (matches as f32) / (matches + mismatches + insertions + deletions) as f32
-    } else {
-        0.0
-    };
-
-    let edit_distance = mismatches + inserted_bp + deleted_bp;
-    let block_identity = if matches + edit_distance > 0 {
-        (matches as f32) / (matches + edit_distance) as f32
-    } else {
-        0.0
-    };
-
-    (gap_compressed_identity, block_identity)
+    let stats = CigarStats::from_cigar(cigar);
+    (stats.gap_compressed_identity(), stats.block_identity())
 }
 
 /// Process a chunk of lines in parallel for debugging
@@ -1540,80 +1613,19 @@ fn process_debug_chunk(
     });
 }
 
-/// Calculate gap compressed identity and block identity from a CIGAR string
+/// Calculate all CIGAR stats including gap compressed identity and block identity
 #[cfg(debug_assertions)]
 fn calculate_cigar_stats(cigar: &str) -> (usize, usize, usize, usize, usize, usize, f32, f32) {
-    let mut matches = 0;
-    let mut mismatches = 0;
-    let mut insertions = 0; // Number of insertion events
-    let mut inserted_bp = 0; // Total inserted base pairs
-    let mut deletions = 0; // Number of deletion events
-    let mut deleted_bp = 0; // Total deleted base pairs
-
-    // Parse CIGAR string
-    let mut num_buffer = String::new();
-
-    for c in cigar.chars() {
-        if c.is_ascii_digit() {
-            num_buffer.push(c);
-        } else {
-            // Get the count
-            let len = num_buffer.parse::<usize>().unwrap_or(0);
-            num_buffer.clear();
-
-            match c {
-                'M' => {
-                    // Assuming 'M' represents matches for simplicity (as in your code)
-                    matches += len;
-                }
-                '=' => {
-                    matches += len;
-                }
-                'X' => {
-                    mismatches += len;
-                }
-                'I' => {
-                    insertions += 1; // One insertion event
-                    inserted_bp += len; // Total inserted bases
-                }
-                'D' => {
-                    deletions += 1; // One deletion event
-                    deleted_bp += len; // Total deleted bases
-                }
-                'S' | 'H' | 'P' | 'N' => {
-                    // Skip soft clips, hard clips, padding, and skipped regions
-                }
-                _ => {
-                    // Unknown operation, skip
-                }
-            }
-        }
-    }
-
-    // Calculate gap compressed identity
-    let gap_compressed_identity = if matches + mismatches + insertions + deletions > 0 {
-        (matches as f32) / (matches + mismatches + insertions + deletions) as f32
-    } else {
-        0.0
-    };
-
-    // Calculate block identity
-    let edit_distance = mismatches + inserted_bp + deleted_bp;
-    let block_identity = if matches + edit_distance > 0 {
-        (matches as f32) / (matches + edit_distance) as f32
-    } else {
-        0.0
-    };
-
+    let stats = CigarStats::from_cigar(cigar);
     (
-        matches,
-        mismatches,
-        insertions,
-        inserted_bp,
-        deletions,
-        deleted_bp,
-        gap_compressed_identity,
-        block_identity,
+        stats.matches,
+        stats.mismatches,
+        stats.insertions,
+        stats.inserted_bp,
+        stats.deletions,
+        stats.deleted_bp,
+        stats.gap_compressed_identity(),
+        stats.block_identity(),
     )
 }
 
@@ -1626,54 +1638,14 @@ fn compute_alignment_score_from_cigar(
     gap_open2: i32,
     gap_ext2: i32,
 ) -> i32 {
-    let mut score = 0i32;
-    let mut num_buffer = String::new();
-
-    for c in cigar.chars() {
-        if c.is_ascii_digit() {
-            num_buffer.push(c);
-        } else {
-            // Get the count
-            let len = num_buffer.parse::<i32>().unwrap_or(0);
-            num_buffer.clear();
-
-            match c {
-                '=' => {
-                    // Matches - no penalty (score 0)
-                    // score += 0;
-                }
-                'M' => {
-                    // For 'M' operations, we'd need the actual sequences to determine matches vs mismatches
-                    // For now, we'll treat 'M' as matches (you may want to adjust this)
-                    // score += 0;
-                    eprintln!(
-                        "Warning: 'M' in CIGAR requires sequences to determine match/mismatch"
-                    );
-                }
-                'X' => {
-                    // Mismatches
-                    score -= mismatch * len;
-                }
-                'I' | 'D' => {
-                    // Gaps - using dual affine model
-                    // Calculate both penalty options and take the minimum (best score)
-                    let score1 = gap_open1 + gap_ext1 * len;
-                    let score2 = gap_open2 + gap_ext2 * len;
-                    let gap_penalty = std::cmp::min(score1, score2);
-                    score -= gap_penalty;
-                }
-                'S' | 'H' | 'P' | 'N' => {
-                    // Soft clips, hard clips, padding, and skipped regions
-                    // These typically don't contribute to the alignment score
-                }
-                _ => {
-                    eprintln!("Unknown CIGAR operation: {}", c);
-                }
-            }
-        }
-    }
-
-    score
+    let distance = Distance::GapAffine2p {
+        mismatch,
+        gap_opening1: gap_open1,
+        gap_extension1: gap_ext1,
+        gap_opening2: gap_open2,
+        gap_extension2: gap_ext2,
+    };
+    calculate_alignment_score(cigar, &distance)
 }
 /// Initialize logger based on verbosity
 fn setup_logger(verbosity: u8) {
@@ -1705,6 +1677,7 @@ fn process_compress_chunk(
     tp_type: &TracepointType,
     max_complexity: u32,
     complexity_metric: &ComplexityMetric,
+    distance_mode: &Distance,
     writer: &Arc<Mutex<Box<dyn Write + Send>>>,
     minimal: bool
 ) {
@@ -1730,8 +1703,8 @@ fn process_compress_chunk(
         // Calculate identity stats from the CIGAR
         let (gap_compressed_identity, block_identity) = calculate_identity_stats(cigar);
 
-        // Calculate alignment score based on edit distance
-        let alignment_score = calculate_alignment_score_edit_distance(cigar);
+        // Calculate alignment score using the specified distance model
+        let alignment_score = calculate_alignment_score(cigar, distance_mode);
 
         // Check for existing df:i: field
         let existing_df = fields
@@ -1912,8 +1885,8 @@ fn process_fastga_with_overflow(
                     if field.starts_with("cg:Z:") {
                         // Add identity stats before tracepoints
                         if !minimal {
-                            new_fields.push(format!("gi:f:{:.12}", gap_compressed_identity));
-                            new_fields.push(format!("bi:f:{:.12}", block_identity));
+                            new_fields.push(format!("gi:f:{:.6}", gap_compressed_identity));
+                            new_fields.push(format!("bi:f:{:.6}", block_identity));
 
                             // Add df fields
                             if let Some(old_df) = existing_df {
@@ -2329,8 +2302,8 @@ fn process_decompress_chunk(
         // Calculate identity stats from the reconstructed CIGAR
         let (gap_compressed_identity, block_identity) = calculate_identity_stats(&cigar);
 
-        // Calculate alignment score based on edit distance
-        let alignment_score = calculate_alignment_score_edit_distance(&cigar);
+        // Calculate alignment score using the specified distance model
+        let alignment_score = calculate_alignment_score(&cigar, distance_mode);
 
         // Check for existing gi:f:, bi:f:, and sc:i: fields
         let existing_gi = fields.iter().find(|&&s| s.starts_with("gi:f:"));
@@ -2585,8 +2558,8 @@ fn process_decompress_chunk_binary(
         // Calculate identity stats from the reconstructed CIGAR
         let (gap_compressed_identity, block_identity) = calculate_identity_stats(&cigar);
 
-        // Calculate alignment score based on edit distance
-        let alignment_score = calculate_alignment_score_edit_distance(&cigar);
+        // Calculate alignment score using the specified distance model
+        let alignment_score = calculate_alignment_score(&cigar, distance_mode);
 
         // Build output line - start with core PAF fields
         let mut new_fields = vec![
