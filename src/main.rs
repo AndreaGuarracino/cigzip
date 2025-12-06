@@ -1183,10 +1183,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 struct CigarStats {
     matches: usize,
     mismatches: usize,
-    insertions: usize,      // Number of insertion events
-    inserted_bp: usize,     // Total inserted base pairs
-    deletions: usize,       // Number of deletion events
-    deleted_bp: usize,      // Total deleted base pairs
+    insertion_runs: Vec<usize>,  // Length of each insertion run
+    deletion_runs: Vec<usize>,   // Length of each deletion run
 }
 
 impl CigarStats {
@@ -1205,14 +1203,8 @@ impl CigarStats {
                 match c {
                     'M' | '=' => stats.matches += len,
                     'X' => stats.mismatches += len,
-                    'I' => {
-                        stats.insertions += 1;
-                        stats.inserted_bp += len;
-                    }
-                    'D' => {
-                        stats.deletions += 1;
-                        stats.deleted_bp += len;
-                    }
+                    'I' => stats.insertion_runs.push(len),
+                    'D' => stats.deletion_runs.push(len),
                     'S' | 'H' | 'P' | 'N' => {}
                     _ => {}
                 }
@@ -1222,9 +1214,29 @@ impl CigarStats {
         stats
     }
 
+    /// Number of insertion events (runs)
+    fn insertions(&self) -> usize {
+        self.insertion_runs.len()
+    }
+
+    /// Total inserted base pairs
+    fn inserted_bp(&self) -> usize {
+        self.insertion_runs.iter().sum()
+    }
+
+    /// Number of deletion events (runs)
+    fn deletions(&self) -> usize {
+        self.deletion_runs.len()
+    }
+
+    /// Total deleted base pairs
+    fn deleted_bp(&self) -> usize {
+        self.deletion_runs.iter().sum()
+    }
+
     /// Calculate gap-compressed identity: matches / (matches + mismatches + gap_events)
     fn gap_compressed_identity(&self) -> f32 {
-        let denom = self.matches + self.mismatches + self.insertions + self.deletions;
+        let denom = self.matches + self.mismatches + self.insertions() + self.deletions();
         if denom > 0 {
             (self.matches as f32) / (denom as f32)
         } else {
@@ -1234,7 +1246,7 @@ impl CigarStats {
 
     /// Calculate block identity: matches / (matches + edit_distance)
     fn block_identity(&self) -> f32 {
-        let edit_distance = self.mismatches + self.inserted_bp + self.deleted_bp;
+        let edit_distance = self.mismatches + self.inserted_bp() + self.deleted_bp();
         let denom = self.matches + edit_distance;
         if denom > 0 {
             (self.matches as f32) / (denom as f32)
@@ -1244,16 +1256,15 @@ impl CigarStats {
     }
 
     /// Calculate alignment score using the specified distance model
+    /// Score calculation matches WFA2-lib behavior
     fn alignment_score(&self, distance: &Distance) -> i32 {
         let mismatches = self.mismatches as i32;
-        let insertions = self.insertions as i32;
-        let inserted_bp = self.inserted_bp as i32;
-        let deletions = self.deletions as i32;
-        let deleted_bp = self.deleted_bp as i32;
 
         match distance {
             Distance::Edit => {
-                // Edit distance: unit cost for each mismatch, insertion, and deletion base
+                // Edit distance: positive count of edits (matches WFA2-lib cigar_score_edit)
+                let inserted_bp = self.inserted_bp() as i32;
+                let deleted_bp = self.deleted_bp() as i32;
                 -(mismatches + inserted_bp + deleted_bp)
             }
             Distance::GapAffine {
@@ -1261,10 +1272,19 @@ impl CigarStats {
                 gap_opening,
                 gap_extension,
             } => {
-                // Gap-affine: mismatch penalty + gap_open per gap + gap_ext per base
+                // Gap-affine: mismatch penalty + (gap_open + gap_ext * length) per gap run
                 let mismatch_penalty = mismatch * mismatches;
-                let insertion_penalty = gap_opening * insertions + gap_extension * inserted_bp;
-                let deletion_penalty = gap_opening * deletions + gap_extension * deleted_bp;
+
+                // Each insertion run: gap_opening + gap_extension * run_length
+                let insertion_penalty: i32 = self.insertion_runs.iter()
+                    .map(|&len| gap_opening + gap_extension * (len as i32))
+                    .sum();
+
+                // Each deletion run: gap_opening + gap_extension * run_length
+                let deletion_penalty: i32 = self.deletion_runs.iter()
+                    .map(|&len| gap_opening + gap_extension * (len as i32))
+                    .sum();
+
                 -(mismatch_penalty + insertion_penalty + deletion_penalty)
             }
             Distance::GapAffine2p {
@@ -1274,18 +1294,29 @@ impl CigarStats {
                 gap_opening2,
                 gap_extension2,
             } => {
-                // Dual gap-affine: choose the better (lower) penalty for each gap
+                // Dual gap-affine: for each gap run, choose the better (lower) penalty
+                // This matches WFA2-lib's cigar_score_gap_affine2p behavior
                 let mismatch_penalty = mismatch * mismatches;
 
-                // For insertions: compare both gap models and pick the better one
-                let ins_penalty1 = gap_opening1 * insertions + gap_extension1 * inserted_bp;
-                let ins_penalty2 = gap_opening2 * insertions + gap_extension2 * inserted_bp;
-                let insertion_penalty = std::cmp::min(ins_penalty1, ins_penalty2);
+                // Each insertion run: min(gap_open1 + gap_ext1 * len, gap_open2 + gap_ext2 * len)
+                let insertion_penalty: i32 = self.insertion_runs.iter()
+                    .map(|&len| {
+                        let len = len as i32;
+                        let score1 = gap_opening1 + gap_extension1 * len;
+                        let score2 = gap_opening2 + gap_extension2 * len;
+                        std::cmp::min(score1, score2)
+                    })
+                    .sum();
 
-                // For deletions: compare both gap models and pick the better one
-                let del_penalty1 = gap_opening1 * deletions + gap_extension1 * deleted_bp;
-                let del_penalty2 = gap_opening2 * deletions + gap_extension2 * deleted_bp;
-                let deletion_penalty = std::cmp::min(del_penalty1, del_penalty2);
+                // Each deletion run: min(gap_open1 + gap_ext1 * len, gap_open2 + gap_ext2 * len)
+                let deletion_penalty: i32 = self.deletion_runs.iter()
+                    .map(|&len| {
+                        let len = len as i32;
+                        let score1 = gap_opening1 + gap_extension1 * len;
+                        let score2 = gap_opening2 + gap_extension2 * len;
+                        std::cmp::min(score1, score2)
+                    })
+                    .sum();
 
                 -(mismatch_penalty + insertion_penalty + deletion_penalty)
             }
@@ -1620,10 +1651,10 @@ fn calculate_cigar_stats(cigar: &str) -> (usize, usize, usize, usize, usize, usi
     (
         stats.matches,
         stats.mismatches,
-        stats.insertions,
-        stats.inserted_bp,
-        stats.deletions,
-        stats.deleted_bp,
+        stats.insertions(),
+        stats.inserted_bp(),
+        stats.deletions(),
+        stats.deleted_bp(),
         stats.gap_compressed_identity(),
         stats.block_identity(),
     )
