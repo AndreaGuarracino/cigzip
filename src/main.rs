@@ -223,6 +223,10 @@ enum Args {
         #[arg(long = "strategy-second", value_name = "STRATEGY")]
         strategy_second_str: Option<String>,
 
+        /// Wrap entire file in BGZIP for cross-record compression (better compression, slightly slower seeks)
+        #[arg(long = "whole-file-bgzip")]
+        whole_file_bgzip: bool,
+
         /// Verbosity level (0 = error, 1 = info, 2 = debug)
         #[arg(short, long, default_value = "1")]
         verbose: u8,
@@ -352,7 +356,7 @@ impl fmt::Debug for Args {
                 .field("heuristic", heuristic)
                 .field("max_complexity", max_complexity)
                 .finish(),
-            Args::Compress { input, output, tp_type, max_complexity, complexity_metric, distance, penalties, strategy_str, strategy_second_str, verbose } => f
+            Args::Compress { input, output, tp_type, max_complexity, complexity_metric, distance, penalties, strategy_str, strategy_second_str, whole_file_bgzip, verbose } => f
                 .debug_struct("Args::Compress")
                 .field("input", input)
                 .field("output", output)
@@ -363,6 +367,7 @@ impl fmt::Debug for Args {
                 .field("penalties", penalties)
                 .field("strategy_str", strategy_str)
                 .field("strategy_second_str", strategy_second_str)
+                .field("whole_file_bgzip", whole_file_bgzip)
                 .field("verbose", verbose)
                 .finish(),
             Args::Decompress { input, output, decode, sequence_files, sequence_list, keep_old_stats, verbose } => f
@@ -725,8 +730,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 }
             }
         }
-        Args::Compress { input, output, tp_type, max_complexity, complexity_metric, distance, penalties, strategy_str, strategy_second_str, verbose } => {
+        Args::Compress { input, output, tp_type, max_complexity, complexity_metric, distance, penalties, strategy_str, strategy_second_str, whole_file_bgzip, verbose } => {
             setup_logger(verbose);
+
+            if whole_file_bgzip {
+                info!("BGZIP whole-file mode enabled: wrapping entire TPA in BGZIP for cross-record compression");
+            }
 
             let tpa_distance = match parse_distance_tpa(distance, penalties.as_deref()) {
                 Ok(d) => d,
@@ -787,6 +796,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     .complexity_metric(complexity_metric)
                     .distance(tpa_distance);
 
+                if whole_file_bgzip {
+                    config = config.whole_file_bgzip();
+                }
+
                 if has_cigar {
                     info!("Detected CIGAR tags (cg:Z:); encoding to tracepoints then compressing");
                     config = config.from_cigar();
@@ -819,6 +832,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     .max_complexity(max_complexity)
                     .complexity_metric(complexity_metric)
                     .distance(tpa_distance);
+
+                if whole_file_bgzip {
+                    config = config.whole_file_bgzip();
+                }
 
                 if has_cigar {
                     info!("Detected CIGAR tags (cg:Z:); encoding to tracepoints then compressing");
