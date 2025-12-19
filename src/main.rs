@@ -1,7 +1,6 @@
 mod sequence;
 
 use crate::sequence::{collect_sequence_paths, SequenceIndex};
-use tpa;
 use clap::{Parser, ValueEnum};
 use flate2::read::MultiGzDecoder;
 #[cfg(debug_assertions)]
@@ -750,15 +749,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             let mut has_tracepoints = false;
 
             let reader = get_paf_reader(&input)?;
-            for line_result in reader.lines().take(10) {
-                if let Ok(line) = line_result {
-                    if line.trim().is_empty() || line.starts_with('#') {
-                        continue;
-                    }
-                    has_cigar = line.contains("\tcg:Z:");
-                    has_tracepoints = line.contains("\ttp:Z:");
-                    break;
+            for line in reader.lines().take(10).flatten() {
+                if line.trim().is_empty() || line.starts_with('#') {
+                    continue;
                 }
+                has_cigar = line.contains("\tcg:Z:");
+                has_tracepoints = line.contains("\ttp:Z:");
+                break;
             }
 
             if has_cigar && has_tracepoints {
@@ -1366,7 +1363,7 @@ fn process_debug_chunk(
     gap_ext1: i32,
     gap_open2: i32,
     gap_ext2: i32,
-    max_complexity: usize,
+    max_complexity: u32,
 ) {
     lines.par_iter().for_each(|line| {
         let fields: Vec<&str> = line.split('\t').collect();
@@ -1899,8 +1896,8 @@ fn process_fastga_with_overflow(
     // Gaps between segments are implicit in coordinate discontinuities
 
     let mut valid_segment_count = 0;
-    for (_segment_idx, (tracepoints, (seg_query_start, seg_query_end, seg_target_start, seg_target_end)))
-        in segments.iter().enumerate()
+    for (tracepoints, (seg_query_start, seg_query_end, seg_target_start, seg_target_end))
+        in segments.iter()
     {
         valid_segment_count += 1;
 
@@ -2714,9 +2711,9 @@ fn format_variable_tracepoints(variable_tracepoints: &[(usize, Option<usize>)]) 
 fn parse_tracepoints(tp_str: &str) -> Vec<(usize, usize)> {
     tp_str
         .split(';')
-        .filter_map(|s| {
+        .map(|s| {
             let parts: Vec<&str> = s.split(',').collect();
-            Some((parts[0].parse().unwrap(), parts[1].parse().unwrap()))
+            (parts[0].parse().unwrap(), parts[1].parse().unwrap())
         })
         .collect()
 }

@@ -38,7 +38,7 @@ impl FastaIndex {
 
             for line in fai_content.lines() {
                 let fields: Vec<&str> = line.split('\t').collect();
-                if let Some(seq_name) = fields.get(0).map(|s| s.trim()).filter(|s| !s.is_empty()) {
+                if let Some(seq_name) = fields.first().map(|s| s.trim()).filter(|s| !s.is_empty()) {
                     sequence_to_file.entry(seq_name.to_string()).or_insert(idx);
                 }
             }
