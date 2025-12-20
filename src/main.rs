@@ -633,7 +633,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             if is_binary {
                 // Read directly from binary format (no temp file needed)
                 info!("Reading from binary PAF format...");
-                let mut reader = match tpa::TpaReader::open(&common.paf) {
+                let mut reader = match tpa::TpaReader::new(&common.paf) {
                     Ok(r) => r,
                     Err(e) => {
                         error!("Failed to open binary PAF: {}", e);
@@ -794,7 +794,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     .distance(tpa_distance);
 
                 if whole_file_bgzip {
-                    config = config.whole_file_bgzip();
+                    config = config.bgzip_all_records();
                 }
 
                 if has_cigar {
@@ -808,7 +808,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     std::process::exit(1);
                 }
 
-                if let Err(e) = tpa::compress_paf_to_tpa(&input, &output, config) {
+                if let Err(e) = tpa::paf_to_tpa(&input, &output, config) {
                     error!("Compression failed: {}", e);
                     std::process::exit(1);
                 }
@@ -831,7 +831,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     .distance(tpa_distance);
 
                 if whole_file_bgzip {
-                    config = config.whole_file_bgzip();
+                    config = config.bgzip_all_records();
                 }
 
                 if has_cigar {
@@ -845,7 +845,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     std::process::exit(1);
                 }
 
-                if let Err(e) = tpa::compress_paf_to_tpa(&input, &output, config) {
+                if let Err(e) = tpa::paf_to_tpa(&input, &output, config) {
                     error!("Compression failed: {}", e);
                     std::process::exit(1);
                 }
@@ -882,7 +882,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 };
 
                 // Read binary PAF
-                let mut reader = match tpa::TpaReader::open(&input) {
+                let mut reader = match tpa::TpaReader::new(&input) {
                     Ok(r) => r,
                     Err(e) => {
                         error!("Failed to open binary PAF: {}", e);
@@ -949,7 +949,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 // Decompress only: binary → tracepoints
                 info!("Decompressing binary PAF to text format with tracepoints...");
 
-                if let Err(e) = tpa::decompress_tpa(&input, &output) {
+                if let Err(e) = tpa::tpa_to_paf(&input, &output) {
                     error!("Decompression failed: {}", e);
                     std::process::exit(1);
                 }
