@@ -222,9 +222,9 @@ enum Args {
         #[arg(long = "strategy-second", value_name = "STRATEGY")]
         strategy_second_str: Option<String>,
 
-        /// Wrap entire file in BGZIP for cross-record compression (better compression, slightly slower seeks)
-        #[arg(long = "whole-file-bgzip")]
-        whole_file_bgzip: bool,
+        /// Compress all records together with BGZIP (header/string table stay plain for fast file open)
+        #[arg(long = "all-records")]
+        all_records: bool,
 
         /// Verbosity level (0 = error, 1 = info, 2 = debug)
         #[arg(short, long, default_value = "1")]
@@ -355,7 +355,7 @@ impl fmt::Debug for Args {
                 .field("heuristic", heuristic)
                 .field("max_complexity", max_complexity)
                 .finish(),
-            Args::Compress { input, output, tp_type, max_complexity, complexity_metric, distance, penalties, strategy_str, strategy_second_str, whole_file_bgzip, verbose } => f
+            Args::Compress { input, output, tp_type, max_complexity, complexity_metric, distance, penalties, strategy_str, strategy_second_str, all_records, verbose } => f
                 .debug_struct("Args::Compress")
                 .field("input", input)
                 .field("output", output)
@@ -366,7 +366,7 @@ impl fmt::Debug for Args {
                 .field("penalties", penalties)
                 .field("strategy_str", strategy_str)
                 .field("strategy_second_str", strategy_second_str)
-                .field("whole_file_bgzip", whole_file_bgzip)
+                .field("all_records", all_records)
                 .field("verbose", verbose)
                 .finish(),
             Args::Decompress { input, output, decode, sequence_files, sequence_list, keep_old_stats, verbose } => f
@@ -729,11 +729,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 }
             }
         }
-        Args::Compress { input, output, tp_type, max_complexity, complexity_metric, distance, penalties, strategy_str, strategy_second_str, whole_file_bgzip, verbose } => {
+        Args::Compress { input, output, tp_type, max_complexity, complexity_metric, distance, penalties, strategy_str, strategy_second_str, all_records, verbose } => {
             setup_logger(verbose);
 
-            if whole_file_bgzip {
-                info!("BGZIP whole-file mode enabled: wrapping entire TPA in BGZIP for cross-record compression");
+            if all_records {
+                info!("All-records mode enabled: header/string table plain, records in BGZIP");
             }
 
             let tpa_distance = match parse_distance_tpa(distance, penalties.as_deref()) {
@@ -758,9 +758,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 break;
             }
 
+            // Log what was detected (informational only - TPA auto-detects per row)
             if has_cigar && has_tracepoints {
-                error!("Input PAF has both cg:Z: and tp:Z: tags; please use only one");
-                std::process::exit(1);
+                info!("Input PAF has both cg:Z: and tp:Z: tags; will prefer tracepoints");
+            } else if has_cigar {
+                info!("Detected CIGAR tags (cg:Z:); will convert to tracepoints");
+            } else if has_tracepoints {
+                info!("Detected tracepoint tags (tp:Z:); compressing directly");
+            } else {
+                warn!("First line has neither cg:Z: nor tp:Z: tags; TPA will error per row if needed");
             }
 
             // Check if dual strategy mode is enabled
@@ -793,19 +799,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     .complexity_metric(complexity_metric)
                     .distance(tpa_distance);
 
-                if whole_file_bgzip {
-                    config = config.bgzip_all_records();
-                }
-
-                if has_cigar {
-                    info!("Detected CIGAR tags (cg:Z:); encoding to tracepoints then compressing");
-                    config = config.from_cigar();
-                } else if has_tracepoints {
-                    info!("Detected tracepoint tags (tp:Z:); compressing directly");
-                    config = config.from_tracepoints();
-                } else {
-                    error!("Input PAF has neither cg:Z: nor tp:Z: tags");
-                    std::process::exit(1);
+                if all_records {
+                    config = config.all_records();
                 }
 
                 if let Err(e) = tpa::paf_to_tpa(&input, &output, config) {
@@ -830,19 +825,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     .complexity_metric(complexity_metric)
                     .distance(tpa_distance);
 
-                if whole_file_bgzip {
-                    config = config.bgzip_all_records();
-                }
-
-                if has_cigar {
-                    info!("Detected CIGAR tags (cg:Z:); encoding to tracepoints then compressing");
-                    config = config.from_cigar();
-                } else if has_tracepoints {
-                    info!("Detected tracepoint tags (tp:Z:); compressing directly");
-                    config = config.from_tracepoints();
-                } else {
-                    error!("Input PAF has neither cg:Z: nor tp:Z: tags");
-                    std::process::exit(1);
+                if all_records {
+                    config = config.all_records();
                 }
 
                 if let Err(e) = tpa::paf_to_tpa(&input, &output, config) {
@@ -2181,7 +2165,7 @@ fn process_decompress_chunk(
 
         let cigar = if fastga {
             // FastGA decoding
-            let tracepoints = parse_tracepoints(tracepoints_str);
+            let TracepointData::Fastga(tracepoints) = tpa::parse_tracepoints(tracepoints_str, TracepointType::Fastga).expect("Failed to parse tracepoints") else { unreachable!() };
             let query_start: usize = fields[2].parse().unwrap_or_else(|_| {
                 error!(
                     "{}",
@@ -2212,7 +2196,7 @@ fn process_decompress_chunk(
         } else {
             match tp_type {
                 TracepointType::Mixed => {
-                    let mixed_tracepoints = parse_mixed_tracepoints(tracepoints_str);
+                    let TracepointData::Mixed(mixed_tracepoints) = tpa::parse_tracepoints(tracepoints_str, TracepointType::Mixed).expect("Failed to parse tracepoints") else { unreachable!() };
                     match *complexity_metric {
                         ComplexityMetric::EditDistance => {
                             if heuristic {
@@ -2254,7 +2238,7 @@ fn process_decompress_chunk(
                     }
                 }
                 TracepointType::Variable => {
-                    let variable_tracepoints = parse_variable_tracepoints(tracepoints_str);
+                    let TracepointData::Variable(variable_tracepoints) = tpa::parse_tracepoints(tracepoints_str, TracepointType::Variable).expect("Failed to parse tracepoints") else { unreachable!() };
                     match *complexity_metric {
                         ComplexityMetric::EditDistance => {
                             if heuristic {
@@ -2296,7 +2280,7 @@ fn process_decompress_chunk(
                     }
                 }
                 TracepointType::Standard => {
-                    let tracepoints = parse_tracepoints(tracepoints_str);
+                    let TracepointData::Standard(tracepoints) = tpa::parse_tracepoints(tracepoints_str, TracepointType::Standard).expect("Failed to parse tracepoints") else { unreachable!() };
                     match *complexity_metric {
                         ComplexityMetric::EditDistance => {
                             if heuristic {
@@ -2706,69 +2690,6 @@ fn format_variable_tracepoints(variable_tracepoints: &[(usize, Option<usize>)]) 
         })
         .collect::<Vec<String>>()
         .join(";")
-}
-
-fn parse_tracepoints(tp_str: &str) -> Vec<(usize, usize)> {
-    tp_str
-        .split(';')
-        .map(|s| {
-            let parts: Vec<&str> = s.split(',').collect();
-            (parts[0].parse().unwrap(), parts[1].parse().unwrap())
-        })
-        .collect()
-}
-
-fn parse_mixed_tracepoints(tp_str: &str) -> Vec<MixedRepresentation> {
-    tp_str
-        .split(';')
-        .filter_map(|s| {
-            if s.contains(',') {
-                // This is a tracepoint
-                let parts: Vec<&str> = s.split(',').collect();
-                Some(MixedRepresentation::Tracepoint(
-                    parts[0].parse().unwrap(),
-                    parts[1].parse().unwrap(),
-                ))
-            } else {
-                // This is a cigar operation
-                let chars = s.chars();
-                let mut len_str = String::new();
-
-                // Read digits
-                for c in chars {
-                    if c.is_ascii_digit() {
-                        len_str.push(c);
-                    } else {
-                        // Found operator character
-                        let len = len_str.parse().unwrap();
-                        return Some(MixedRepresentation::CigarOp(len, c));
-                    }
-                }
-
-                // If we get here, parsing failed
-                None
-            }
-        })
-        .collect()
-}
-
-fn parse_variable_tracepoints(tp_str: &str) -> Vec<(usize, Option<usize>)> {
-    tp_str
-        .split(';')
-        .filter_map(|s| {
-            if s.contains(',') {
-                // This has both coordinates
-                let parts: Vec<&str> = s.split(',').collect();
-                Some((parts[0].parse().unwrap(), Some(parts[1].parse().unwrap())))
-            } else {
-                // This has only first coordinate
-                match s.parse() {
-                    Ok(a) => Some((a, None)),
-                    Err(_) => None,
-                }
-            }
-        })
-        .collect()
 }
 
 fn parse_distance(distance: DistanceChoice, penalties: Option<&str>) -> Result<Distance, String> {
