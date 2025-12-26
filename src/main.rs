@@ -7,6 +7,13 @@ use flate2::read::MultiGzDecoder;
 use indicatif::ProgressBar;
 #[cfg(debug_assertions)]
 use indicatif::ProgressStyle;
+use lib_wfa2::affine_wavefront::Distance;
+use log::{debug, error, info, warn};
+use rayon::prelude::*;
+use std::fmt;
+use std::fs::File;
+use std::io::{self, BufRead, BufReader, BufWriter, Write};
+use std::sync::{Arc, Mutex};
 #[cfg(debug_assertions)]
 use tracepoints::{
     align_sequences_wfa, cigar_ops_to_cigar_string, cigar_to_tracepoints_raw,
@@ -17,15 +24,9 @@ use tracepoints::{
     cigar_to_variable_tracepoints, mixed_tracepoints_to_cigar,
     mixed_tracepoints_to_cigar_with_aligner, tracepoints_to_cigar, tracepoints_to_cigar_fastga,
     tracepoints_to_cigar_with_aligner, variable_tracepoints_to_cigar,
-    variable_tracepoints_to_cigar_with_aligner, ComplexityMetric, MixedRepresentation, TracepointData, TracepointType,
+    variable_tracepoints_to_cigar_with_aligner, ComplexityMetric, MixedRepresentation,
+    TracepointData, TracepointType,
 };
-use lib_wfa2::affine_wavefront::Distance;
-use log::{debug, error, info, warn};
-use rayon::prelude::*;
-use std::fmt;
-use std::fs::File;
-use std::io::{self, BufRead, BufReader, BufWriter, Write};
-use std::sync::{Arc, Mutex};
 
 /// Distance model used for WFA re-alignment
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
@@ -215,7 +216,11 @@ enum Args {
         penalties: Option<String>,
 
         /// Compression strategy (first): automatic (default), raw, zigzag-delta, etc. Optionally with layer suffix: -bgzip, -nocomp
-        #[arg(long = "strategy", default_value = "automatic", value_name = "STRATEGY")]
+        #[arg(
+            long = "strategy",
+            default_value = "automatic",
+            value_name = "STRATEGY"
+        )]
         strategy_str: String,
 
         /// Compression strategy (second, optional): If provided, enables dual-strategy compression where first and second values use different strategies
@@ -342,10 +347,7 @@ impl fmt::Debug for Args {
                 .debug_struct("Args::Decode")
                 .field("common", common)
                 .field("tp_type", tp_type)
-                .field(
-                    "complexity_metric",
-                    complexity_metric,
-                )
+                .field("complexity_metric", complexity_metric)
                 .field("sequence_files", sequence_files)
                 .field("sequence_list", sequence_list)
                 .field("keep_old_stats", keep_old_stats)
@@ -355,7 +357,19 @@ impl fmt::Debug for Args {
                 .field("heuristic", heuristic)
                 .field("max_complexity", max_complexity)
                 .finish(),
-            Args::Compress { input, output, tp_type, max_complexity, complexity_metric, distance, penalties, strategy_str, strategy_second_str, all_records, verbose } => f
+            Args::Compress {
+                input,
+                output,
+                tp_type,
+                max_complexity,
+                complexity_metric,
+                distance,
+                penalties,
+                strategy_str,
+                strategy_second_str,
+                all_records,
+                verbose,
+            } => f
                 .debug_struct("Args::Compress")
                 .field("input", input)
                 .field("output", output)
@@ -369,7 +383,15 @@ impl fmt::Debug for Args {
                 .field("all_records", all_records)
                 .field("verbose", verbose)
                 .finish(),
-            Args::Decompress { input, output, decode, sequence_files, sequence_list, keep_old_stats, verbose } => f
+            Args::Decompress {
+                input,
+                output,
+                decode,
+                sequence_files,
+                sequence_list,
+                keep_old_stats,
+                verbose,
+            } => f
                 .debug_struct("Args::Decompress")
                 .field("input", input)
                 .field("output", output)
@@ -439,7 +461,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             info!(
                 "Encoding CIGAR to {} tracepoints ({}={}, complexity-metric={})",
                 tp_type.as_str(),
-                if is_fastga { "trace_spacing" } else { "max_complexity" },
+                if is_fastga {
+                    "trace_spacing"
+                } else {
+                    "max_complexity"
+                },
                 max_complexity,
                 complexity_metric
             );
@@ -476,7 +502,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 &complexity_metric,
                                 &distance_mode,
                                 &writer,
-                                minimal
+                                minimal,
                             );
                             lines.clear();
                         }
@@ -485,7 +511,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 }
             }
             if !lines.is_empty() {
-                process_compress_chunk(&lines, &tp_type, max_complexity, &complexity_metric, &distance_mode, &writer, minimal);
+                process_compress_chunk(
+                    &lines,
+                    &tp_type,
+                    max_complexity,
+                    &complexity_metric,
+                    &distance_mode,
+                    &writer,
+                    minimal,
+                );
             }
 
             // Flush the writer
@@ -729,7 +763,19 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 }
             }
         }
-        Args::Compress { input, output, tp_type, max_complexity, complexity_metric, distance, penalties, strategy_str, strategy_second_str, all_records, verbose } => {
+        Args::Compress {
+            input,
+            output,
+            tp_type,
+            max_complexity,
+            complexity_metric,
+            distance,
+            penalties,
+            strategy_str,
+            strategy_second_str,
+            all_records,
+            verbose,
+        } => {
             setup_logger(verbose);
 
             if all_records {
@@ -766,30 +812,36 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             } else if has_tracepoints {
                 info!("Detected tracepoint tags (tp:Z:); compressing directly");
             } else {
-                warn!("First line has neither cg:Z: nor tp:Z: tags; TPA will error per row if needed");
+                warn!(
+                    "First line has neither cg:Z: nor tp:Z: tags; TPA will error per row if needed"
+                );
             }
 
             // Check if dual strategy mode is enabled
             if let Some(second_str) = strategy_second_str {
                 // Dual strategy mode: parse both strategies
-                let (first_strategy, first_layer) = match tpa::CompressionStrategy::from_str_with_layer(&strategy_str) {
-                    Ok((s, l)) => (s, l),
-                    Err(e) => {
-                        error!("Invalid first strategy '{}': {}", strategy_str, e);
-                        std::process::exit(1);
-                    }
-                };
+                let (first_strategy, first_layer) =
+                    match tpa::CompressionStrategy::from_str_with_layer(&strategy_str) {
+                        Ok((s, l)) => (s, l),
+                        Err(e) => {
+                            error!("Invalid first strategy '{}': {}", strategy_str, e);
+                            std::process::exit(1);
+                        }
+                    };
 
-                let (second_strategy, second_layer) = match tpa::CompressionStrategy::from_str_with_layer(&second_str) {
-                    Ok((s, l)) => (s, l),
-                    Err(e) => {
-                        error!("Invalid second strategy '{}': {}", second_str, e);
-                        std::process::exit(1);
-                    }
-                };
+                let (second_strategy, second_layer) =
+                    match tpa::CompressionStrategy::from_str_with_layer(&second_str) {
+                        Ok((s, l)) => (s, l),
+                        Err(e) => {
+                            error!("Invalid second strategy '{}': {}", second_str, e);
+                            std::process::exit(1);
+                        }
+                    };
 
-                info!("Dual strategy mode: {} ({:?}) → {} ({:?})",
-                    strategy_str, first_layer, second_str, second_layer);
+                info!(
+                    "Dual strategy mode: {} ({:?}) → {} ({:?})",
+                    strategy_str, first_layer, second_str, second_layer
+                );
 
                 let mut config = tpa::CompressionConfig::new()
                     .dual_strategy(first_strategy, second_strategy)
@@ -809,13 +861,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 }
             } else {
                 // Single strategy mode: parse one strategy
-                let (strategy, layer) = match tpa::CompressionStrategy::from_str_with_layer(&strategy_str) {
-                    Ok((s, l)) => (s, l),
-                    Err(e) => {
-                        error!("Invalid strategy '{}': {}", strategy_str, e);
-                        std::process::exit(1);
-                    }
-                };
+                let (strategy, layer) =
+                    match tpa::CompressionStrategy::from_str_with_layer(&strategy_str) {
+                        Ok((s, l)) => (s, l),
+                        Err(e) => {
+                            error!("Invalid strategy '{}': {}", strategy_str, e);
+                            std::process::exit(1);
+                        }
+                    };
 
                 let mut config = tpa::CompressionConfig::new()
                     .strategy(strategy)
@@ -837,7 +890,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
             info!("Compressed {} to {}", input, output);
         }
-        Args::Decompress { input, output, decode, sequence_files, sequence_list, keep_old_stats, verbose } => {
+        Args::Decompress {
+            input,
+            output,
+            decode,
+            sequence_files,
+            sequence_list,
+            keep_old_stats,
+            verbose,
+        } => {
             setup_logger(verbose);
 
             if decode {
@@ -1181,8 +1242,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 struct CigarStats {
     matches: usize,
     mismatches: usize,
-    insertion_runs: Vec<usize>,  // Length of each insertion run
-    deletion_runs: Vec<usize>,   // Length of each deletion run
+    insertion_runs: Vec<usize>, // Length of each insertion run
+    deletion_runs: Vec<usize>,  // Length of each deletion run
 }
 
 impl CigarStats {
@@ -1274,12 +1335,16 @@ impl CigarStats {
                 let mismatch_penalty = mismatch * mismatches;
 
                 // Each insertion run: gap_opening + gap_extension * run_length
-                let insertion_penalty: i32 = self.insertion_runs.iter()
+                let insertion_penalty: i32 = self
+                    .insertion_runs
+                    .iter()
                     .map(|&len| gap_opening + gap_extension * (len as i32))
                     .sum();
 
                 // Each deletion run: gap_opening + gap_extension * run_length
-                let deletion_penalty: i32 = self.deletion_runs.iter()
+                let deletion_penalty: i32 = self
+                    .deletion_runs
+                    .iter()
                     .map(|&len| gap_opening + gap_extension * (len as i32))
                     .sum();
 
@@ -1297,7 +1362,9 @@ impl CigarStats {
                 let mismatch_penalty = mismatch * mismatches;
 
                 // Each insertion run: min(gap_open1 + gap_ext1 * len, gap_open2 + gap_ext2 * len)
-                let insertion_penalty: i32 = self.insertion_runs.iter()
+                let insertion_penalty: i32 = self
+                    .insertion_runs
+                    .iter()
                     .map(|&len| {
                         let len = len as i32;
                         let score1 = gap_opening1 + gap_extension1 * len;
@@ -1307,7 +1374,9 @@ impl CigarStats {
                     .sum();
 
                 // Each deletion run: min(gap_open1 + gap_ext1 * len, gap_open2 + gap_ext2 * len)
-                let deletion_penalty: i32 = self.deletion_runs.iter()
+                let deletion_penalty: i32 = self
+                    .deletion_runs
+                    .iter()
                     .map(|&len| {
                         let len = len as i32;
                         let score1 = gap_opening1 + gap_extension1 * len;
@@ -1551,25 +1620,25 @@ fn process_debug_chunk(
 
         let (matches, mismatches, insertions, inserted_bp, deletions, deleted_bp, paf_gap_compressed_id, paf_block_id) = calculate_cigar_stats(paf_cigar);
         let (tracepoints_matches, tracepoints_mismatches, tracepoints_insertions, tracepoints_inserted_bp, tracepoints_deletions, tracepoints_deleted_bp, tracepoints_gap_compressed_id, tracepoints_block_id) = calculate_cigar_stats(&cigar_from_tracepoints);
-        let (variable_tracepoints_matches, variable_tracepoints_mismatches, variable_tracepoints_insertions, variable_tracepoints_inserted_bp, variable_tracepoints_deletions, variable_tracepoints_deleted_bp, variable_tracepoints_gap_compressed_id, variable_tracepoints_block_id) = calculate_cigar_stats(&cigar_from_variable_tracepoints);
+        let (_variable_tracepoints_matches, _variable_tracepoints_mismatches, _variable_tracepoints_insertions, _variable_tracepoints_inserted_bp, _variable_tracepoints_deletions, _variable_tracepoints_deleted_bp, _variable_tracepoints_gap_compressed_id, _variable_tracepoints_block_id) = calculate_cigar_stats(&cigar_from_variable_tracepoints);
         let (tracepoints_raw_matches, tracepoints_raw_mismatches, tracepoints_raw_insertions, tracepoints_raw_inserted_bp, tracepoints_raw_deletions, tracepoints_raw_deleted_bp, tracepoints_raw_gap_compressed_id, tracepoints_raw_block_id) = calculate_cigar_stats(&cigar_from_tracepoints_raw);
-        let (variable_tracepoints_raw_matches, variable_tracepoints_raw_mismatches, variable_tracepoints_raw_insertions, variable_tracepoints_raw_inserted_bp, variable_tracepoints_raw_deletions, variable_tracepoints_raw_deleted_bp, variable_tracepoints_raw_gap_compressed_id, variable_tracepoints_raw_block_id) = calculate_cigar_stats(&cigar_from_variable_tracepoints_raw);
+        let (_variable_tracepoints_raw_matches, _variable_tracepoints_raw_mismatches, _variable_tracepoints_raw_insertions, _variable_tracepoints_raw_inserted_bp, _variable_tracepoints_raw_deletions, _variable_tracepoints_raw_deleted_bp, _variable_tracepoints_raw_gap_compressed_id, _variable_tracepoints_raw_block_id) = calculate_cigar_stats(&cigar_from_variable_tracepoints_raw);
         // Calculate stats for diagonal CIGAR reconstructions
         let (tracepoints_diagonal_matches, tracepoints_diagonal_mismatches, tracepoints_diagonal_insertions, tracepoints_diagonal_inserted_bp, tracepoints_diagonal_deletions, tracepoints_diagonal_deleted_bp, tracepoints_diagonal_gap_compressed_id, tracepoints_diagonal_block_id) = calculate_cigar_stats(&cigar_from_tracepoints_diagonal);
-        let (mixed_tracepoints_diagonal_matches, mixed_tracepoints_diagonal_mismatches, mixed_tracepoints_diagonal_insertions, mixed_tracepoints_diagonal_inserted_bp, mixed_tracepoints_diagonal_deletions, mixed_tracepoints_diagonal_deleted_bp, mixed_tracepoints_diagonal_gap_compressed_id, mixed_tracepoints_diagonal_block_id) = calculate_cigar_stats(&cigar_from_mixed_tracepoints_diagonal);
-        let (variable_tracepoints_diagonal_matches, variable_tracepoints_diagonal_mismatches, variable_tracepoints_diagonal_insertions, variable_tracepoints_diagonal_inserted_bp, variable_tracepoints_diagonal_deletions, variable_tracepoints_diagonal_deleted_bp, variable_tracepoints_diagonal_gap_compressed_id, variable_tracepoints_diagonal_block_id) = calculate_cigar_stats(&cigar_from_variable_tracepoints_diagonal);
+        let (_mixed_tracepoints_diagonal_matches, _mixed_tracepoints_diagonal_mismatches, _mixed_tracepoints_diagonal_insertions, _mixed_tracepoints_diagonal_inserted_bp, _mixed_tracepoints_diagonal_deletions, _mixed_tracepoints_diagonal_deleted_bp, _mixed_tracepoints_diagonal_gap_compressed_id, _mixed_tracepoints_diagonal_block_id) = calculate_cigar_stats(&cigar_from_mixed_tracepoints_diagonal);
+        let (_variable_tracepoints_diagonal_matches, _variable_tracepoints_diagonal_mismatches, _variable_tracepoints_diagonal_insertions, _variable_tracepoints_diagonal_inserted_bp, _variable_tracepoints_diagonal_deletions, _variable_tracepoints_diagonal_deleted_bp, _variable_tracepoints_diagonal_gap_compressed_id, _variable_tracepoints_diagonal_block_id) = calculate_cigar_stats(&cigar_from_variable_tracepoints_diagonal);
         let (realign_matches, realign_mismatches, realign_insertions, realign_inserted_bp, realign_deletions, realign_deleted_bp, realign_gap_compressed_id, realign_block_id) = calculate_cigar_stats(&realn_cigar);
 
         let score_from_realign = compute_alignment_score_from_cigar(&realn_cigar, mismatch, gap_open1, gap_ext1, gap_open2, gap_ext2);
         let score_from_paf = compute_alignment_score_from_cigar(paf_cigar, mismatch, gap_open1, gap_ext1, gap_open2, gap_ext2);
         let score_from_tracepoints = compute_alignment_score_from_cigar(&cigar_from_tracepoints, mismatch, gap_open1, gap_ext1, gap_open2, gap_ext2);
-        let score_from_variable_tracepoints = compute_alignment_score_from_cigar(&cigar_from_variable_tracepoints, mismatch, gap_open1, gap_ext1, gap_open2, gap_ext2);
+        let _score_from_variable_tracepoints = compute_alignment_score_from_cigar(&cigar_from_variable_tracepoints, mismatch, gap_open1, gap_ext1, gap_open2, gap_ext2);
         let score_from_tracepoints_raw = compute_alignment_score_from_cigar(&cigar_from_tracepoints_raw, mismatch, gap_open1, gap_ext1, gap_open2, gap_ext2);
-        let score_from_variable_tracepoints_raw = compute_alignment_score_from_cigar(&cigar_from_variable_tracepoints_raw, mismatch, gap_open1, gap_ext1, gap_open2, gap_ext2);
+        let _score_from_variable_tracepoints_raw = compute_alignment_score_from_cigar(&cigar_from_variable_tracepoints_raw, mismatch, gap_open1, gap_ext1, gap_open2, gap_ext2);
         // Calculate scores for diagonal CIGAR reconstructions
         let score_from_tracepoints_diagonal = compute_alignment_score_from_cigar(&cigar_from_tracepoints_diagonal, mismatch, gap_open1, gap_ext1, gap_open2, gap_ext2);
-        let score_from_mixed_tracepoints_diagonal = compute_alignment_score_from_cigar(&cigar_from_mixed_tracepoints_diagonal, mismatch, gap_open1, gap_ext1, gap_open2, gap_ext2);
-        let score_from_variable_tracepoints_diagonal = compute_alignment_score_from_cigar(&cigar_from_variable_tracepoints_diagonal, mismatch, gap_open1, gap_ext1, gap_open2, gap_ext2);
+        let _score_from_mixed_tracepoints_diagonal = compute_alignment_score_from_cigar(&cigar_from_mixed_tracepoints_diagonal, mismatch, gap_open1, gap_ext1, gap_open2, gap_ext2);
+        let _score_from_variable_tracepoints_diagonal = compute_alignment_score_from_cigar(&cigar_from_variable_tracepoints_diagonal, mismatch, gap_open1, gap_ext1, gap_open2, gap_ext2);
 
         if tracepoints.len() > tracepoints_diagonal.len()
         //if variable_tracepoints.len() != variable_tracepoints_diagonal.len()
@@ -1708,7 +1777,7 @@ fn process_compress_chunk(
     complexity_metric: &ComplexityMetric,
     distance_mode: &Distance,
     writer: &Arc<Mutex<Box<dyn Write + Send>>>,
-    minimal: bool
+    minimal: bool,
 ) {
     lines.par_iter().for_each(|line| {
         let fields: Vec<&str> = line.split('\t').collect();
@@ -1753,7 +1822,7 @@ fn process_compress_chunk(
                 existing_df,
                 complexity_metric,
                 writer,
-                minimal
+                minimal,
             );
         } else {
             // Handle other tracepoint types (no overflow splitting needed)
@@ -1768,7 +1837,7 @@ fn process_compress_chunk(
                 existing_df,
                 complexity_metric,
                 writer,
-                minimal
+                minimal,
             );
         }
     });
@@ -1844,9 +1913,14 @@ fn process_fastga_with_overflow(
             };
             debug!(
                 "  Segment {}/{}: query {}..{} ({} bp), target {}..{} ({} bp), {} tracepoints",
-                i + 1, segments.len(),
-                qs, qe, qe - qs,
-                display_ts, display_te, display_te - display_ts,
+                i + 1,
+                segments.len(),
+                qs,
+                qe,
+                qe - qs,
+                display_ts,
+                display_te,
+                display_te - display_ts,
                 tps.len()
             );
 
@@ -1880,8 +1954,8 @@ fn process_fastga_with_overflow(
     // Gaps between segments are implicit in coordinate discontinuities
 
     let mut valid_segment_count = 0;
-    for (tracepoints, (seg_query_start, seg_query_end, seg_target_start, seg_target_end))
-        in segments.iter()
+    for (tracepoints, (seg_query_start, seg_query_end, seg_target_start, seg_target_end)) in
+        segments.iter()
     {
         valid_segment_count += 1;
 
@@ -2050,7 +2124,7 @@ fn calculate_paf_fields_from_cigar(cigar: &str) -> (usize, usize) {
 
     let residue_matches = matches;
     let alignment_block_length = matches + mismatches + insertions + deletions;
-    
+
     (residue_matches, alignment_block_length)
 }
 
@@ -2165,7 +2239,12 @@ fn process_decompress_chunk(
 
         let cigar = if fastga {
             // FastGA decoding
-            let TracepointData::Fastga(tracepoints) = tpa::parse_tracepoints(tracepoints_str, TracepointType::Fastga).expect("Failed to parse tracepoints") else { unreachable!() };
+            let TracepointData::Fastga(tracepoints) =
+                tpa::parse_tracepoints(tracepoints_str, TracepointType::Fastga)
+                    .expect("Failed to parse tracepoints")
+            else {
+                unreachable!()
+            };
             let query_start: usize = fields[2].parse().unwrap_or_else(|_| {
                 error!(
                     "{}",
@@ -2196,7 +2275,12 @@ fn process_decompress_chunk(
         } else {
             match tp_type {
                 TracepointType::Mixed => {
-                    let TracepointData::Mixed(mixed_tracepoints) = tpa::parse_tracepoints(tracepoints_str, TracepointType::Mixed).expect("Failed to parse tracepoints") else { unreachable!() };
+                    let TracepointData::Mixed(mixed_tracepoints) =
+                        tpa::parse_tracepoints(tracepoints_str, TracepointType::Mixed)
+                            .expect("Failed to parse tracepoints")
+                    else {
+                        unreachable!()
+                    };
                     match *complexity_metric {
                         ComplexityMetric::EditDistance => {
                             if heuristic {
@@ -2238,7 +2322,12 @@ fn process_decompress_chunk(
                     }
                 }
                 TracepointType::Variable => {
-                    let TracepointData::Variable(variable_tracepoints) = tpa::parse_tracepoints(tracepoints_str, TracepointType::Variable).expect("Failed to parse tracepoints") else { unreachable!() };
+                    let TracepointData::Variable(variable_tracepoints) =
+                        tpa::parse_tracepoints(tracepoints_str, TracepointType::Variable)
+                            .expect("Failed to parse tracepoints")
+                    else {
+                        unreachable!()
+                    };
                     match *complexity_metric {
                         ComplexityMetric::EditDistance => {
                             if heuristic {
@@ -2280,7 +2369,12 @@ fn process_decompress_chunk(
                     }
                 }
                 TracepointType::Standard => {
-                    let TracepointData::Standard(tracepoints) = tpa::parse_tracepoints(tracepoints_str, TracepointType::Standard).expect("Failed to parse tracepoints") else { unreachable!() };
+                    let TracepointData::Standard(tracepoints) =
+                        tpa::parse_tracepoints(tracepoints_str, TracepointType::Standard)
+                            .expect("Failed to parse tracepoints")
+                    else {
+                        unreachable!()
+                    };
                     match *complexity_metric {
                         ComplexityMetric::EditDistance => {
                             if heuristic {
@@ -2416,10 +2510,18 @@ fn process_decompress_chunk_binary(
             query_name,
             record.query_start,
             record.query_end,
-            if record.strand == '-' && !fastga { "-" } else { "+" }
+            if record.strand == '-' && !fastga {
+                "-"
+            } else {
+                "+"
+            }
         );
         let mut query_seq = sequence_index
-            .fetch_sequence(query_name, record.query_start as usize, record.query_end as usize)
+            .fetch_sequence(
+                query_name,
+                record.query_start as usize,
+                record.query_end as usize,
+            )
             .unwrap_or_else(|msg| {
                 error!("{}", msg);
                 std::process::exit(1);
@@ -2433,10 +2535,18 @@ fn process_decompress_chunk_binary(
             target_name,
             record.target_start,
             record.target_end,
-            if record.strand == '-' && fastga { "-" } else { "+" }
+            if record.strand == '-' && fastga {
+                "-"
+            } else {
+                "+"
+            }
         );
         let mut target_seq = sequence_index
-            .fetch_sequence(target_name, record.target_start as usize, record.target_end as usize)
+            .fetch_sequence(
+                target_name,
+                record.target_start as usize,
+                record.target_end as usize,
+            )
             .unwrap_or_else(|msg| {
                 error!("{}", msg);
                 std::process::exit(1);
@@ -2593,12 +2703,18 @@ fn process_decompress_chunk_binary(
         // Build output line - start with core PAF fields
         let mut new_fields = vec![
             query_name.to_string(),
-            string_table.get_length(record.query_name_id).unwrap().to_string(),
+            string_table
+                .get_length(record.query_name_id)
+                .unwrap()
+                .to_string(),
             record.query_start.to_string(),
             record.query_end.to_string(),
             record.strand.to_string(),
             target_name.to_string(),
-            string_table.get_length(record.target_name_id).unwrap().to_string(),
+            string_table
+                .get_length(record.target_name_id)
+                .unwrap()
+                .to_string(),
             record.target_start.to_string(),
             record.target_end.to_string(),
             record.residue_matches.to_string(),
@@ -2720,7 +2836,10 @@ fn parse_distance(distance: DistanceChoice, penalties: Option<&str>) -> Result<D
     }
 }
 
-fn parse_distance_tpa(distance: DistanceChoice, penalties: Option<&str>) -> Result<tpa::Distance, String> {
+fn parse_distance_tpa(
+    distance: DistanceChoice,
+    penalties: Option<&str>,
+) -> Result<tpa::Distance, String> {
     match distance {
         DistanceChoice::Edit => Ok(tpa::Distance::Edit),
         DistanceChoice::GapAffine => {
