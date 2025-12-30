@@ -1785,7 +1785,12 @@ fn process_fastga_with_overflow(
 
         // Calculate segment-specific stats
         let sum_of_differences: usize = tracepoints.iter().map(|(diff, _)| diff).sum();
-        let tracepoints_str = format_tracepoints(&TracepointData::Fastga(tracepoints.clone()));
+        // Empty tracepoints (0-length segments) should be represented as "0,0" (FASTGA behavior)
+        let tracepoints_str = if tracepoints.is_empty() {
+            "0,0".to_string()
+        } else {
+            format_tracepoints(&TracepointData::Fastga(tracepoints.clone()))
+        };
         let alignment_length = seg_query_end - seg_query_start;
         let matches = alignment_length.saturating_sub(sum_of_differences);
 
