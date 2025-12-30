@@ -14,18 +14,21 @@ use std::fmt;
 use std::fs::File;
 use std::io::{self, BufRead, BufReader, BufWriter, Write};
 use std::sync::{Arc, Mutex};
+// tpa: CIGAR stats, formatting, and tracepoints → CIGAR reconstruction
+use tpa::{
+    format_tracepoints, reconstruct_cigar, reconstruct_cigar_with_heuristic, CigarStats,
+};
+#[cfg(debug_assertions)]
+use tpa::calculate_alignment_score;
+// tracepoints: CIGAR → tracepoints encoding
+use tracepoints::{
+    cigar_to_mixed_tracepoints, cigar_to_tracepoints, cigar_to_tracepoints_fastga,
+    cigar_to_variable_tracepoints, ComplexityMetric, TracepointData, TracepointType,
+};
 #[cfg(debug_assertions)]
 use tracepoints::{
     align_sequences_wfa, cigar_ops_to_cigar_string, cigar_to_tracepoints_raw,
     cigar_to_variable_tracepoints_raw,
-};
-use tracepoints::{
-    cigar_to_mixed_tracepoints, cigar_to_tracepoints, cigar_to_tracepoints_fastga,
-    cigar_to_variable_tracepoints, mixed_tracepoints_to_cigar,
-    mixed_tracepoints_to_cigar_with_aligner, tracepoints_to_cigar, tracepoints_to_cigar_fastga,
-    tracepoints_to_cigar_with_aligner, variable_tracepoints_to_cigar,
-    variable_tracepoints_to_cigar_with_aligner, ComplexityMetric, MixedRepresentation,
-    TracepointData, TracepointType,
 };
 
 /// Distance model used for WFA re-alignment
@@ -678,7 +681,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 // Collect all records first, then process in chunks
                 // This avoids borrow checker issues with the iterator
                 let mut all_records = Vec::new();
-                for record_result in reader.iter_records() {
+                for record_result in reader.iter_records()? {
                     match record_result {
                         Ok(record) => all_records.push(record),
                         Err(e) => {
@@ -687,15 +690,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         }
                     }
                 }
-
-                // Get string table reference (now that iteration is complete)
-                let string_table = match reader.string_table() {
-                    Ok(st) => st,
-                    Err(e) => {
-                        error!("Failed to get string table: {}", e);
-                        std::process::exit(1);
-                    }
-                };
 
                 // Process in chunks
                 for chunk in all_records.chunks(chunk_size) {
@@ -709,7 +703,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         heuristic,
                         heuristic_max_complexity,
                         keep_old_stats,
-                        string_table,
                     );
                 }
             } else {
@@ -782,7 +775,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 info!("All-records mode enabled: header/string table plain, records in BGZIP");
             }
 
-            let tpa_distance = match parse_distance_tpa(distance, penalties.as_deref()) {
+            let tpa_distance = match parse_distance(distance, penalties.as_deref()) {
                 Ok(d) => d,
                 Err(e) => {
                     error!("Invalid distance parameters: {}", e);
@@ -948,7 +941,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
                 // Collect records
                 let mut all_records = Vec::new();
-                for record_result in reader.iter_records() {
+                for record_result in reader.iter_records()? {
                     match record_result {
                         Ok(record) => all_records.push(record),
                         Err(e) => {
@@ -957,14 +950,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         }
                     }
                 }
-
-                let string_table = match reader.string_table() {
-                    Ok(st) => st,
-                    Err(e) => {
-                        error!("Failed to get string table: {}", e);
-                        std::process::exit(1);
-                    }
-                };
 
                 // Process in chunks and decode
                 let chunk_size = 1000;
@@ -981,7 +966,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         false, // heuristic
                         None,  // heuristic_max_complexity
                         keep_old_stats,
-                        string_table,
                     );
                 }
 
@@ -1237,174 +1221,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-/// Statistics extracted from a CIGAR string
-#[derive(Debug, Clone, Default)]
-struct CigarStats {
-    matches: usize,
-    mismatches: usize,
-    insertion_runs: Vec<usize>, // Length of each insertion run
-    deletion_runs: Vec<usize>,  // Length of each deletion run
-}
-
-impl CigarStats {
-    /// Parse a CIGAR string and extract all statistics
-    fn from_cigar(cigar: &str) -> Self {
-        let mut stats = CigarStats::default();
-        let mut num_buffer = String::new();
-
-        for c in cigar.chars() {
-            if c.is_ascii_digit() {
-                num_buffer.push(c);
-            } else {
-                let len = num_buffer.parse::<usize>().unwrap_or(0);
-                num_buffer.clear();
-
-                match c {
-                    'M' | '=' => stats.matches += len,
-                    'X' => stats.mismatches += len,
-                    'I' => stats.insertion_runs.push(len),
-                    'D' => stats.deletion_runs.push(len),
-                    'S' | 'H' | 'P' | 'N' => {}
-                    _ => {}
-                }
-            }
-        }
-
-        stats
-    }
-
-    /// Number of insertion events (runs)
-    fn insertions(&self) -> usize {
-        self.insertion_runs.len()
-    }
-
-    /// Total inserted base pairs
-    fn inserted_bp(&self) -> usize {
-        self.insertion_runs.iter().sum()
-    }
-
-    /// Number of deletion events (runs)
-    fn deletions(&self) -> usize {
-        self.deletion_runs.len()
-    }
-
-    /// Total deleted base pairs
-    fn deleted_bp(&self) -> usize {
-        self.deletion_runs.iter().sum()
-    }
-
-    /// Calculate gap-compressed identity: matches / (matches + mismatches + gap_events)
-    fn gap_compressed_identity(&self) -> f32 {
-        let denom = self.matches + self.mismatches + self.insertions() + self.deletions();
-        if denom > 0 {
-            (self.matches as f32) / (denom as f32)
-        } else {
-            0.0
-        }
-    }
-
-    /// Calculate block identity: matches / (matches + edit_distance)
-    fn block_identity(&self) -> f32 {
-        let edit_distance = self.mismatches + self.inserted_bp() + self.deleted_bp();
-        let denom = self.matches + edit_distance;
-        if denom > 0 {
-            (self.matches as f32) / (denom as f32)
-        } else {
-            0.0
-        }
-    }
-
-    /// Calculate alignment score using the specified distance model
-    /// Score calculation matches WFA2-lib behavior
-    fn alignment_score(&self, distance: &Distance) -> i32 {
-        let mismatches = self.mismatches as i32;
-
-        match distance {
-            Distance::Edit => {
-                // Edit distance: positive count of edits (matches WFA2-lib cigar_score_edit)
-                let inserted_bp = self.inserted_bp() as i32;
-                let deleted_bp = self.deleted_bp() as i32;
-                -(mismatches + inserted_bp + deleted_bp)
-            }
-            Distance::GapAffine {
-                mismatch,
-                gap_opening,
-                gap_extension,
-            } => {
-                // Gap-affine: mismatch penalty + (gap_open + gap_ext * length) per gap run
-                let mismatch_penalty = mismatch * mismatches;
-
-                // Each insertion run: gap_opening + gap_extension * run_length
-                let insertion_penalty: i32 = self
-                    .insertion_runs
-                    .iter()
-                    .map(|&len| gap_opening + gap_extension * (len as i32))
-                    .sum();
-
-                // Each deletion run: gap_opening + gap_extension * run_length
-                let deletion_penalty: i32 = self
-                    .deletion_runs
-                    .iter()
-                    .map(|&len| gap_opening + gap_extension * (len as i32))
-                    .sum();
-
-                -(mismatch_penalty + insertion_penalty + deletion_penalty)
-            }
-            Distance::GapAffine2p {
-                mismatch,
-                gap_opening1,
-                gap_extension1,
-                gap_opening2,
-                gap_extension2,
-            } => {
-                // Dual gap-affine: for each gap run, choose the better (lower) penalty
-                // This matches WFA2-lib's cigar_score_gap_affine2p behavior
-                let mismatch_penalty = mismatch * mismatches;
-
-                // Each insertion run: min(gap_open1 + gap_ext1 * len, gap_open2 + gap_ext2 * len)
-                let insertion_penalty: i32 = self
-                    .insertion_runs
-                    .iter()
-                    .map(|&len| {
-                        let len = len as i32;
-                        let score1 = gap_opening1 + gap_extension1 * len;
-                        let score2 = gap_opening2 + gap_extension2 * len;
-                        std::cmp::min(score1, score2)
-                    })
-                    .sum();
-
-                // Each deletion run: min(gap_open1 + gap_ext1 * len, gap_open2 + gap_ext2 * len)
-                let deletion_penalty: i32 = self
-                    .deletion_runs
-                    .iter()
-                    .map(|&len| {
-                        let len = len as i32;
-                        let score1 = gap_opening1 + gap_extension1 * len;
-                        let score2 = gap_opening2 + gap_extension2 * len;
-                        std::cmp::min(score1, score2)
-                    })
-                    .sum();
-
-                -(mismatch_penalty + insertion_penalty + deletion_penalty)
-            }
-        }
-    }
-}
-
-/// Calculate alignment score from a CIGAR string using the specified distance model.
-///
-/// For Edit distance: score = -(mismatches + inserted_bp + deleted_bp)
-/// For GapAffine: score = -(mismatch * X_count + gap_open * gaps + gap_ext * gap_bp)
-/// For GapAffine2p: uses dual gap model, choosing the better penalty for each gap
-fn calculate_alignment_score(cigar: &str, distance: &Distance) -> i32 {
-    CigarStats::from_cigar(cigar).alignment_score(distance)
-}
-
-/// Calculate gap-compressed identity and block identity from a CIGAR string
-fn calculate_identity_stats(cigar: &str) -> (f32, f32) {
-    let stats = CigarStats::from_cigar(cigar);
-    (stats.gap_compressed_identity(), stats.block_identity())
-}
 
 /// Process a chunk of lines in parallel for debugging
 #[cfg(debug_assertions)]
@@ -1798,11 +1614,11 @@ fn process_compress_chunk(
         };
         let cigar = &cg_field[5..];
 
-        // Calculate identity stats from the CIGAR
-        let (gap_compressed_identity, block_identity) = calculate_identity_stats(cigar);
-
-        // Calculate alignment score using the specified distance model
-        let alignment_score = calculate_alignment_score(cigar, distance_mode);
+        // Parse CIGAR once and compute all stats
+        let stats = CigarStats::from_cigar(cigar);
+        let gap_compressed_identity = stats.gap_compressed_identity();
+        let block_identity = stats.block_identity();
+        let alignment_score = stats.alignment_score(distance_mode);
 
         // Check for existing df:i: field
         let existing_df = fields
@@ -1969,7 +1785,7 @@ fn process_fastga_with_overflow(
 
         // Calculate segment-specific stats
         let sum_of_differences: usize = tracepoints.iter().map(|(diff, _)| diff).sum();
-        let tracepoints_str = format_tracepoints(tracepoints);
+        let tracepoints_str = format_tracepoints(&TracepointData::Fastga(tracepoints.clone()));
         let alignment_length = seg_query_end - seg_query_start;
         let matches = alignment_length.saturating_sub(sum_of_differences);
 
@@ -2044,15 +1860,15 @@ fn process_single_record(
     let (tracepoints_str, df_value) = match tp_type {
         TracepointType::Standard => {
             let tp = cigar_to_tracepoints(cigar, max_complexity, *complexity_metric);
-            (format_tracepoints(&tp), None)
+            (format_tracepoints(&TracepointData::Standard(tp)), None)
         }
         TracepointType::Mixed => {
             let tp = cigar_to_mixed_tracepoints(cigar, max_complexity, *complexity_metric);
-            (format_mixed_tracepoints(&tp), None::<usize>)
+            (format_tracepoints(&TracepointData::Mixed(tp)), None::<usize>)
         }
         TracepointType::Variable => {
             let tp = cigar_to_variable_tracepoints(cigar, max_complexity, *complexity_metric);
-            (format_variable_tracepoints(&tp), None)
+            (format_tracepoints(&TracepointData::Variable(tp)), None)
         }
         TracepointType::Fastga => {
             // This should not happen as FastGA is handled separately
@@ -2096,37 +1912,6 @@ fn process_single_record(
     writeln!(w, "{}", new_fields.join("\t")).unwrap();
 }
 
-/// Calculate residue_matches and alignment_block_length from CIGAR string
-fn calculate_paf_fields_from_cigar(cigar: &str) -> (usize, usize) {
-    let mut matches = 0;
-    let mut mismatches = 0;
-    let mut insertions = 0;
-    let mut deletions = 0;
-    let mut num_buffer = String::new();
-
-    for c in cigar.chars() {
-        if c.is_ascii_digit() {
-            num_buffer.push(c);
-        } else {
-            let len = num_buffer.parse::<usize>().unwrap_or(0);
-            num_buffer.clear();
-
-            match c {
-                'M' | '=' => matches += len,
-                'X' => mismatches += len,
-                'I' => insertions += len,
-                'D' => deletions += len,
-                'S' | 'H' | 'P' | 'N' => {} // Skip clipping operations
-                _ => {}
-            }
-        }
-    }
-
-    let residue_matches = matches;
-    let alignment_block_length = matches + mismatches + insertions + deletions;
-
-    (residue_matches, alignment_block_length)
-}
 
 /// Process a chunk of lines in parallel for decompression
 fn process_decompress_chunk(
@@ -2237,14 +2022,13 @@ fn process_decompress_chunk(
         // Use specified tracepoint type
         let distance = *distance_mode;
 
-        let cigar = if fastga {
-            // FastGA decoding
-            let TracepointData::Fastga(tracepoints) =
-                tpa::parse_tracepoints(tracepoints_str, TracepointType::Fastga)
-                    .expect("Failed to parse tracepoints")
-            else {
-                unreachable!()
-            };
+        // Parse tracepoints based on type
+        let tp_type_to_use = if fastga { TracepointType::Fastga } else { *tp_type };
+        let tracepoints = tpa::parse_tracepoints(tracepoints_str, tp_type_to_use)
+            .expect("Failed to parse tracepoints");
+
+        // Compute offsets (only used for FastGA)
+        let (query_offset, target_offset, complement) = if fastga {
             let query_start: usize = fields[2].parse().unwrap_or_else(|_| {
                 error!(
                     "{}",
@@ -2259,181 +2043,59 @@ fn process_decompress_chunk(
                 );
                 std::process::exit(1);
             });
-            tracepoints_to_cigar_fastga(
-                &tracepoints,
-                trace_spacing,
-                &query_seq,
-                &target_seq,
-                query_start,
-                if strand == "+" {
-                    target_len - target_end
-                } else {
-                    target_start
-                },
-                strand == "-",
-            )
+            let target_offset = if strand == "+" {
+                target_len - target_end
+            } else {
+                target_start
+            };
+            (query_start, target_offset, strand == "-")
         } else {
-            match tp_type {
-                TracepointType::Mixed => {
-                    let TracepointData::Mixed(mixed_tracepoints) =
-                        tpa::parse_tracepoints(tracepoints_str, TracepointType::Mixed)
-                            .expect("Failed to parse tracepoints")
-                    else {
-                        unreachable!()
-                    };
-                    match *complexity_metric {
-                        ComplexityMetric::EditDistance => {
-                            if heuristic {
-                                let max_value = heuristic_max_complexity
-                                    .expect("missing max-complexity with heuristic");
-                                let mut aligner = distance.create_aligner(None);
-                                mixed_tracepoints_to_cigar_with_aligner(
-                                    &mixed_tracepoints,
-                                    &query_seq,
-                                    &target_seq,
-                                    0,
-                                    0,
-                                    ComplexityMetric::EditDistance,
-                                    &mut aligner,
-                                    true,
-                                    max_value,
-                                )
-                            } else {
-                                mixed_tracepoints_to_cigar(
-                                    &mixed_tracepoints,
-                                    &query_seq,
-                                    &target_seq,
-                                    0,
-                                    0,
-                                    ComplexityMetric::EditDistance,
-                                    &distance,
-                                )
-                            }
-                        }
-                        ComplexityMetric::DiagonalDistance => mixed_tracepoints_to_cigar(
-                            &mixed_tracepoints,
-                            &query_seq,
-                            &target_seq,
-                            0,
-                            0,
-                            ComplexityMetric::DiagonalDistance,
-                            &distance,
-                        ),
-                    }
-                }
-                TracepointType::Variable => {
-                    let TracepointData::Variable(variable_tracepoints) =
-                        tpa::parse_tracepoints(tracepoints_str, TracepointType::Variable)
-                            .expect("Failed to parse tracepoints")
-                    else {
-                        unreachable!()
-                    };
-                    match *complexity_metric {
-                        ComplexityMetric::EditDistance => {
-                            if heuristic {
-                                let max_value = heuristic_max_complexity
-                                    .expect("missing max-complexity with heuristic");
-                                let mut aligner = distance.create_aligner(None);
-                                variable_tracepoints_to_cigar_with_aligner(
-                                    &variable_tracepoints,
-                                    &query_seq,
-                                    &target_seq,
-                                    0,
-                                    0,
-                                    ComplexityMetric::EditDistance,
-                                    &mut aligner,
-                                    true,
-                                    max_value,
-                                )
-                            } else {
-                                variable_tracepoints_to_cigar(
-                                    &variable_tracepoints,
-                                    &query_seq,
-                                    &target_seq,
-                                    0,
-                                    0,
-                                    ComplexityMetric::EditDistance,
-                                    &distance,
-                                )
-                            }
-                        }
-                        ComplexityMetric::DiagonalDistance => variable_tracepoints_to_cigar(
-                            &variable_tracepoints,
-                            &query_seq,
-                            &target_seq,
-                            0,
-                            0,
-                            ComplexityMetric::DiagonalDistance,
-                            &distance,
-                        ),
-                    }
-                }
-                TracepointType::Standard => {
-                    let TracepointData::Standard(tracepoints) =
-                        tpa::parse_tracepoints(tracepoints_str, TracepointType::Standard)
-                            .expect("Failed to parse tracepoints")
-                    else {
-                        unreachable!()
-                    };
-                    match *complexity_metric {
-                        ComplexityMetric::EditDistance => {
-                            if heuristic {
-                                let max_value = heuristic_max_complexity
-                                    .expect("missing max-complexity with heuristic");
-                                let mut aligner = distance.create_aligner(None);
-                                tracepoints_to_cigar_with_aligner(
-                                    &tracepoints,
-                                    &query_seq,
-                                    &target_seq,
-                                    0,
-                                    0,
-                                    ComplexityMetric::EditDistance,
-                                    &mut aligner,
-                                    true,
-                                    max_value,
-                                )
-                            } else {
-                                tracepoints_to_cigar(
-                                    &tracepoints,
-                                    &query_seq,
-                                    &target_seq,
-                                    0,
-                                    0,
-                                    ComplexityMetric::EditDistance,
-                                    &distance,
-                                )
-                            }
-                        }
-                        ComplexityMetric::DiagonalDistance => tracepoints_to_cigar(
-                            &tracepoints,
-                            &query_seq,
-                            &target_seq,
-                            0,
-                            0,
-                            ComplexityMetric::DiagonalDistance,
-                            &distance,
-                        ),
-                    }
-                }
-                TracepointType::Fastga => {
-                    error!("Fastga should not be handled in non-fastga path");
-                    std::process::exit(1);
-                }
-            }
+            (0, 0, false)
         };
 
-        // Calculate identity stats from the reconstructed CIGAR
-        let (gap_compressed_identity, block_identity) = calculate_identity_stats(&cigar);
+        let cigar = if heuristic {
+            let max_value = heuristic_max_complexity
+                .expect("missing max-complexity with heuristic");
+            reconstruct_cigar_with_heuristic(
+                &tracepoints,
+                &query_seq,
+                &target_seq,
+                query_offset,
+                target_offset,
+                &distance,
+                *complexity_metric,
+                trace_spacing,
+                complement,
+                max_value,
+            )
+            .expect("Heuristic reconstruction failed")
+        } else {
+            reconstruct_cigar(
+                &tracepoints,
+                &query_seq,
+                &target_seq,
+                query_offset,
+                target_offset,
+                &distance,
+                *complexity_metric,
+                trace_spacing,
+                complement,
+            )
+        };
 
-        // Calculate alignment score using the specified distance model
-        let alignment_score = calculate_alignment_score(&cigar, distance_mode);
+        // Parse CIGAR once and compute all stats
+        let stats = CigarStats::from_cigar(&cigar);
+        let gap_compressed_identity = stats.gap_compressed_identity();
+        let block_identity = stats.block_identity();
+        let alignment_score = stats.alignment_score(distance_mode);
+        let residue_matches = stats.matches;
+        let alignment_block_length =
+            stats.matches + stats.mismatches + stats.inserted_bp() + stats.deleted_bp();
 
         // Check for existing gi:f:, bi:f:, and sc:i: fields
         let existing_gi = fields.iter().find(|&&s| s.starts_with("gi:f:"));
         let existing_bi = fields.iter().find(|&&s| s.starts_with("bi:f:"));
         let existing_sc = fields.iter().find(|&&s| s.starts_with("sc:i:"));
-
-        let (residue_matches, alignment_block_length) = calculate_paf_fields_from_cigar(&cigar);
 
         // Build the new line
         let mut new_fields: Vec<String> = Vec::new();
@@ -2498,12 +2160,11 @@ fn process_decompress_chunk_binary(
     heuristic: bool,
     heuristic_max_complexity: Option<u32>,
     keep_old_stats: bool,
-    string_table: &tpa::StringTable,
 ) {
     records.par_iter().for_each(|record| {
-        // Get sequence names from string table
-        let query_name = string_table.get(record.query_name_id).unwrap();
-        let target_name = string_table.get(record.target_name_id).unwrap();
+        // Get sequence names directly from record
+        let query_name = &record.query_name;
+        let target_name = &record.target_name;
 
         debug!(
             "Fetching query sequence {}:{}-{} on {} strand",
@@ -2557,164 +2218,64 @@ fn process_decompress_chunk_binary(
 
         let distance = *distance_mode;
 
-        // Get target length from string table
-        let target_len = string_table.get_length(record.target_name_id).unwrap() as usize;
-
-        // Convert tracepoints to CIGAR based on type
-        let cigar = match &record.tracepoints {
-            TracepointData::Fastga(tracepoints) => tracepoints_to_cigar_fastga(
-                tracepoints,
-                trace_spacing,
-                &query_seq,
-                &target_seq,
-                record.query_start as usize,
-                if record.strand == '+' {
-                    target_len - (record.target_end as usize)
-                } else {
-                    record.target_start as usize
-                },
-                record.strand == '-',
-            ),
-            TracepointData::Standard(tracepoints) => match *complexity_metric {
-                ComplexityMetric::EditDistance => {
-                    if heuristic {
-                        let max_value = heuristic_max_complexity
-                            .expect("missing max-complexity with heuristic");
-                        let mut aligner = distance.create_aligner(None);
-                        tracepoints_to_cigar_with_aligner(
-                            tracepoints,
-                            &query_seq,
-                            &target_seq,
-                            0,
-                            0,
-                            ComplexityMetric::EditDistance,
-                            &mut aligner,
-                            true,
-                            max_value,
-                        )
-                    } else {
-                        tracepoints_to_cigar(
-                            tracepoints,
-                            &query_seq,
-                            &target_seq,
-                            0,
-                            0,
-                            ComplexityMetric::EditDistance,
-                            &distance,
-                        )
-                    }
-                }
-                ComplexityMetric::DiagonalDistance => tracepoints_to_cigar(
-                    tracepoints,
-                    &query_seq,
-                    &target_seq,
-                    0,
-                    0,
-                    ComplexityMetric::DiagonalDistance,
-                    &distance,
-                ),
-            },
-            TracepointData::Mixed(mixed) => match *complexity_metric {
-                ComplexityMetric::EditDistance => {
-                    if heuristic {
-                        let max_value = heuristic_max_complexity
-                            .expect("missing max-complexity with heuristic");
-                        let mut aligner = distance.create_aligner(None);
-                        mixed_tracepoints_to_cigar_with_aligner(
-                            mixed,
-                            &query_seq,
-                            &target_seq,
-                            0,
-                            0,
-                            ComplexityMetric::EditDistance,
-                            &mut aligner,
-                            true,
-                            max_value,
-                        )
-                    } else {
-                        mixed_tracepoints_to_cigar(
-                            mixed,
-                            &query_seq,
-                            &target_seq,
-                            0,
-                            0,
-                            ComplexityMetric::EditDistance,
-                            &distance,
-                        )
-                    }
-                }
-                ComplexityMetric::DiagonalDistance => mixed_tracepoints_to_cigar(
-                    mixed,
-                    &query_seq,
-                    &target_seq,
-                    0,
-                    0,
-                    ComplexityMetric::DiagonalDistance,
-                    &distance,
-                ),
-            },
-            TracepointData::Variable(variable) => match *complexity_metric {
-                ComplexityMetric::EditDistance => {
-                    if heuristic {
-                        let max_value = heuristic_max_complexity
-                            .expect("missing max-complexity with heuristic");
-                        let mut aligner = distance.create_aligner(None);
-                        variable_tracepoints_to_cigar_with_aligner(
-                            variable,
-                            &query_seq,
-                            &target_seq,
-                            0,
-                            0,
-                            ComplexityMetric::EditDistance,
-                            &mut aligner,
-                            true,
-                            max_value,
-                        )
-                    } else {
-                        variable_tracepoints_to_cigar(
-                            variable,
-                            &query_seq,
-                            &target_seq,
-                            0,
-                            0,
-                            ComplexityMetric::EditDistance,
-                            &distance,
-                        )
-                    }
-                }
-                ComplexityMetric::DiagonalDistance => variable_tracepoints_to_cigar(
-                    variable,
-                    &query_seq,
-                    &target_seq,
-                    0,
-                    0,
-                    ComplexityMetric::DiagonalDistance,
-                    &distance,
-                ),
-            },
+        // Compute offsets (only used for FastGA)
+        let (query_offset, target_offset, complement) = if fastga {
+            let target_len = record.target_len as usize;
+            let target_offset = if record.strand == '+' {
+                target_len - (record.target_end as usize)
+            } else {
+                record.target_start as usize
+            };
+            (record.query_start as usize, target_offset, record.strand == '-')
+        } else {
+            (0, 0, false)
         };
 
-        // Calculate identity stats from the reconstructed CIGAR
-        let (gap_compressed_identity, block_identity) = calculate_identity_stats(&cigar);
+        let cigar = if heuristic {
+            let max_value = heuristic_max_complexity
+                .expect("missing max-complexity with heuristic");
+            reconstruct_cigar_with_heuristic(
+                &record.tracepoints,
+                &query_seq,
+                &target_seq,
+                query_offset,
+                target_offset,
+                &distance,
+                *complexity_metric,
+                trace_spacing,
+                complement,
+                max_value,
+            )
+            .expect("Heuristic reconstruction failed")
+        } else {
+            reconstruct_cigar(
+                &record.tracepoints,
+                &query_seq,
+                &target_seq,
+                query_offset,
+                target_offset,
+                &distance,
+                *complexity_metric,
+                trace_spacing,
+                complement,
+            )
+        };
 
-        // Calculate alignment score using the specified distance model
-        let alignment_score = calculate_alignment_score(&cigar, distance_mode);
+        // Parse CIGAR once and compute all stats
+        let stats = CigarStats::from_cigar(&cigar);
+        let gap_compressed_identity = stats.gap_compressed_identity();
+        let block_identity = stats.block_identity();
+        let alignment_score = stats.alignment_score(distance_mode);
 
         // Build output line - start with core PAF fields
         let mut new_fields = vec![
             query_name.to_string(),
-            string_table
-                .get_length(record.query_name_id)
-                .unwrap()
-                .to_string(),
+            record.query_len.to_string(),
             record.query_start.to_string(),
             record.query_end.to_string(),
             record.strand.to_string(),
             target_name.to_string(),
-            string_table
-                .get_length(record.target_name_id)
-                .unwrap()
-                .to_string(),
+            record.target_len.to_string(),
             record.target_start.to_string(),
             record.target_end.to_string(),
             record.residue_matches.to_string(),
@@ -2778,38 +2339,42 @@ fn message_with_truncate_paf_file(message: &str, line: &str) -> String {
     format!("{}: {} ...", message, truncated_line)
 }
 
-fn format_tracepoints(tracepoints: &[(usize, usize)]) -> String {
-    tracepoints
-        .iter()
-        .map(|(a, b)| format!("{},{}", a, b))
-        .collect::<Vec<String>>()
-        .join(";")
-}
+/// Parse comma-separated penalty values from a string
+fn parse_penalty_values(
+    penalties: Option<&str>,
+    expected: usize,
+    description: &str,
+) -> Result<Vec<i32>, String> {
+    let Some(penalties) = penalties else {
+        return Err(format!("missing penalties (expected {})", description));
+    };
 
-fn format_mixed_tracepoints(mixed_tracepoints: &[MixedRepresentation]) -> String {
-    mixed_tracepoints
-        .iter()
-        .map(|tp| match tp {
-            MixedRepresentation::Tracepoint(a, b) => format!("{},{}", a, b),
-            MixedRepresentation::CigarOp(len, op) => format!("{}{}", len, op),
+    let values: Vec<i32> = penalties
+        .split(',')
+        .map(|token| token.trim())
+        .filter(|token| !token.is_empty())
+        .map(|token| {
+            token
+                .parse::<i32>()
+                .map_err(|e| format!("invalid penalty '{}': {}", token, e))
         })
-        .collect::<Vec<String>>()
-        .join(";")
+        .collect::<Result<Vec<_>, _>>()?;
+
+    if values.len() != expected {
+        return Err(format!(
+            "expected {} values ({}), found {}",
+            expected,
+            description,
+            values.len()
+        ));
+    }
+
+    Ok(values)
 }
 
-fn format_variable_tracepoints(variable_tracepoints: &[(usize, Option<usize>)]) -> String {
-    variable_tracepoints
-        .iter()
-        .map(|(a, b_opt)| match b_opt {
-            Some(b) => format!("{},{}", a, b),
-            None => format!("{}", a),
-        })
-        .collect::<Vec<String>>()
-        .join(";")
-}
-
-fn parse_distance(distance: DistanceChoice, penalties: Option<&str>) -> Result<Distance, String> {
-    match distance {
+/// Convert DistanceChoice + penalties to lib_wfa2 Distance
+fn parse_distance(choice: DistanceChoice, penalties: Option<&str>) -> Result<Distance, String> {
+    match choice {
         DistanceChoice::Edit => Ok(Distance::Edit),
         DistanceChoice::GapAffine => {
             let values = parse_penalty_values(penalties, 3, "mismatch,gap_open,gap_ext")?;
@@ -2834,69 +2399,6 @@ fn parse_distance(distance: DistanceChoice, penalties: Option<&str>) -> Result<D
             })
         }
     }
-}
-
-fn parse_distance_tpa(
-    distance: DistanceChoice,
-    penalties: Option<&str>,
-) -> Result<tpa::Distance, String> {
-    match distance {
-        DistanceChoice::Edit => Ok(tpa::Distance::Edit),
-        DistanceChoice::GapAffine => {
-            let values = parse_penalty_values(penalties, 3, "mismatch,gap_open,gap_ext")?;
-            Ok(tpa::Distance::GapAffine {
-                mismatch: values[0],
-                gap_opening: values[1],
-                gap_extension: values[2],
-            })
-        }
-        DistanceChoice::GapAffine2p => {
-            let values = parse_penalty_values(
-                penalties,
-                5,
-                "mismatch,gap_open1,gap_ext1,gap_open2,gap_ext2",
-            )?;
-            Ok(tpa::Distance::GapAffine2p {
-                mismatch: values[0],
-                gap_opening1: values[1],
-                gap_extension1: values[2],
-                gap_opening2: values[3],
-                gap_extension2: values[4],
-            })
-        }
-    }
-}
-
-fn parse_penalty_values(
-    penalties: Option<&str>,
-    expected: usize,
-    description: &str,
-) -> Result<Vec<i32>, String> {
-    let Some(penalties) = penalties else {
-        return Err(format!("missing --penalties (expected {})", description));
-    };
-
-    let values: Vec<i32> = penalties
-        .split(',')
-        .map(|token| token.trim())
-        .filter(|token| !token.is_empty())
-        .map(|token| {
-            token
-                .parse::<i32>()
-                .map_err(|e| format!("invalid penalty '{}': {}", token, e))
-        })
-        .collect::<Result<Vec<_>, _>>()?;
-
-    if values.len() != expected {
-        return Err(format!(
-            "expected {} values ({}), found {}",
-            expected,
-            description,
-            values.len()
-        ));
-    }
-
-    Ok(values)
 }
 
 #[cfg(debug_assertions)]
