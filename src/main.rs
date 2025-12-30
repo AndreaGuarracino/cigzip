@@ -156,7 +156,7 @@ enum Args {
         #[arg(long = "sequence-list", value_name = "FILE")]
         sequence_list: Option<String>,
 
-        /// Keep original gi/bi/sc/sc fields as giold/biold/scold when replacing
+        /// Keep original gi/bi/sc/df fields as go/bo/so/do when replacing
         #[arg(long = "keep-old-stats")]
         keep_old_stats: bool,
 
@@ -260,7 +260,7 @@ enum Args {
         #[arg(long = "sequence-list", value_name = "FILE")]
         sequence_list: Option<String>,
 
-        /// Keep original gi/bi/sc/sc fields as giold/biold/scold when replacing (only with --decode)
+        /// Keep original gi/bi/sc/df fields as go/bo/so/do when replacing (only with --decode)
         #[arg(long = "keep-old-stats")]
         keep_old_stats: bool,
 
@@ -1807,9 +1807,9 @@ fn process_fastga_with_overflow(
                             new_fields.push(format!("gi:f:{:.6}", gap_compressed_identity));
                             new_fields.push(format!("bi:f:{:.6}", block_identity));
 
-                            // Add df fields
+                            // Add df fields (do = df-original, preserves old value)
                             if let Some(old_df) = existing_df {
-                                new_fields.push(format!("dfold:i:{}", old_df));
+                                new_fields.push(format!("do:i:{}", old_df));
                             }
                             new_fields.push(format!("df:i:{}", sum_of_differences));
 
@@ -1888,7 +1888,7 @@ fn process_single_record(
                 new_fields.push(format!("sc:i:{}", alignment_score));
                 if let Some(new_df) = df_value {
                     if let Some(old_df) = existing_df {
-                        new_fields.push(format!("dfold:i:{}", old_df));
+                        new_fields.push(format!("do:i:{}", old_df));
                     }
                     new_fields.push(format!("df:i:{}", new_df));
                 }
@@ -2112,16 +2112,16 @@ fn process_decompress_chunk(
                 }
                 _ => {
                     if field.starts_with("tp:Z:") {
-                        // Optionally keep old values
+                        // Optionally keep old values (go=gi-original, bo=bi-original, so=sc-original)
                         if keep_old_stats {
                             if let Some(old_gi) = existing_gi {
-                                new_fields.push(format!("giold:f:{}", &old_gi[5..]));
+                                new_fields.push(format!("go:f:{}", &old_gi[5..]));
                             }
                             if let Some(old_bi) = existing_bi {
-                                new_fields.push(format!("biold:f:{}", &old_bi[5..]));
+                                new_fields.push(format!("bo:f:{}", &old_bi[5..]));
                             }
                             if let Some(old_sc) = existing_sc {
-                                new_fields.push(format!("scold:i:{}", &old_sc[5..]));
+                                new_fields.push(format!("so:i:{}", &old_sc[5..]));
                             }
                         }
 
@@ -2289,7 +2289,7 @@ fn process_decompress_chunk_binary(
 
             // Skip tp tag (we're replacing it with cigar)
             if key_str == "tp" {
-                // Optionally keep old gi/bi/sc as giold/biold/scold
+                // Optionally keep old gi/bi/sc as go/bo/so
                 if keep_old_stats {
                     // Look for these in other tags... but for now skip
                 }
