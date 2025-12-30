@@ -218,17 +218,16 @@ enum Args {
         #[arg(long)]
         penalties: Option<String>,
 
-        /// Compression strategy (first): automatic (default), raw, zigzag-delta, etc. Optionally with layer suffix: -bgzip, -nocomp
+        /// Compression strategy: automatic (default), raw, zigzag-delta, etc.
+        /// Format: "strategy-layer,level" or "first,level;second,level" for dual mode.
+        /// Layer suffixes: -zstd (default), -bgzip, -nocomp
+        /// Examples: "automatic", "zigzag-delta-zstd,3", "raw-zstd,3;2d-delta-bgzip,3"
         #[arg(
             long = "strategy",
             default_value = "automatic",
             value_name = "STRATEGY"
         )]
         strategy_str: String,
-
-        /// Compression strategy (second, optional): If provided, enables dual-strategy compression where first and second values use different strategies
-        #[arg(long = "strategy-second", value_name = "STRATEGY")]
-        strategy_second_str: Option<String>,
 
         /// Compress all records together with BGZIP (header/string table stay plain for fast file open)
         #[arg(long = "all-records")]
@@ -369,7 +368,6 @@ impl fmt::Debug for Args {
                 distance,
                 penalties,
                 strategy_str,
-                strategy_second_str,
                 all_records,
                 verbose,
             } => f
@@ -382,7 +380,6 @@ impl fmt::Debug for Args {
                 .field("distance", distance)
                 .field("penalties", penalties)
                 .field("strategy_str", strategy_str)
-                .field("strategy_second_str", strategy_second_str)
                 .field("all_records", all_records)
                 .field("verbose", verbose)
                 .finish(),
@@ -765,7 +762,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             distance,
             penalties,
             strategy_str,
-            strategy_second_str,
             all_records,
             verbose,
         } => {
@@ -810,20 +806,24 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 );
             }
 
-            // Check if dual strategy mode is enabled
-            if let Some(second_str) = strategy_second_str {
-                // Dual strategy mode: parse both strategies
+            // Parse strategy string: "single" or "first;second" for dual mode
+            let config = if strategy_str.contains(';') {
+                // Dual strategy mode: "first;second"
+                let parts: Vec<&str> = strategy_str.splitn(2, ';').collect();
+                let first_str = parts[0];
+                let second_str = parts[1];
+
                 let (first_strategy, first_layer) =
-                    match tpa::CompressionStrategy::from_str_with_layer(&strategy_str) {
+                    match tpa::CompressionStrategy::from_str_with_layer(first_str) {
                         Ok((s, l)) => (s, l),
                         Err(e) => {
-                            error!("Invalid first strategy '{}': {}", strategy_str, e);
+                            error!("Invalid first strategy '{}': {}", first_str, e);
                             std::process::exit(1);
                         }
                     };
 
                 let (second_strategy, second_layer) =
-                    match tpa::CompressionStrategy::from_str_with_layer(&second_str) {
+                    match tpa::CompressionStrategy::from_str_with_layer(second_str) {
                         Ok((s, l)) => (s, l),
                         Err(e) => {
                             error!("Invalid second strategy '{}': {}", second_str, e);
@@ -832,11 +832,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     };
 
                 info!(
-                    "Dual strategy mode: {} ({:?}) → {} ({:?})",
-                    strategy_str, first_layer, second_str, second_layer
+                    "Dual strategy mode: {} ({:?}) / {} ({:?})",
+                    first_str, first_layer, second_str, second_layer
                 );
 
-                let mut config = tpa::CompressionConfig::new()
+                let mut cfg = tpa::CompressionConfig::new()
                     .dual_strategy(first_strategy, second_strategy)
                     .dual_layer(first_layer, second_layer)
                     .tp_type(tp_type)
@@ -845,15 +845,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     .distance(tpa_distance);
 
                 if all_records {
-                    config = config.all_records();
+                    cfg = cfg.all_records();
                 }
-
-                if let Err(e) = tpa::paf_to_tpa(&input, &output, config) {
-                    error!("Compression failed: {}", e);
-                    std::process::exit(1);
-                }
+                cfg
             } else {
-                // Single strategy mode: parse one strategy
+                // Single strategy mode (used for both streams)
                 let (strategy, layer) =
                     match tpa::CompressionStrategy::from_str_with_layer(&strategy_str) {
                         Ok((s, l)) => (s, l),
@@ -863,7 +859,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         }
                     };
 
-                let mut config = tpa::CompressionConfig::new()
+                let mut cfg = tpa::CompressionConfig::new()
                     .strategy(strategy)
                     .layer(layer)
                     .tp_type(tp_type)
@@ -872,13 +868,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     .distance(tpa_distance);
 
                 if all_records {
-                    config = config.all_records();
+                    cfg = cfg.all_records();
                 }
+                cfg
+            };
 
-                if let Err(e) = tpa::paf_to_tpa(&input, &output, config) {
-                    error!("Compression failed: {}", e);
-                    std::process::exit(1);
-                }
+            if let Err(e) = tpa::paf_to_tpa(&input, &output, config) {
+                error!("Compression failed: {}", e);
+                std::process::exit(1);
             }
 
             info!("Compressed {} to {}", input, output);
