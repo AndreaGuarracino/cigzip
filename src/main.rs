@@ -82,7 +82,7 @@ struct CommonOpts {
 #[derive(Parser)]
 #[command(author, version, about, disable_help_subcommand = true)]
 enum Args {
-    /// Encode CIGAR to tracepoints (text PAF with cg:Z: → text PAF with tp:Z:)
+    /// Encode CIGAR to tracepoints (text PAF cg:Z: → text PAF tp:Z:)
     Encode {
         #[clap(flatten)]
         common: CommonOpts,
@@ -96,36 +96,35 @@ enum Args {
         )]
         tp_type: TracepointType,
 
-        /// Complexity metric for tracepoint segmentation (edit-distance, diagonal-distance)
+        /// Complexity metric (edit-distance, diagonal-distance). Not used with fastga
         #[arg(
             long = "complexity-metric",
-            default_value = "edit-distance",
             value_parser = ComplexityMetric::from_str,
             value_name = "METRIC"
         )]
-        complexity_metric: ComplexityMetric,
+        complexity_metric: Option<ComplexityMetric>,
 
-        /// Maximum complexity value for tracepoint segmentation (default: 32; 100 if type is fastga)
+        /// Maximum complexity (default: 32; 100 for fastga)
         #[arg(long = "max-complexity")]
         max_complexity: Option<u32>,
 
-        /// Output file path (default: stdout)
+        /// Output file (use "-" for stdout)
         #[arg(short = 'o', long = "output")]
         output: Option<String>,
 
-        /// Distance metric for score calculation
+        /// Distance metric (edit, gap-affine, gap-affine2p)
         #[arg(long = "distance", default_value_t = DistanceChoice::Edit)]
         distance: DistanceChoice,
 
-        /// Gap penalties (only for gap-affine distances; ignored with edit distance)
+        /// Gap penalties for gap-affine distances (ignored with edit)
         #[arg(long)]
         penalties: Option<String>,
 
-        /// Skip adding optional fields (gi/bi/sc fields)
+        /// Skip optional fields (gi/bi/sc/df)
         #[arg(long = "minimal")]
         minimal: bool,
     },
-    /// Decode tracepoints back to CIGAR
+    /// Decode tracepoints to CIGAR (text PAF tp:Z: → text PAF cg:Z:)
     Decode {
         #[clap(flatten)]
         common: CommonOpts,
@@ -139,16 +138,15 @@ enum Args {
         )]
         tp_type: TracepointType,
 
-        /// Complexity metric for tracepoint segmentation (edit-distance, diagonal-distance)
+        /// Complexity metric (edit-distance, diagonal-distance). Not used with fastga
         #[arg(
             long = "complexity-metric",
-            default_value = "edit-distance",
             value_parser = ComplexityMetric::from_str,
             value_name = "METRIC"
         )]
-        complexity_metric: ComplexityMetric,
+        complexity_metric: Option<ComplexityMetric>,
 
-        /// FASTA files containing sequences referenced in the PAF (repeatable)
+        /// FASTA files containing sequences (repeatable)
         #[arg(long = "sequence-files", value_name = "FASTA", num_args = 1..)]
         sequence_files: Vec<String>,
 
@@ -156,41 +154,41 @@ enum Args {
         #[arg(long = "sequence-list", value_name = "FILE")]
         sequence_list: Option<String>,
 
-        /// Keep original gi/bi/sc/df fields as go/bo/so/do when replacing
+        /// Keep original gi/bi/sc/df fields as go/bo/so/do
         #[arg(long = "keep-old-stats")]
         keep_old_stats: bool,
 
-        /// Trace spacing for fastga (only used with fastga type, default: 100)
+        /// Trace spacing for fastga (default: 100)
         #[arg(long)]
         trace_spacing: Option<u32>,
 
-        /// Distance metric for realignment
+        /// Distance metric (edit, gap-affine, gap-affine2p)
         #[arg(long = "distance", default_value_t = DistanceChoice::Edit)]
         distance: DistanceChoice,
 
-        /// Gap penalties (only for gap-affine distances; ignored with edit distance)
+        /// Gap penalties for gap-affine distances (ignored with edit)
         #[arg(long)]
         penalties: Option<String>,
 
-        /// Use static band heuristic during decompression (edit-distance metric only)
+        /// Use static band heuristic for realignment
         #[arg(long)]
         heuristic: bool,
 
-        /// Maximum complexity value (required when enabling heuristics)
+        /// Maximum complexity (required with --heuristic)
         #[arg(long = "max-complexity")]
         max_complexity: Option<u32>,
     },
-    /// Compress PAF to binary format (accepts PAF with cg:Z: or tp:Z: tags)
+    /// Compress text PAF to binary TPA (text PAF → binary TPA)
     Compress {
-        /// Input PAF file (auto-detects cg:Z: or tp:Z: tags)
+        /// Input text PAF file (accepts cg:Z: or tp:Z: tags)
         #[arg(short = 'i', long = "input")]
         input: String,
 
-        /// Output binary file
+        /// Output binary TPA file
         #[arg(short = 'o', long = "output")]
         output: String,
 
-        /// Tracepoint type (standard, mixed, variable, fastga) - REQUIRED
+        /// Tracepoint type (standard, mixed, variable, fastga)
         #[arg(
             long = "type",
             value_parser = TracepointType::from_str,
@@ -198,30 +196,27 @@ enum Args {
         )]
         tp_type: TracepointType,
 
-        /// Maximum complexity value (for Standard/Mixed/Variable: max_diff per segment; for FASTGA: trace_spacing) - REQUIRED
+        /// Maximum complexity (max_diff for standard/mixed/variable; trace_spacing for fastga)
         #[arg(long = "max-complexity")]
         max_complexity: u32,
 
-        /// Complexity metric (edit-distance, diagonal-distance) - REQUIRED
+        /// Complexity metric (edit-distance, diagonal-distance). Not used with fastga
         #[arg(
             long = "complexity-metric",
             value_parser = ComplexityMetric::from_str,
             value_name = "METRIC"
         )]
-        complexity_metric: ComplexityMetric,
+        complexity_metric: Option<ComplexityMetric>,
 
-        /// Distance metric for CIGAR reconstruction (edit, gap-affine, gap-affine2p) - REQUIRED
+        /// Distance metric (edit, gap-affine, gap-affine2p)
         #[arg(long = "distance")]
         distance: DistanceChoice,
 
-        /// Gap penalties (only for gap-affine: "mismatch,opening,extension" or gap-affine2p: "mismatch,opening1,extension1,opening2,extension2"; ignored with edit distance)
+        /// Gap penalties for gap-affine distances (ignored with edit)
         #[arg(long)]
         penalties: Option<String>,
 
-        /// Compression strategy: automatic (default), raw, zigzag-delta, etc.
-        /// Format: "strategy-layer,level" or "first,level;second,level" for dual mode.
-        /// Layer suffixes: -zstd (default), -bgzip, -nocomp
-        /// Examples: "automatic", "zigzag-delta-zstd,3", "raw-zstd,3;2d-delta-bgzip,3"
+        /// Compression strategy (automatic, raw, zigzag-delta, 2d-delta, etc.)
         #[arg(
             long = "strategy",
             default_value = "automatic",
@@ -229,7 +224,7 @@ enum Args {
         )]
         strategy_str: String,
 
-        /// Compress all records together with BGZIP (header/string table stay plain for fast file open)
+        /// Compress all records together with BGZIP
         #[arg(long = "all-records")]
         all_records: bool,
 
@@ -237,9 +232,9 @@ enum Args {
         #[arg(short, long, default_value = "1")]
         verbose: u8,
     },
-    /// Decompress binary PAF to text format (outputs tp:Z: by default, or cg:Z: with --decode)
+    /// Decompress binary TPA to text PAF (binary TPA → text PAF)
     Decompress {
-        /// Input binary PAF file
+        /// Input binary TPA file
         #[arg(short = 'i', long = "input")]
         input: String,
 
@@ -247,11 +242,11 @@ enum Args {
         #[arg(short = 'o', long = "output", default_value = "-")]
         output: String,
 
-        /// Decode tracepoints back to CIGAR (requires --sequence-files)
+        /// Also decode tracepoints to CIGAR (requires --sequence-files)
         #[arg(long = "decode")]
         decode: bool,
 
-        /// FASTA files containing sequences (required if --decode is used)
+        /// FASTA files containing sequences (required with --decode)
         #[arg(long = "sequence-files", value_name = "FASTA", num_args = 1.., required_if_eq("decode", "true"))]
         sequence_files: Vec<String>,
 
@@ -259,7 +254,7 @@ enum Args {
         #[arg(long = "sequence-list", value_name = "FILE")]
         sequence_list: Option<String>,
 
-        /// Keep original gi/bi/sc/df fields as go/bo/so/do when replacing (only with --decode)
+        /// Keep original gi/bi/sc/df fields as go/bo/so/do
         #[arg(long = "keep-old-stats")]
         keep_old_stats: bool,
 
@@ -444,10 +439,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             let is_fastga = matches!(tp_type, TracepointType::Fastga);
             let max_complexity = max_complexity.unwrap_or(if is_fastga { 100 } else { 32 });
 
-            if is_fastga && matches!(complexity_metric, ComplexityMetric::DiagonalDistance) {
+            if is_fastga && complexity_metric.is_some() {
                 error!("--complexity-metric cannot be used with --type fastga");
+                error!("FastGA uses its own segmentation algorithm based on trace spacing");
                 std::process::exit(1);
             }
+
+            // Default to EditDistance for non-fastga if not specified
+            let complexity_metric = complexity_metric.unwrap_or(ComplexityMetric::EditDistance);
 
             // Parse distance model for score calculation
             let distance_mode = match parse_distance(distance, penalties.as_deref()) {
@@ -458,17 +457,19 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 }
             };
 
-            info!(
-                "Encoding CIGAR to {} tracepoints ({}={}, complexity-metric={})",
-                tp_type.as_str(),
-                if is_fastga {
-                    "trace_spacing"
-                } else {
-                    "max_complexity"
-                },
-                max_complexity,
-                complexity_metric
-            );
+            if is_fastga {
+                info!(
+                    "Encoding CIGAR to fastga tracepoints (trace_spacing={})",
+                    max_complexity
+                );
+            } else {
+                info!(
+                    "Encoding CIGAR to {} tracepoints (max_complexity={}, complexity-metric={})",
+                    tp_type.as_str(),
+                    max_complexity,
+                    complexity_metric
+                );
+            }
 
             let _ = rayon::ThreadPoolBuilder::new()
                 .num_threads(common.threads)
@@ -547,11 +548,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             let is_fastga = matches!(tp_type, TracepointType::Fastga);
 
             // Validate that complexity-metric is not used with fastga
-            if is_fastga && matches!(complexity_metric, ComplexityMetric::DiagonalDistance) {
+            if is_fastga && complexity_metric.is_some() {
                 error!("--complexity-metric cannot be used with --type fastga");
                 error!("FastGA uses its own segmentation algorithm based on trace spacing");
                 std::process::exit(1);
             }
+
+            // Default to EditDistance for non-fastga if not specified
+            let complexity_metric = complexity_metric.unwrap_or(ComplexityMetric::EditDistance);
 
             if heuristic && is_fastga {
                 error!("--heuristic cannot be used with --type fastga");
@@ -766,6 +770,28 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             verbose,
         } => {
             setup_logger(verbose);
+
+            let is_fastga = matches!(tp_type, TracepointType::Fastga);
+
+            // Validate complexity_metric usage
+            if is_fastga && complexity_metric.is_some() {
+                error!("--complexity-metric cannot be used with --type fastga");
+                error!("FastGA uses its own segmentation algorithm based on trace spacing");
+                std::process::exit(1);
+            }
+
+            // Require complexity_metric for non-fastga types
+            let complexity_metric = if is_fastga {
+                ComplexityMetric::EditDistance // Dummy value, not used
+            } else {
+                match complexity_metric {
+                    Some(m) => m,
+                    None => {
+                        error!("--complexity-metric is required for {} type", tp_type.as_str());
+                        std::process::exit(1);
+                    }
+                }
+            };
 
             if all_records {
                 info!("All-records mode enabled: header/string table plain, records in BGZIP");
