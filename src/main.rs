@@ -228,6 +228,10 @@ enum Args {
         #[arg(long = "all-records")]
         all_records: bool,
 
+        /// Number of threads to use (default: 4)
+        #[arg(short, long = "threads", default_value_t = 4)]
+        threads: usize,
+
         /// Verbosity level (0 = error, 1 = info, 2 = debug)
         #[arg(short, long, default_value = "1")]
         verbose: u8,
@@ -364,6 +368,7 @@ impl fmt::Debug for Args {
                 penalties,
                 strategy_str,
                 all_records,
+                threads,
                 verbose,
             } => f
                 .debug_struct("Args::Compress")
@@ -376,6 +381,7 @@ impl fmt::Debug for Args {
                 .field("penalties", penalties)
                 .field("strategy_str", strategy_str)
                 .field("all_records", all_records)
+                .field("threads", threads)
                 .field("verbose", verbose)
                 .finish(),
             Args::Decompress {
@@ -767,9 +773,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             penalties,
             strategy_str,
             all_records,
+            threads,
             verbose,
         } => {
             setup_logger(verbose);
+
+            let _ = rayon::ThreadPoolBuilder::new()
+                .num_threads(threads)
+                .build_global();
 
             let is_fastga = matches!(tp_type, TracepointType::Fastga);
 
