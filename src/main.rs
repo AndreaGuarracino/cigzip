@@ -117,10 +117,6 @@ enum Args {
         #[arg(long = "distance", default_value_t = DistanceChoice::Edit)]
         distance: DistanceChoice,
 
-        /// Distance metric for score calculation
-        #[arg(long = "distance", default_value_t = DistanceChoice::Edit)]
-        distance: DistanceChoice,
-
         /// Gap penalties (only for gap-affine distances; ignored with edit distance)
         #[arg(long)]
         penalties: Option<String>,
