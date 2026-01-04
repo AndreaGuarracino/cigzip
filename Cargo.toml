@@ -11,13 +11,21 @@ flate2 = "1.1"
 #lib_wfa2 = { path = "/home/guarracino/Dropbox/git/lib_wfa2"}
 lib_wfa2 = { git = "https://github.com/AndreaGuarracino/lib_wfa2"}
 
-#tracepoints = { path = "/home/guarracino/Dropbox/git/tracepoints"}
+#tracepoints = { path = "/home/guarracino/git/tracepoints"}
 tracepoints = { git = "https://github.com/AndreaGuarracino/tracepoints"}
+#tpa = { path = "/home/guarracino/git/tpa" }
+tpa = { git = "https://github.com/AndreaGuarracino/tpa" }
 
 log = "0.4"
 env_logger = "0.11"
 
-rayon = "1.10" # Parallel processing library
+rayon = "1.10"
 libc = "0.2"
 
 indicatif="0.18"
+
+# Dependencies for AGC format (for sequences) support
+ragc-reader = { git = "https://github.com/AndreaGuarracino/ragc", branch = "tweaks" }
+
+[features]
+default = []
