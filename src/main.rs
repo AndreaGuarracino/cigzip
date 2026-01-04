@@ -117,11 +117,15 @@ enum Args {
         #[arg(long = "distance", default_value_t = DistanceChoice::Edit)]
         distance: DistanceChoice,
 
-        /// Gap penalties for gap-affine distances (ignored with edit)
+        /// Distance metric for score calculation
+        #[arg(long = "distance", default_value_t = DistanceChoice::Edit)]
+        distance: DistanceChoice,
+
+        /// Gap penalties (only for gap-affine distances; ignored with edit distance)
         #[arg(long)]
         penalties: Option<String>,
 
-        /// Skip optional fields (gi/bi/sc/df)
+        /// Skip adding optional fields (gi/bi/sc fields)
         #[arg(long = "minimal")]
         minimal: bool,
     },
@@ -1255,7 +1259,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     Ok(())
 }
-
 
 /// Process a chunk of lines in parallel for debugging
 #[cfg(debug_assertions)]
