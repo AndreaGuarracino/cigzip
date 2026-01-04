@@ -13,8 +13,8 @@ lib_wfa2 = { git = "https://github.com/AndreaGuarracino/lib_wfa2"}
 
 #tracepoints = { path = "/home/guarracino/git/tracepoints"}
 tracepoints = { git = "https://github.com/AndreaGuarracino/tracepoints"}
-tpa = { path = "/home/guarracino/git/tpa" }
-#tpa = { git = "https://github.com/AndreaGuarracino/tpa" }
+#tpa = { path = "/home/guarracino/git/tpa" }
+tpa = { git = "https://github.com/AndreaGuarracino/tpa" }
 
 log = "0.4"
 env_logger = "0.11"

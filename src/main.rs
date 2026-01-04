@@ -28,7 +28,8 @@ use tracepoints::{
 #[cfg(debug_assertions)]
 use tracepoints::{
     align_sequences_wfa, cigar_ops_to_cigar_string, cigar_to_tracepoints_raw,
-    cigar_to_variable_tracepoints_raw,
+    cigar_to_variable_tracepoints_raw, tracepoints_to_cigar, variable_tracepoints_to_cigar,
+    mixed_tracepoints_to_cigar,
 };
 
 /// Distance model used for WFA re-alignment
