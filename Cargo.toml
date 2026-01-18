@@ -9,12 +9,12 @@ rust-htslib = { version = "0.46.0", default-features = false } # Don't update it
 flate2 = "1.1"
 
 #lib_wfa2 = { path = "/home/guarracino/Dropbox/git/lib_wfa2"}
-lib_wfa2 = { git = "https://github.com/AndreaGuarracino/lib_wfa2"}
+lib_wfa2 = { git = "https://github.com/AndreaGuarracino/lib_wfa2", rev = "63936c6f26cd5a1d19354a880cd788f868e6443c" }
 
 #tracepoints = { path = "/home/guarracino/git/tracepoints"}
-tracepoints = { git = "https://github.com/AndreaGuarracino/tracepoints"}
+tracepoints = { git = "https://github.com/AndreaGuarracino/tracepoints", rev = "a3747072e8038dbb67091343e5e1da5a63463e7f" }
 #tpa = { path = "/home/guarracino/git/tpa" }
-tpa = { git = "https://github.com/AndreaGuarracino/tpa" }
+tpa = { git = "https://github.com/AndreaGuarracino/tpa", rev = "ec09e985811e20257eac49939b3c4520fb7c7bc9" }
 
 log = "0.4"
 env_logger = "0.11"

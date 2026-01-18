@@ -15,9 +15,7 @@ use std::fs::File;
 use std::io::{self, BufRead, BufReader, BufWriter, Write};
 use std::sync::{Arc, Mutex};
 // tpa: CIGAR stats, formatting, and tracepoints → CIGAR reconstruction
-use tpa::{
-    format_tracepoints, reconstruct_cigar, reconstruct_cigar_with_heuristic, CigarStats,
-};
+use tpa::{format_tracepoints, reconstruct_cigar_with_aligner, CigarStats};
 #[cfg(debug_assertions)]
 use tpa::calculate_alignment_score;
 // tracepoints: CIGAR → tracepoints encoding
@@ -60,6 +58,38 @@ impl fmt::Display for DistanceChoice {
             DistanceChoice::Edit => write!(f, "edit"),
             DistanceChoice::GapAffine => write!(f, "gap-affine"),
             DistanceChoice::GapAffine2p => write!(f, "gap-affine-2p"),
+        }
+    }
+}
+
+/// Memory mode for WFA aligner
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum, Default)]
+enum MemoryModeChoice {
+    #[default]
+    High,
+    Medium,
+    Low,
+    Ultralow,
+}
+
+impl MemoryModeChoice {
+    fn to_lib_wfa2(&self) -> lib_wfa2::affine_wavefront::MemoryMode {
+        match self {
+            Self::High => lib_wfa2::affine_wavefront::MemoryMode::High,
+            Self::Medium => lib_wfa2::affine_wavefront::MemoryMode::Medium,
+            Self::Low => lib_wfa2::affine_wavefront::MemoryMode::Low,
+            Self::Ultralow => lib_wfa2::affine_wavefront::MemoryMode::Ultralow,
+        }
+    }
+}
+
+impl fmt::Display for MemoryModeChoice {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            MemoryModeChoice::High => write!(f, "high"),
+            MemoryModeChoice::Medium => write!(f, "medium"),
+            MemoryModeChoice::Low => write!(f, "low"),
+            MemoryModeChoice::Ultralow => write!(f, "ultralow"),
         }
     }
 }
@@ -178,6 +208,10 @@ enum Args {
         /// Maximum complexity (required with --heuristic)
         #[arg(long = "max-complexity")]
         max_complexity: Option<u32>,
+
+        /// Memory mode for WFA aligner (high, medium, low, ultralow)
+        #[arg(long = "memory-mode", default_value_t = MemoryModeChoice::High)]
+        memory_mode: MemoryModeChoice,
     },
     /// Compress text PAF to binary TPA (text PAF → binary TPA)
     Compress {
@@ -263,6 +297,10 @@ enum Args {
         #[arg(long = "keep-old-stats")]
         keep_old_stats: bool,
 
+        /// Memory mode for WFA aligner (high, medium, low, ultralow)
+        #[arg(long = "memory-mode", default_value_t = MemoryModeChoice::High)]
+        memory_mode: MemoryModeChoice,
+
         /// Verbosity level (0 = error, 1 = info, 2 = debug)
         #[arg(short, long, default_value = "1")]
         verbose: u8,
@@ -345,6 +383,7 @@ impl fmt::Debug for Args {
                 penalties,
                 heuristic,
                 max_complexity,
+                memory_mode,
             } => f
                 .debug_struct("Args::Decode")
                 .field("common", common)
@@ -358,6 +397,7 @@ impl fmt::Debug for Args {
                 .field("penalties", penalties)
                 .field("heuristic", heuristic)
                 .field("max_complexity", max_complexity)
+                .field("memory_mode", memory_mode)
                 .finish(),
             Args::Compress {
                 input,
@@ -392,6 +432,7 @@ impl fmt::Debug for Args {
                 sequence_files,
                 sequence_list,
                 keep_old_stats,
+                memory_mode,
                 verbose,
             } => f
                 .debug_struct("Args::Decompress")
@@ -401,6 +442,7 @@ impl fmt::Debug for Args {
                 .field("sequence_files", sequence_files)
                 .field("sequence_list", sequence_list)
                 .field("keep_old_stats", keep_old_stats)
+                .field("memory_mode", memory_mode)
                 .field("verbose", verbose)
                 .finish(),
             #[cfg(debug_assertions)]
@@ -545,6 +587,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             max_complexity,
             heuristic,
             keep_old_stats,
+            memory_mode,
         } => {
             setup_logger(common.verbose);
 
@@ -711,6 +754,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         heuristic,
                         heuristic_max_complexity,
                         keep_old_stats,
+                        &memory_mode,
                     );
                 }
             } else {
@@ -739,6 +783,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                     heuristic,
                                     heuristic_max_complexity,
                                     keep_old_stats,
+                                    &memory_mode,
                                 );
                                 lines.clear();
                             }
@@ -760,6 +805,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         heuristic,
                         heuristic_max_complexity,
                         keep_old_stats,
+                        &memory_mode,
                     );
                 }
             }
@@ -925,6 +971,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             sequence_files,
             sequence_list,
             keep_old_stats,
+            memory_mode,
             verbose,
         } => {
             setup_logger(verbose);
@@ -1001,6 +1048,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         false, // heuristic
                         None,  // heuristic_max_complexity
                         keep_old_stats,
+                        &memory_mode,
                     );
                 }
 
@@ -1198,7 +1246,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     gap_opening2: gap_open2,
                     gap_extension2: gap_ext2,
                 };
-                let aligner = distance.create_aligner(None);
+                let aligner = distance.create_aligner(None, None);
                 let paf_cigar = align_sequences_wfa(
                     &query_seq[a_start..a_end],
                     &target_seq[b_start..b_end],
@@ -1333,7 +1381,7 @@ fn process_debug_chunk(
             gap_opening2: gap_open2,
             gap_extension2: gap_ext2,
         };
-        let aligner = distance.create_aligner(None);
+        let aligner = distance.create_aligner(None, None);
         let realn_cigar = align_sequences_wfa(&query_seq, &target_seq, &aligner);
         let realn_cigar = cigar_ops_to_cigar_string(&realn_cigar);
         // let paf_cigar = &realn_cigar;
@@ -1964,8 +2012,13 @@ fn process_decompress_chunk(
     heuristic: bool,
     heuristic_max_complexity: Option<u32>,
     keep_old_stats: bool,
+    memory_mode: &MemoryModeChoice,
 ) {
-    lines.par_iter().for_each(|line| {
+    // Create one aligner per thread using for_each_init
+    let memory_mode_wfa2 = memory_mode.to_lib_wfa2();
+    lines.par_iter().for_each_init(
+        || distance_mode.create_aligner(None, Some(&memory_mode_wfa2)),
+        |aligner, line| {
         let fields: Vec<&str> = line.split('\t').collect();
         if fields.len() < 12 {
             warn!(
@@ -2058,9 +2111,6 @@ fn process_decompress_chunk(
             target_seq = reverse_complement(&target_seq);
         }
 
-        // Use specified tracepoint type
-        let distance = *distance_mode;
-
         // Parse tracepoints based on type
         let tp_type_to_use = if fastga { TracepointType::Fastga } else { *tp_type };
         let tracepoints = tpa::parse_tracepoints(tracepoints_str, tp_type_to_use)
@@ -2092,35 +2142,24 @@ fn process_decompress_chunk(
             (0, 0, false)
         };
 
-        let cigar = if heuristic {
-            let max_value = heuristic_max_complexity
-                .expect("missing max-complexity with heuristic");
-            reconstruct_cigar_with_heuristic(
-                &tracepoints,
-                &query_seq,
-                &target_seq,
-                query_offset,
-                target_offset,
-                &distance,
-                *complexity_metric,
-                trace_spacing,
-                complement,
-                max_value,
-            )
-            .expect("Heuristic reconstruction failed")
+        let max_complexity = if heuristic {
+            heuristic_max_complexity.expect("missing max-complexity with heuristic")
         } else {
-            reconstruct_cigar(
-                &tracepoints,
-                &query_seq,
-                &target_seq,
-                query_offset,
-                target_offset,
-                &distance,
-                *complexity_metric,
-                trace_spacing,
-                complement,
-            )
+            0
         };
+        let cigar = reconstruct_cigar_with_aligner(
+            &tracepoints,
+            &query_seq,
+            &target_seq,
+            query_offset,
+            target_offset,
+            *complexity_metric,
+            trace_spacing,
+            complement,
+            aligner,
+            heuristic,
+            max_complexity,
+        );
 
         // Parse CIGAR once and compute all stats
         let stats = CigarStats::from_cigar(&cigar);
@@ -2199,8 +2238,13 @@ fn process_decompress_chunk_binary(
     heuristic: bool,
     heuristic_max_complexity: Option<u32>,
     keep_old_stats: bool,
+    memory_mode: &MemoryModeChoice,
 ) {
-    records.par_iter().for_each(|record| {
+    // Create one aligner per thread using for_each_init
+    let memory_mode_wfa2 = memory_mode.to_lib_wfa2();
+    records.par_iter().for_each_init(
+        || distance_mode.create_aligner(None, Some(&memory_mode_wfa2)),
+        |aligner, record| {
         // Get sequence names directly from record
         let query_name = &record.query_name;
         let target_name = &record.target_name;
@@ -2255,8 +2299,6 @@ fn process_decompress_chunk_binary(
             target_seq = reverse_complement(&target_seq);
         }
 
-        let distance = *distance_mode;
-
         // Compute offsets (only used for FastGA)
         let (query_offset, target_offset, complement) = if fastga {
             let target_len = record.target_len as usize;
@@ -2270,35 +2312,24 @@ fn process_decompress_chunk_binary(
             (0, 0, false)
         };
 
-        let cigar = if heuristic {
-            let max_value = heuristic_max_complexity
-                .expect("missing max-complexity with heuristic");
-            reconstruct_cigar_with_heuristic(
-                &record.tracepoints,
-                &query_seq,
-                &target_seq,
-                query_offset,
-                target_offset,
-                &distance,
-                *complexity_metric,
-                trace_spacing,
-                complement,
-                max_value,
-            )
-            .expect("Heuristic reconstruction failed")
+        let max_complexity = if heuristic {
+            heuristic_max_complexity.expect("missing max-complexity with heuristic")
         } else {
-            reconstruct_cigar(
-                &record.tracepoints,
-                &query_seq,
-                &target_seq,
-                query_offset,
-                target_offset,
-                &distance,
-                *complexity_metric,
-                trace_spacing,
-                complement,
-            )
+            0
         };
+        let cigar = reconstruct_cigar_with_aligner(
+            &record.tracepoints,
+            &query_seq,
+            &target_seq,
+            query_offset,
+            target_offset,
+            *complexity_metric,
+            trace_spacing,
+            complement,
+            aligner,
+            heuristic,
+            max_complexity,
+        );
 
         // Parse CIGAR once and compute all stats
         let stats = CigarStats::from_cigar(&cigar);
