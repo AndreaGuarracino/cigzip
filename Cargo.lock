@@ -601,7 +601,7 @@ checksum = "bbd2bcb4c963f2ddae06a2efc7e9f3591312473c50c6685e1f298068316e66fe"
 [[package]]
 name = "lib_wfa2"
 version = "0.1.0"
-source = "git+https://github.com/AndreaGuarracino/lib_wfa2?rev=63936c6f26cd5a1d19354a880cd788f868e6443c#63936c6f26cd5a1d19354a880cd788f868e6443c"
+source = "git+https://github.com/AndreaGuarracino/lib_wfa2?rev=82e145b222b3503069e54d275bdb272e6d2a96c9#82e145b222b3503069e54d275bdb272e6d2a96c9"
 
 [[package]]
 name = "libc"
@@ -1014,7 +1014,7 @@ dependencies = [
 [[package]]
 name = "tpa"
 version = "0.1.0"
-source = "git+https://github.com/AndreaGuarracino/tpa?rev=ec09e985811e20257eac49939b3c4520fb7c7bc9#ec09e985811e20257eac49939b3c4520fb7c7bc9"
+source = "git+https://github.com/AndreaGuarracino/tpa?rev=b29bad192dedd751743ffc2fabe1cc845cfc3c9b#b29bad192dedd751743ffc2fabe1cc845cfc3c9b"
 dependencies = [
  "bgzip",
  "env_logger",
@@ -1030,7 +1030,7 @@ dependencies = [
 [[package]]
 name = "tracepoints"
 version = "0.1.0"
-source = "git+https://github.com/AndreaGuarracino/tracepoints?rev=a3747072e8038dbb67091343e5e1da5a63463e7f#a3747072e8038dbb67091343e5e1da5a63463e7f"
+source = "git+https://github.com/AndreaGuarracino/tracepoints?rev=2babb27559d0005c534b1702748e929977d3dd3a#2babb27559d0005c534b1702748e929977d3dd3a"
 dependencies = [
  "lib_wfa2",
 ]
