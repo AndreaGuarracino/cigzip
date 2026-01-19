@@ -2231,10 +2231,10 @@ fn process_decompress_line(
         (0, 0, false)
     };
 
-    let max_complexity = if heuristic {
-        heuristic_max_complexity.expect("missing max-complexity with heuristic")
+    let max_value = if heuristic {
+        Some(heuristic_max_complexity.expect("missing max-complexity with heuristic"))
     } else {
-        0
+        None
     };
     let cigar = reconstruct_cigar_with_aligner(
         &tracepoints,
@@ -2246,8 +2246,7 @@ fn process_decompress_line(
         trace_spacing,
         complement,
         aligner,
-        heuristic,
-        max_complexity,
+        max_value,
     );
 
     // Parse CIGAR once and compute all stats
@@ -2399,10 +2398,10 @@ fn process_decompress_record(
         (0, 0, false)
     };
 
-    let max_complexity = if heuristic {
-        heuristic_max_complexity.expect("missing max-complexity with heuristic")
+    let max_value = if heuristic {
+        Some(heuristic_max_complexity.expect("missing max-complexity with heuristic"))
     } else {
-        0
+        None
     };
     let cigar = reconstruct_cigar_with_aligner(
         &record.tracepoints,
@@ -2414,8 +2413,7 @@ fn process_decompress_record(
         trace_spacing,
         complement,
         aligner,
-        heuristic,
-        max_complexity,
+        max_value,
     );
 
     // Parse CIGAR once and compute all stats

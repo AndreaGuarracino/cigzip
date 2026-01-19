@@ -19,9 +19,9 @@ ragc-reader = { git = "https://github.com/AndreaGuarracino/ragc", branch = "twea
 #lib_wfa2 = { path = "/home/guarracino/Dropbox/git/lib_wfa2"}
 lib_wfa2 = { git = "https://github.com/AndreaGuarracino/lib_wfa2", rev = "82e145b222b3503069e54d275bdb272e6d2a96c9" }
 #tracepoints = { path = "/home/guarracino/git/tracepoints"}
-tracepoints = { git = "https://github.com/AndreaGuarracino/tracepoints", rev = "88b01283c8b0d3ac13ebf5921242f8818af06d40" }
+tracepoints = { git = "https://github.com/AndreaGuarracino/tracepoints", rev = "abce104c09cfe272be8211b006b6bf2f003d9ac7" }
 #tpa = { path = "/home/guarracino/git/tpa" }
-tpa = { git = "https://github.com/AndreaGuarracino/tpa", rev = "562c4480c8d6e20cba95fbf73b4defb956ee21d6" }
+tpa = { git = "https://github.com/AndreaGuarracino/tpa", rev = "45cd9e3e1422304266e0b60a1826b6b94ab1e0c8" }
 
 [features]
 default = []
