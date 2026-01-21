@@ -7,25 +7,21 @@ edition = "2021"
 clap = { version = "4.5", features = ["derive"] }
 rust-htslib = { version = "0.46.0", default-features = false } # Don't update it, see https://github.com/rust-bio/rust-htslib/issues/434
 flate2 = "1.1"
-
-#lib_wfa2 = { path = "/home/guarracino/Dropbox/git/lib_wfa2"}
-lib_wfa2 = { git = "https://github.com/AndreaGuarracino/lib_wfa2"}
-
-#tracepoints = { path = "/home/guarracino/git/tracepoints"}
-tracepoints = { git = "https://github.com/AndreaGuarracino/tracepoints"}
-#tpa = { path = "/home/guarracino/git/tpa" }
-tpa = { git = "https://github.com/AndreaGuarracino/tpa" }
-
 log = "0.4"
 env_logger = "0.11"
-
 rayon = "1.10"
 libc = "0.2"
-
 indicatif="0.18"
 
 # Dependencies for AGC format (for sequences) support
 ragc-reader = { git = "https://github.com/AndreaGuarracino/ragc", branch = "tweaks" }
+
+#lib_wfa2 = { path = "/home/guarracino/Dropbox/git/lib_wfa2"}
+lib_wfa2 = { git = "https://github.com/AndreaGuarracino/lib_wfa2", rev = "0fe1ebfb7a364226f3d8d7b84b703611168435c6" }
+#tracepoints = { path = "/home/guarracino/git/tracepoints"}
+tracepoints = { git = "https://github.com/AndreaGuarracino/tracepoints", rev = "3d9eba70b098807f3a168771ef419e84a26b0b8f" }
+#tpa = { path = "/home/guarracino/git/tpa" }
+tpa = { git = "https://github.com/AndreaGuarracino/tpa", rev = "000b14e8b5e64dd8a55a34d9ecbab59d0041c856" }
 
 [features]
 default = []
