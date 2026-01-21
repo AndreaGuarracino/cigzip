@@ -73,7 +73,7 @@ enum MemoryModeChoice {
 }
 
 impl MemoryModeChoice {
-    fn to_lib_wfa2(&self) -> lib_wfa2::affine_wavefront::MemoryMode {
+    fn to_lib_wfa2(self) -> lib_wfa2::affine_wavefront::MemoryMode {
         match self {
             Self::High => lib_wfa2::affine_wavefront::MemoryMode::High,
             Self::Medium => lib_wfa2::affine_wavefront::MemoryMode::Medium,
@@ -536,7 +536,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
             paf_reader
                 .lines()
-                .filter_map(|r| r.ok())
+                .map_while(Result::ok)
                 .filter(|line| !line.trim().is_empty() && !line.starts_with('#'))
                 .par_bridge()
                 .for_each(|line| {
@@ -709,7 +709,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
                 reader
                     .iter_records()?
-                    .filter_map(|r| r.ok())
+                    .map_while(Result::ok)
                     .par_bridge()
                     .for_each_init(
                         || distance_mode.create_aligner(None, Some(&memory_mode_wfa2)),
@@ -735,7 +735,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
                 paf_reader
                     .lines()
-                    .filter_map(|r| r.ok())
+                    .map_while(Result::ok)
                     .filter(|line| !line.trim().is_empty() && !line.starts_with('#'))
                     .par_bridge()
                     .for_each_init(
@@ -979,7 +979,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
                 reader
                     .iter_records()?
-                    .filter_map(|r| r.ok())
+                    .map_while(Result::ok)
                     .par_bridge()
                     .for_each_init(
                         || distance_mode.create_aligner(None, Some(&memory_mode_wfa2)),
@@ -1110,7 +1110,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 // Process using streaming parallelization
                 paf_reader
                     .lines()
-                    .filter_map(|r| r.ok())
+                    .map_while(Result::ok)
                     .filter(|line| !line.trim().is_empty() && !line.starts_with('#'))
                     .par_bridge()
                     .for_each(|line| {

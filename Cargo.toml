@@ -17,11 +17,11 @@ indicatif="0.18"
 ragc-reader = { git = "https://github.com/AndreaGuarracino/ragc", branch = "tweaks" }
 
 #lib_wfa2 = { path = "/home/guarracino/Dropbox/git/lib_wfa2"}
-lib_wfa2 = { git = "https://github.com/AndreaGuarracino/lib_wfa2", rev = "82e145b222b3503069e54d275bdb272e6d2a96c9" }
+lib_wfa2 = { git = "https://github.com/AndreaGuarracino/lib_wfa2", rev = "0fe1ebfb7a364226f3d8d7b84b703611168435c6" }
 #tracepoints = { path = "/home/guarracino/git/tracepoints"}
-tracepoints = { git = "https://github.com/AndreaGuarracino/tracepoints", rev = "abce104c09cfe272be8211b006b6bf2f003d9ac7" }
+tracepoints = { git = "https://github.com/AndreaGuarracino/tracepoints", rev = "3d9eba70b098807f3a168771ef419e84a26b0b8f" }
 #tpa = { path = "/home/guarracino/git/tpa" }
-tpa = { git = "https://github.com/AndreaGuarracino/tpa", rev = "45cd9e3e1422304266e0b60a1826b6b94ab1e0c8" }
+tpa = { git = "https://github.com/AndreaGuarracino/tpa", rev = "000b14e8b5e64dd8a55a34d9ecbab59d0041c856" }
 
 [features]
 default = []
