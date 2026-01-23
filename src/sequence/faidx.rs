@@ -1,3 +1,5 @@
+use log::info;
+use rayon::prelude::*;
 use rust_htslib::faidx::Reader as FastaReader;
 use std::collections::HashMap;
 use std::fs;
@@ -11,39 +13,57 @@ pub struct FastaIndex {
 
 impl FastaIndex {
     pub fn build(fasta_files: &[String]) -> Result<Self, String> {
-        let mut fasta_paths = Vec::new();
+        if fasta_files.is_empty() {
+            return Ok(Self {
+                fasta_paths: Vec::new(),
+                sequence_to_file: HashMap::new(),
+            });
+        }
+
+        // Phase 1: Parallel - check/create .fai files and read their contents
+        let fai_results: Vec<_> = fasta_files
+            .par_iter()
+            .enumerate()
+            .map(|(idx, entry)| -> Result<(usize, PathBuf, String), String> {
+                let path = PathBuf::from(entry);
+                if !path.exists() {
+                    return Err(format!("FASTA file '{entry}' not found"));
+                }
+
+                let path_str = path
+                    .to_str()
+                    .ok_or_else(|| format!("FASTA path contains invalid UTF-8: {entry}"))?;
+                let fai_path = PathBuf::from(format!("{path_str}.fai"));
+
+                // Create .fai if missing
+                if !fai_path.exists() {
+                    info!("Creating FASTA index for '{}'...", entry);
+                    if let Err(e) = FastaReader::from_path(&path) {
+                        return Err(format!("Failed to create FASTA index for '{entry}': {e}"));
+                    }
+                }
+
+                // Read .fai content
+                let fai_content = fs::read_to_string(&fai_path).map_err(|e| {
+                    format!("Failed to read FASTA index '{}': {}", fai_path.display(), e)
+                })?;
+
+                Ok((idx, path, fai_content))
+            })
+            .collect::<Result<Vec<_>, String>>()?;
+
+        // Phase 2: Sequential - build the HashMap (avoids shared mutable state)
+        let mut fasta_paths = vec![PathBuf::new(); fasta_files.len()];
         let mut sequence_to_file = HashMap::new();
 
-        for (idx, entry) in fasta_files.iter().enumerate() {
-            let path = PathBuf::from(entry);
-            if !path.exists() {
-                return Err(format!("FASTA file '{entry}' not found"));
-            }
-
-            let path_str = path
-                .to_str()
-                .ok_or_else(|| format!("FASTA path contains invalid UTF-8: {entry}"))?
-                .to_string();
-            let fai_path = PathBuf::from(format!("{path_str}.fai"));
-
-            if !fai_path.exists() {
-                if let Err(e) = FastaReader::from_path(&path) {
-                    return Err(format!("Failed to prepare FASTA index for '{entry}': {e}"));
-                }
-            }
-
-            let fai_content = fs::read_to_string(&fai_path).map_err(|e| {
-                format!("Failed to read FASTA index '{}': {}", fai_path.display(), e)
-            })?;
-
+        for (idx, path, fai_content) in fai_results {
             for line in fai_content.lines() {
                 let fields: Vec<&str> = line.split('\t').collect();
                 if let Some(seq_name) = fields.first().map(|s| s.trim()).filter(|s| !s.is_empty()) {
                     sequence_to_file.entry(seq_name.to_string()).or_insert(idx);
                 }
             }
-
-            fasta_paths.push(path);
+            fasta_paths[idx] = path;
         }
 
         Ok(Self {
