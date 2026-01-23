@@ -1,10 +1,10 @@
-use ragc_reader::{Decompressor, DecompressorConfig};
+use ragc_core::{Decompressor, DecompressorConfig};
 use rayon::prelude::*;
 use std::collections::HashMap;
 use std::fmt;
 use std::sync::{Arc, Mutex};
 
-// Structure to manage AGC archives using ragc-reader
+// Structure to manage AGC archives using ragc-core
 pub struct AgcIndex {
     decompressors: Arc<Mutex<Vec<Decompressor>>>,
     pub agc_paths: Vec<String>,
@@ -54,7 +54,6 @@ impl AgcIndex {
                     > {
                         let config = DecompressorConfig {
                             verbosity: 0,
-                            max_segment_cache_entries: 1, // ~1MB cache (16 x 60KB segments)
                         };
                         let mut decompressor = Decompressor::open(agc_path, config)
                             .map_err(|e| format!("Failed to open AGC file: {agc_path}: {e}"))?;
