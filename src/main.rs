@@ -13,7 +13,9 @@ use rayon::prelude::*;
 use std::fmt;
 use std::fs::File;
 use std::io::{self, BufRead, BufReader, BufWriter, Write};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
+use std::time::Instant;
 // tpa: CIGAR stats, formatting, and tracepoints → CIGAR reconstruction
 #[cfg(debug_assertions)]
 use tpa::calculate_alignment_score;
@@ -108,6 +110,10 @@ struct CommonOpts {
     /// Verbosity level (0 = error, 1 = info, 2 = debug)
     #[arg(short, long, default_value = "1")]
     verbose: u8,
+
+    /// Emit benchmark timing and peak RSS to stderr
+    #[arg(long)]
+    benchmark: bool,
 }
 
 #[derive(Parser)]
@@ -270,6 +276,10 @@ enum Args {
         /// Verbosity level (0 = error, 1 = info, 2 = debug)
         #[arg(short, long, default_value = "1")]
         verbose: u8,
+
+        /// Emit benchmark timing and peak RSS to stderr
+        #[arg(long)]
+        benchmark: bool,
     },
     /// Decompress binary TPA to text PAF (binary TPA → text PAF)
     Decompress {
@@ -304,6 +314,10 @@ enum Args {
         /// Verbosity level (0 = error, 1 = info, 2 = debug)
         #[arg(short, long, default_value = "1")]
         verbose: u8,
+
+        /// Emit benchmark timing and peak RSS to stderr
+        #[arg(long)]
+        benchmark: bool,
     },
     /// Run debugging mode (only available in debug builds)
     #[cfg(debug_assertions)]
@@ -344,6 +358,7 @@ impl fmt::Debug for CommonOpts {
             .field("paf", &self.paf)
             .field("threads", &self.threads)
             .field("verbose", &self.verbose)
+            .field("benchmark", &self.benchmark)
             .finish()
     }
 }
@@ -411,6 +426,7 @@ impl fmt::Debug for Args {
                 all_records,
                 threads,
                 verbose,
+                benchmark,
             } => f
                 .debug_struct("Args::Compress")
                 .field("input", input)
@@ -424,6 +440,7 @@ impl fmt::Debug for Args {
                 .field("all_records", all_records)
                 .field("threads", threads)
                 .field("verbose", verbose)
+                .field("benchmark", benchmark)
                 .finish(),
             Args::Decompress {
                 input,
@@ -434,6 +451,7 @@ impl fmt::Debug for Args {
                 keep_old_stats,
                 memory_mode,
                 verbose,
+                benchmark,
             } => f
                 .debug_struct("Args::Decompress")
                 .field("input", input)
@@ -444,6 +462,7 @@ impl fmt::Debug for Args {
                 .field("keep_old_stats", keep_old_stats)
                 .field("memory_mode", memory_mode)
                 .field("verbose", verbose)
+                .field("benchmark", benchmark)
                 .finish(),
             #[cfg(debug_assertions)]
             Args::Debug {
@@ -466,6 +485,36 @@ impl fmt::Debug for Args {
                 .finish(),
         }
     }
+}
+
+/// Read peak RSS (VmHWM) from /proc/self/status. Linux only.
+fn read_peak_rss_kb() -> Option<u64> {
+    let status = std::fs::read_to_string("/proc/self/status").ok()?;
+    for line in status.lines() {
+        if let Some(rest) = line.strip_prefix("VmHWM:") {
+            let trimmed = rest.trim().strip_suffix("kB")?.trim();
+            return trimmed.parse().ok();
+        }
+    }
+    None
+}
+
+/// Print a CIGZIP_BENCH line to stderr.
+fn print_benchmark(phase: &str, elapsed: std::time::Duration, threads: usize, records: Option<u64>) {
+    let rss_part = read_peak_rss_kb()
+        .map(|kb| format!("\tpeak_rss_kb={}", kb))
+        .unwrap_or_default();
+    let records_part = records
+        .map(|r| format!("\trecords={}", r))
+        .unwrap_or_default();
+    eprintln!(
+        "CIGZIP_BENCH\tphase={}\ttime_sec={:.6}\tthreads={}{}{}",
+        phase,
+        elapsed.as_secs_f64(),
+        threads,
+        rss_part,
+        records_part,
+    );
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -534,6 +583,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
             let paf_reader = get_paf_reader(&common.paf)?;
 
+            let bench = common.benchmark;
+            let threads = common.threads;
+            let record_count = AtomicU64::new(0);
+            let start = if bench { Some(Instant::now()) } else { None };
+
             paf_reader
                 .lines()
                 .map_while(Result::ok)
@@ -549,7 +603,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         &writer,
                         minimal,
                     );
+                    if bench {
+                        record_count.fetch_add(1, Ordering::Relaxed);
+                    }
                 });
+
+            if let Some(t) = start {
+                print_benchmark("encode", t.elapsed(), threads, Some(record_count.load(Ordering::Relaxed)));
+            }
 
             // Flush the writer
             writer.lock().unwrap().flush()?;
@@ -633,6 +694,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 }
             };
 
+            let bench = common.benchmark;
+            let threads = common.threads;
+            let index_start = if bench { Some(Instant::now()) } else { None };
+
             let sequence_index = match SequenceIndex::build(&sequence_paths) {
                 Ok(index) => index,
                 Err(msg) => {
@@ -640,6 +705,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     std::process::exit(1);
                 }
             };
+
+            if let Some(t) = index_start {
+                print_benchmark("decode_index_build", t.elapsed(), threads, None);
+            }
 
             let penalties_value = match distance {
                 DistanceChoice::Edit => None,
@@ -706,6 +775,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 };
 
                 let memory_mode_wfa2 = memory_mode.to_lib_wfa2();
+                let record_count = AtomicU64::new(0);
+                let decode_start = if bench { Some(Instant::now()) } else { None };
 
                 reader
                     .iter_records()?
@@ -726,12 +797,21 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 keep_old_stats,
                                 aligner,
                             );
+                            if bench {
+                                record_count.fetch_add(1, Ordering::Relaxed);
+                            }
                         },
                     );
+
+                if let Some(t) = decode_start {
+                    print_benchmark("decode", t.elapsed(), threads, Some(record_count.load(Ordering::Relaxed)));
+                }
             } else {
                 // Read from text PAF format using streaming parallelization
                 let paf_reader = get_paf_reader(&common.paf)?;
                 let memory_mode_wfa2 = memory_mode.to_lib_wfa2();
+                let record_count = AtomicU64::new(0);
+                let decode_start = if bench { Some(Instant::now()) } else { None };
 
                 paf_reader
                     .lines()
@@ -754,8 +834,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 keep_old_stats,
                                 aligner,
                             );
+                            if bench {
+                                record_count.fetch_add(1, Ordering::Relaxed);
+                            }
                         },
                     );
+
+                if let Some(t) = decode_start {
+                    print_benchmark("decode", t.elapsed(), threads, Some(record_count.load(Ordering::Relaxed)));
+                }
             }
         }
         Args::Compress {
@@ -770,6 +857,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             all_records,
             threads,
             verbose,
+            benchmark,
         } => {
             setup_logger(verbose);
 
@@ -908,9 +996,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 cfg
             };
 
+            let compress_start = if benchmark { Some(Instant::now()) } else { None };
+
             if let Err(e) = tpa::paf_to_tpa(&input, &output, config) {
                 error!("Compression failed: {}", e);
                 std::process::exit(1);
+            }
+
+            if let Some(t) = compress_start {
+                print_benchmark("compress", t.elapsed(), threads, None);
             }
 
             info!("Compressed {} to {}", input, output);
@@ -924,6 +1018,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             keep_old_stats,
             memory_mode,
             verbose,
+            benchmark,
         } => {
             setup_logger(verbose);
 
@@ -944,6 +1039,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     }
                 };
 
+                let index_start = if benchmark { Some(Instant::now()) } else { None };
+
                 let sequence_index = match SequenceIndex::build(&sequence_paths) {
                     Ok(index) => Arc::new(index),
                     Err(msg) => {
@@ -951,6 +1048,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         std::process::exit(1);
                     }
                 };
+
+                // Decompress doesn't have a threads field; use rayon's default (num CPUs)
+                let num_threads = rayon::current_num_threads();
+
+                if let Some(t) = index_start {
+                    print_benchmark("decompress_decode_index_build", t.elapsed(), num_threads, None);
+                }
 
                 // Read binary PAF
                 let mut reader = match tpa::TpaReader::new(&input) {
@@ -976,6 +1080,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 let is_fastga = matches!(tp_type, TracepointType::Fastga);
                 let trace_spacing = if is_fastga { max_complexity } else { 0 };
                 let memory_mode_wfa2 = memory_mode.to_lib_wfa2();
+                let record_count = AtomicU64::new(0);
+                let decode_start = if benchmark { Some(Instant::now()) } else { None };
 
                 reader
                     .iter_records()?
@@ -996,8 +1102,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 keep_old_stats,
                                 aligner,
                             );
+                            if benchmark {
+                                record_count.fetch_add(1, Ordering::Relaxed);
+                            }
                         },
                     );
+
+                if let Some(t) = decode_start {
+                    print_benchmark("decompress_decode", t.elapsed(), num_threads, Some(record_count.load(Ordering::Relaxed)));
+                }
 
                 if output == "-" {
                     info!("Decompressed and decoded {} to stdout", input);
@@ -1008,9 +1121,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 // Decompress only: binary → tracepoints
                 info!("Decompressing binary PAF to text format with tracepoints...");
 
+                let decompress_start = if benchmark { Some(Instant::now()) } else { None };
+
                 if let Err(e) = tpa::tpa_to_paf(&input, &output) {
                     error!("Decompression failed: {}", e);
                     std::process::exit(1);
+                }
+
+                if let Some(t) = decompress_start {
+                    print_benchmark("decompress", t.elapsed(), rayon::current_num_threads(), None);
                 }
 
                 if output == "-" {
