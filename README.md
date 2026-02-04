@@ -106,7 +106,9 @@ cat input.tp.paf | cigzip compress -i - -o output.tpa
 **Options:**
 - `-i, --input FILE`: Input PAF file with `tp:Z:` tags (or `-` for stdin)
 - `-o, --output FILE`: Output binary file
-- `--strategy STRATEGY`: Compression strategy - `varint` (default), `huffman`
+- `--strategy STRATEGY`: Compression strategy - `automatic` (default), `benchmark`, `raw`, `zigzag-delta`, `2d-delta`, etc.
+  - `automatic`: Selects encoding per stream based on statistical properties of the tracepoint values for each tracepoint type and complexity metric
+  - `benchmark`: Tests all encoding strategies on a sample of records (default 10,000), picks the smallest; slower but optimal for the specific dataset
 - `--verbose N`: Verbosity level - 0 (error), 1 (info, default), 2 (debug)
 
 ### decompress - Binary to PAF

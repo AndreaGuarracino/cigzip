@@ -251,7 +251,7 @@ enum Args {
         #[arg(long)]
         penalties: Option<String>,
 
-        /// Compression strategy (automatic, raw, zigzag-delta, 2d-delta, etc.)
+        /// Compression strategy (automatic, benchmark, raw, zigzag-delta, 2d-delta, etc.)
         #[arg(
             long = "strategy",
             default_value = "automatic",
