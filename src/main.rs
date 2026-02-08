@@ -226,6 +226,7 @@ enum Args {
         /// Tracepoint type (standard, mixed, variable, fastga)
         #[arg(
             long = "type",
+            default_value = "standard",
             value_parser = TracepointType::from_str,
             value_name = "TYPE"
         )]
@@ -233,7 +234,7 @@ enum Args {
 
         /// Maximum complexity (max_diff for standard/mixed/variable; trace_spacing for fastga)
         #[arg(long = "max-complexity")]
-        max_complexity: u32,
+        max_complexity: Option<u32>,
 
         /// Complexity metric (edit-distance, diagonal-distance). Not used with fastga
         #[arg(
@@ -244,7 +245,7 @@ enum Args {
         complexity_metric: Option<ComplexityMetric>,
 
         /// Distance metric (edit, gap-affine, gap-affine2p)
-        #[arg(long = "distance")]
+        #[arg(long = "distance", default_value_t = DistanceChoice::Edit)]
         distance: DistanceChoice,
 
         /// Gap penalties for gap-affine distances (ignored with edit)
@@ -778,6 +779,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 .build_global();
 
             let is_fastga = matches!(tp_type, TracepointType::Fastga);
+            let max_complexity = max_complexity.unwrap_or(if is_fastga { 100 } else { 32 });
 
             // Validate complexity_metric usage
             if is_fastga && complexity_metric.is_some() {
@@ -786,20 +788,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 std::process::exit(1);
             }
 
-            // Require complexity_metric for non-fastga types
+            // Default to EditDistance for non-fastga if not specified
             let complexity_metric = if is_fastga {
                 ComplexityMetric::EditDistance // Dummy value, not used
             } else {
-                match complexity_metric {
-                    Some(m) => m,
-                    None => {
-                        error!(
-                            "--complexity-metric is required for {} type",
-                            tp_type.as_str()
-                        );
-                        std::process::exit(1);
-                    }
-                }
+                complexity_metric.unwrap_or(ComplexityMetric::EditDistance)
             };
 
             if all_records {
