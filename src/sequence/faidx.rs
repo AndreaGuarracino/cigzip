@@ -2,13 +2,31 @@ use log::info;
 use rayon::prelude::*;
 use rust_htslib::faidx::Reader as FastaReader;
 use std::collections::HashMap;
+use std::fmt;
 use std::fs;
 use std::path::PathBuf;
+use std::sync::Mutex;
 
-#[derive(Debug)]
+/// Wrapper to mark FastaReader as Send.
+/// Safety: each thread only accesses its own slot via per-thread sharding,
+/// so the htslib faidx handle is never shared across threads.
+struct SendFastaReader(FastaReader);
+unsafe impl Send for SendFastaReader {}
+
 pub struct FastaIndex {
     fasta_paths: Vec<PathBuf>,
     sequence_to_file: HashMap<String, usize>,
+    /// Per-thread cached FASTA readers. Indexed by rayon::current_thread_index().
+    thread_readers: Vec<Mutex<Option<HashMap<usize, SendFastaReader>>>>,
+}
+
+impl fmt::Debug for FastaIndex {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("FastaIndex")
+            .field("fasta_paths", &self.fasta_paths)
+            .field("num_thread_slots", &self.thread_readers.len())
+            .finish_non_exhaustive()
+    }
 }
 
 impl FastaIndex {
@@ -17,6 +35,7 @@ impl FastaIndex {
             return Ok(Self {
                 fasta_paths: Vec::new(),
                 sequence_to_file: HashMap::new(),
+                thread_readers: Vec::new(),
             });
         }
 
@@ -66,9 +85,12 @@ impl FastaIndex {
             fasta_paths[idx] = path;
         }
 
+        let num_slots = rayon::current_num_threads() + 1;
+
         Ok(Self {
             fasta_paths,
             sequence_to_file,
+            thread_readers: (0..num_slots).map(|_| Mutex::new(None)).collect(),
         })
     }
 
@@ -88,10 +110,17 @@ impl FastaIndex {
             .ok_or_else(|| format!("Sequence '{seq_name}' not found in supplied FASTA files"))?;
 
         let fasta_path = &self.fasta_paths[*fasta_idx];
-        let reader = FastaReader::from_path(fasta_path)
-            .map_err(|e| format!("Failed to open FASTA '{}': {}", fasta_path.display(), e))?;
 
-        let raw_seq = reader.fetch_seq(seq_name, start, end - 1).map_err(|e| {
+        let thread_idx = rayon::current_thread_index()
+            .unwrap_or(self.thread_readers.len() - 1);
+        let mut slot = self.thread_readers[thread_idx].lock().unwrap();
+        let readers = slot.get_or_insert_with(HashMap::new);
+        let wrapper = readers.entry(*fasta_idx).or_insert_with(|| {
+            SendFastaReader(FastaReader::from_path(fasta_path)
+                .unwrap_or_else(|e| panic!("Failed to open FASTA '{}': {}", fasta_path.display(), e)))
+        });
+
+        let raw_seq = wrapper.0.fetch_seq(seq_name, start, end - 1).map_err(|e| {
             format!(
                 "Failed to fetch {seq_name}:{start}-{end} from '{}': {e}",
                 fasta_path.display()
