@@ -2,25 +2,24 @@ use ragc_core::{Decompressor, DecompressorConfig};
 use rayon::prelude::*;
 use std::collections::HashMap;
 use std::fmt;
-use std::sync::{Arc, Mutex};
+use std::sync::Mutex;
 
 // Structure to manage AGC archives using ragc-core
 pub struct AgcIndex {
-    decompressors: Arc<Mutex<Vec<Decompressor>>>,
     pub agc_paths: Vec<String>,
     sample_contig_to_agc: HashMap<String, usize>,
     // Precomputed mapping from contig name to (sample, full_contig_name, agc_idx)
     contig_to_sample_info: HashMap<String, (String, String, usize)>,
+    /// Per-thread decompressor pools. Indexed by rayon::current_thread_index().
+    /// Each slot is lazily initialized on first access by opening the AGC files.
+    thread_decompressors: Vec<Mutex<Option<Vec<Decompressor>>>>,
 }
 
 impl fmt::Debug for AgcIndex {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("AgcIndex")
             .field("agc_paths", &self.agc_paths)
-            .field(
-                "num_decompressors",
-                &self.decompressors.lock().unwrap().len(),
-            )
+            .field("num_thread_slots", &self.thread_decompressors.len())
             .finish_non_exhaustive()
     }
 }
@@ -28,10 +27,10 @@ impl fmt::Debug for AgcIndex {
 impl AgcIndex {
     fn new() -> Self {
         AgcIndex {
-            decompressors: Arc::new(Mutex::new(Vec::new())),
             agc_paths: Vec::new(),
             sample_contig_to_agc: HashMap::default(),
             contig_to_sample_info: HashMap::default(),
+            thread_decompressors: Vec::new(),
         }
     }
 
@@ -126,8 +125,13 @@ impl AgcIndex {
                 }
             }
 
-            index.decompressors.lock().unwrap().push(decompressor);
+            // decompressor used only for metadata extraction; dropped here
+            drop(decompressor);
         }
+
+        // Initialize per-thread decompressor slots (+1 for main-thread fallback)
+        let num_slots = rayon::current_num_threads() + 1;
+        index.thread_decompressors = (0..num_slots).map(|_| Mutex::new(None)).collect();
 
         // Shrink to fit after building
         index.sample_contig_to_agc.shrink_to_fit();
@@ -168,9 +172,20 @@ impl AgcIndex {
         let agc_idx =
             agc_idx.ok_or_else(|| format!("Sequence '{seq_name}' not found in any AGC file"))?;
 
-        // ragc uses 0-based coordinates with exclusive end
-        let mut decompressors = self.decompressors.lock().unwrap();
-        let sequence = decompressors[agc_idx]
+        // Use per-thread decompressors to avoid mutex contention
+        let thread_idx = rayon::current_thread_index()
+            .unwrap_or(self.thread_decompressors.len() - 1);
+        let mut slot = self.thread_decompressors[thread_idx].lock().unwrap();
+        let decomps = slot.get_or_insert_with(|| {
+            self.agc_paths
+                .iter()
+                .map(|path| {
+                    Decompressor::open(path, DecompressorConfig { verbosity: 0 })
+                        .unwrap_or_else(|e| panic!("Failed to open AGC '{path}' for thread: {e}"))
+                })
+                .collect()
+        });
+        let sequence = decomps[agc_idx]
             .get_contig_range(&sample, &contig, start, end)
             .map_err(|e| {
                 format!("Failed to fetch sequence '{contig}@{sample}:{start}:{end}': {e}")
