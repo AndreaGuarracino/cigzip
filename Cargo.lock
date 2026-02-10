@@ -662,6 +662,7 @@ dependencies = [
  "cc",
  "fs-utils",
  "glob",
+ "libdeflate-sys",
  "libz-sys",
 ]
 
@@ -878,6 +879,15 @@ name = "libc"
 version = "0.2.180"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "bcc35a38544a891a5f7c865aca548a982ccb3b8650a5b06d0fd33a10283c56fc"
+
+[[package]]
+name = "libdeflate-sys"
+version = "1.25.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "00a79ad60585106c017426fa56ee413b171d382034b48600ba43506d620edca2"
+dependencies = [
+ "cc",
+]
 
 [[package]]
 name = "libz-sys"
