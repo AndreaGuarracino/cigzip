@@ -7,17 +7,11 @@ use std::fs;
 use std::path::PathBuf;
 use std::sync::Mutex;
 
-/// Wrapper to mark FastaReader as Send.
-/// Safety: each thread only accesses its own slot via per-thread sharding,
-/// so the htslib faidx handle is never shared across threads.
-struct SendFastaReader(FastaReader);
-unsafe impl Send for SendFastaReader {}
-
 pub struct FastaIndex {
     fasta_paths: Vec<PathBuf>,
     sequence_to_file: HashMap<String, usize>,
     /// Per-thread cached FASTA readers. Indexed by rayon::current_thread_index().
-    thread_readers: Vec<Mutex<Option<HashMap<usize, SendFastaReader>>>>,
+    thread_readers: Vec<Mutex<Option<HashMap<usize, FastaReader>>>>,
 }
 
 impl fmt::Debug for FastaIndex {
@@ -115,19 +109,17 @@ impl FastaIndex {
             .unwrap_or(self.thread_readers.len() - 1);
         let mut slot = self.thread_readers[thread_idx].lock().unwrap();
         let readers = slot.get_or_insert_with(HashMap::new);
-        let wrapper = readers.entry(*fasta_idx).or_insert_with(|| {
-            SendFastaReader(FastaReader::from_path(fasta_path)
-                .unwrap_or_else(|e| panic!("Failed to open FASTA '{}': {}", fasta_path.display(), e)))
+        let reader = readers.entry(*fasta_idx).or_insert_with(|| {
+            FastaReader::from_path(fasta_path)
+                .unwrap_or_else(|e| panic!("Failed to open FASTA '{}': {}", fasta_path.display(), e))
         });
 
-        let raw_seq = wrapper.0.fetch_seq(seq_name, start, end - 1).map_err(|e| {
+        let mut seq_vec = reader.fetch_seq(seq_name, start, end - 1).map_err(|e| {
             format!(
                 "Failed to fetch {seq_name}:{start}-{end} from '{}': {e}",
                 fasta_path.display()
             )
         })?;
-        let mut seq_vec = raw_seq.to_vec();
-        unsafe { libc::free(raw_seq.as_ptr() as *mut std::ffi::c_void) };
         seq_vec.iter_mut().for_each(|b| *b = b.to_ascii_uppercase());
         Ok(seq_vec)
     }
