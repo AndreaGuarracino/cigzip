@@ -486,6 +486,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         } => {
             setup_logger(common.verbose);
 
+            // Set the thread pool size before any rayon use
+            rayon::ThreadPoolBuilder::new()
+                .num_threads(common.threads)
+                .build_global()?;
+
             let is_fastga = matches!(tp_type, TracepointType::Fastga);
             let max_complexity = max_complexity.unwrap_or(if is_fastga { 100 } else { 32 });
 
@@ -520,10 +525,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     complexity_metric
                 );
             }
-
-            let _ = rayon::ThreadPoolBuilder::new()
-                .num_threads(common.threads)
-                .build_global();
 
             // Create output writer
             let writer: Arc<Mutex<Box<dyn Write + Send>>> = if let Some(output_path) = output {
@@ -570,6 +571,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             memory_mode,
         } => {
             setup_logger(common.verbose);
+
+            // Set the thread pool size before any rayon use
+            rayon::ThreadPoolBuilder::new()
+                .num_threads(common.threads)
+                .build_global()?;
 
             // Detect input format
             let is_binary = tpa::is_tpa_file(&common.paf).unwrap_or(false);
@@ -679,11 +685,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 heuristic_max_complexity.map(|mc| format!(", max-complexity={}", mc)).unwrap_or_default()
             );
 
-            // Set the thread pool size (ignore error if already initialized)
-            let _ = rayon::ThreadPoolBuilder::new()
-                .num_threads(common.threads)
-                .build_global();
-
             // Validate and apply conditional defaults
             let trace_spacing = if is_fastga {
                 trace_spacing.unwrap_or(100)
@@ -774,9 +775,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         } => {
             setup_logger(verbose);
 
-            let _ = rayon::ThreadPoolBuilder::new()
+            // Set the thread pool size before any rayon use
+            rayon::ThreadPoolBuilder::new()
                 .num_threads(threads)
-                .build_global();
+                .build_global()?;
 
             let is_fastga = matches!(tp_type, TracepointType::Fastga);
             let max_complexity = max_complexity.unwrap_or(if is_fastga { 100 } else { 32 });
@@ -1024,6 +1026,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             verbose,
         } => {
             setup_logger(verbose);
+
+            // Set the thread pool size before any rayon use
+            rayon::ThreadPoolBuilder::new()
+                .num_threads(threads)
+                .build_global()?;
+
             info!("Debugging");
 
             let (mismatch, gap_open1, gap_ext1, gap_open2, gap_ext2) = parse_penalties(&penalties)?;
@@ -1094,11 +1102,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
                 // Open the PAF file (or use stdin if "-" is provided).
                 let paf_reader = get_paf_reader(&paf)?;
-
-                // Set the thread pool size (ignore error if already initialized)
-                let _ = rayon::ThreadPoolBuilder::new()
-                    .num_threads(threads)
-                    .build_global();
 
                 // Process using streaming parallelization
                 paf_reader
