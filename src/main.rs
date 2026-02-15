@@ -201,11 +201,11 @@ enum Args {
         #[arg(long)]
         penalties: Option<String>,
 
-        /// Use static band heuristic for realignment
-        #[arg(long)]
-        heuristic: bool,
+        /// Disable banded alignment (banded is on by default)
+        #[arg(long = "no-banded")]
+        no_banded: bool,
 
-        /// Maximum complexity (required with --heuristic)
+        /// Maximum complexity (required with banded for non-fastga types)
         #[arg(long = "max-complexity")]
         max_complexity: Option<u32>,
 
@@ -382,7 +382,7 @@ impl fmt::Debug for Args {
                 trace_spacing,
                 distance,
                 penalties,
-                heuristic,
+                no_banded,
                 max_complexity,
                 memory_mode,
             } => f
@@ -396,7 +396,7 @@ impl fmt::Debug for Args {
                 .field("trace_spacing", trace_spacing)
                 .field("distance", distance)
                 .field("penalties", penalties)
-                .field("heuristic", heuristic)
+                .field("banded", &!no_banded)
                 .field("max_complexity", max_complexity)
                 .field("memory_mode", memory_mode)
                 .finish(),
@@ -566,11 +566,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             distance,
             complexity_metric,
             max_complexity,
-            heuristic,
+            no_banded,
             keep_old_stats,
             memory_mode,
         } => {
             setup_logger(common.verbose);
+
+            let banded = !no_banded;
 
             // Set the thread pool size before any rayon use
             rayon::ThreadPoolBuilder::new()
@@ -593,20 +595,20 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             // Default to EditDistance for non-fastga if not specified
             let complexity_metric = complexity_metric.unwrap_or(ComplexityMetric::EditDistance);
 
-            if heuristic && is_fastga {
-                error!("--heuristic cannot be used with --type fastga");
-                std::process::exit(1);
-            }
-
-            let heuristic_max_complexity = if heuristic {
-                Some(max_complexity.unwrap_or_else(|| {
-                    error!("--heuristic requires specifying --max-complexity");
-                    std::process::exit(1);
-                }))
+            let banded_max_complexity = if banded {
+                if is_fastga {
+                    // FastGA uses per-segment edit distance for banding; no global max-complexity needed
+                    Some(0)
+                } else {
+                    Some(max_complexity.unwrap_or_else(|| {
+                        error!("Banded alignment requires specifying --max-complexity for non-fastga types");
+                        std::process::exit(1);
+                    }))
+                }
             } else {
                 if let Some(value) = max_complexity {
                     warn!(
-                        "Ignoring --max-complexity={} because --heuristic was not requested",
+                        "Ignoring --max-complexity={} because --no-banded was requested",
                         value
                     );
                 }
@@ -676,13 +678,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             let penalties_summary = penalties_value.as_deref().unwrap_or("n/a");
 
             info!(
-                "Converting {} tracepoints to CIGAR (complexity-metric={}, distance={}, penalties={}, heuristic={}{})",
+                "Converting {} tracepoints to CIGAR (complexity-metric={}, distance={}, penalties={}, banded={}{})",
                 tp_type.as_str(),
                 complexity_metric,
                 distance,
                 penalties_summary,
-                if heuristic { "enabled" } else { "disabled" },
-                heuristic_max_complexity.map(|mc| format!(", max-complexity={}", mc)).unwrap_or_default()
+                if banded { "enabled" } else { "disabled" },
+                banded_max_complexity.map(|mc| format!(", max-complexity={}", mc)).unwrap_or_default()
             );
 
             // Validate and apply conditional defaults
@@ -723,8 +725,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 is_fastga,
                                 trace_spacing,
                                 &complexity_metric,
-                                heuristic,
-                                heuristic_max_complexity,
+                                banded,
+                                banded_max_complexity,
                                 keep_old_stats,
                                 aligner,
                             );
@@ -751,8 +753,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 is_fastga,
                                 trace_spacing,
                                 &complexity_metric,
-                                heuristic,
-                                heuristic_max_complexity,
+                                banded,
+                                banded_max_complexity,
                                 keep_old_stats,
                                 aligner,
                             );
@@ -986,8 +988,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 is_fastga,
                                 trace_spacing,
                                 &complexity_metric,
-                                false, // heuristic
-                                None,  // heuristic_max_complexity
+                                false, // banded
+                                None,  // banded_max_complexity
                                 keep_old_stats,
                                 aligner,
                             );
@@ -2095,8 +2097,8 @@ fn process_decompress_line(
     fastga: bool,
     trace_spacing: u32,
     complexity_metric: &ComplexityMetric,
-    heuristic: bool,
-    heuristic_max_complexity: Option<u32>,
+    banded: bool,
+    banded_max_complexity: Option<u32>,
     keep_old_stats: bool,
     aligner: &mut lib_wfa2::affine_wavefront::AffineWavefronts,
 ) {
@@ -2227,8 +2229,8 @@ fn process_decompress_line(
         (0, 0, false)
     };
 
-    let max_value = if heuristic {
-        Some(heuristic_max_complexity.expect("missing max-complexity with heuristic"))
+    let max_value = if banded {
+        Some(banded_max_complexity.expect("missing max-complexity with banded"))
     } else {
         None
     };
@@ -2318,8 +2320,8 @@ fn process_decompress_record(
     fastga: bool,
     trace_spacing: u32,
     complexity_metric: &ComplexityMetric,
-    heuristic: bool,
-    heuristic_max_complexity: Option<u32>,
+    banded: bool,
+    banded_max_complexity: Option<u32>,
     keep_old_stats: bool,
     aligner: &mut lib_wfa2::affine_wavefront::AffineWavefronts,
 ) {
@@ -2394,8 +2396,8 @@ fn process_decompress_record(
         (0, 0, false)
     };
 
-    let max_value = if heuristic {
-        Some(heuristic_max_complexity.expect("missing max-complexity with heuristic"))
+    let max_value = if banded {
+        Some(banded_max_complexity.expect("missing max-complexity with banded"))
     } else {
         None
     };
