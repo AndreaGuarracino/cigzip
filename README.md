@@ -27,22 +27,22 @@ cigzip decompress -i output.tpa -o output.paf
 # Text output (default)
 cigzip encode --paf input.paf > output.tp.paf
 
-# Binary output
-cigzip encode --paf input.paf --type standard \
-  --output-format binary --output-file output.tpa --strategy varint
+# With specific tracepoint type and output file
+cigzip encode --paf input.paf --type fastga -o output.tp.paf
+
+# Minimal output (skip optional gi/bi/sc fields)
+cigzip encode --paf input.paf --minimal > output.tp.paf
 ```
 
 **Options:**
 - `--paf FILE`: Input PAF file with CIGAR strings
-- `--type TYPE`: Tracepoint type - `standard` (default), `mixed`, `variable`, `fastga`
+- `--type TYPE`: Tracepoint type - `standard` (default), `fastga`
 - `--complexity-metric METRIC`: `edit-distance` (default), `diagonal-distance`
 - `--max-complexity N`: Segment size limit (default: 32, fastga: 100)
-- `--output-format FORMAT`: `text` (stdout, default), `binary` (requires `--output-file`)
-- `--output-file FILE`: Output file path (required for binary format)
-- `--strategy STRATEGY`: Compression strategy for binary - `varint` (default), `huffman`
+- `-o, --output FILE`: Output file (use `-` for stdout)
 - `--distance DIST`: Distance metric for alignment - `edit` (default), `gap-affine`, `gap-affine-2p`
 - `--penalties VALUES`: Gap penalty values (format depends on distance)
-- `--heuristic`: Enable banded alignment (edit distance only, requires `--max-complexity`)
+- `--minimal`: Skip adding optional fields (gi/bi/sc)
 - `--threads N`: Parallel threads (default: 4)
 - `--verbose N`: Verbosity level - 0 (error), 1 (info, default), 2 (debug)
 
@@ -62,9 +62,9 @@ cigzip decode --paf input.tp.paf --sequence-list refs.txt > output.paf
 cigzip decode --paf input.tp.paf --sequence-files ref.fa \
   --distance gap-affine-2p --penalties 5,8,2,24,1 > output.paf
 
-# Banded alignment (faster)
+# Without banded alignment (slower)
 cigzip decode --paf input.tp.paf --sequence-files ref.fa \
-  --heuristic --max-complexity 100 > output.paf
+  --no-banded > output.paf
 ```
 
 **Sequence File Options:**
@@ -75,16 +75,17 @@ cigzip decode --paf input.tp.paf --sequence-files ref.fa \
 - `--sequence-list FILE`: File containing sequence paths (one per line)
 
 **Alignment Options:**
-- `--type TYPE`: Tracepoint type (must match encoding) - `standard` (default), `mixed`, `variable`, `fastga`
+- `--type TYPE`: Tracepoint type (must match encoding) - `standard` (default), `fastga`
 - `--complexity-metric METRIC`: `edit-distance` (default), `diagonal-distance`
 - `--distance DIST`: Distance metric - `edit` (default), `gap-affine`, `gap-affine-2p`
 - `--penalties VALUES`: Gap penalty values (default: 5,8,2,24,1)
-- `--heuristic`: Enable banded alignment (edit distance only, requires `--max-complexity`)
-- `--max-complexity N`: Maximum complexity for heuristic banding
+- `--no-banded`: Disable banded alignment (enabled by default)
+- `--max-complexity N`: Maximum complexity for banding (required for non-fastga types when decoding from text PAF)
 - `--trace-spacing N`: Trace spacing for fastga type (default: 100)
 
 **Other Options:**
-- `--keep-old-stats`: Preserve original gi/bi/sc as giold/biold/scold
+- `--keep-old-stats`: Preserve original gi/bi/sc/df fields as go/bo/so/do
+- `--memory-mode MODE`: WFA aligner memory mode - `high` (default), `medium`, `low`, `ultralow`
 - `--threads N`: Parallel threads (default: 4)
 - `--verbose N`: Verbosity level - 0 (error), 1 (info, default), 2 (debug)
 
@@ -121,11 +122,19 @@ cigzip decompress -i input.tpa -o output.tp.paf
 
 # To stdout
 cigzip decompress -i input.tpa -o -
+
+# Decompress and decode tracepoints to CIGAR in one step
+cigzip decompress -i input.tpa -o output.paf --decode --sequence-files ref.fa
 ```
 
 **Options:**
 - `-i, --input FILE`: Input binary PAF file
 - `-o, --output FILE`: Output file (or `-` for stdout)
+- `--decode`: Also decode tracepoints to CIGAR (requires `--sequence-files`)
+- `--sequence-files FILE...`: Reference sequences in FASTA or AGC format (required with `--decode`)
+- `--sequence-list FILE`: File listing FASTA paths (one per line)
+- `--keep-old-stats`: Preserve original gi/bi/sc/df fields as go/bo/so/do
+- `--memory-mode MODE`: WFA aligner memory mode - `high` (default), `medium`, `low`, `ultralow`
 - `--verbose N`: Verbosity level - 0 (error), 1 (info, default), 2 (debug)
 
 ## AGC Format Support
@@ -165,15 +174,10 @@ fn main() -> std::io::Result<()> {
         TracepointType::Standard(tps) => {
             println!("Standard tracepoints: {} items", tps.len());
         }
-        TracepointType::Mixed(items) => {
-            println!("Mixed tracepoints: {} items", items.len());
-        }
-        TracepointType::Variable(tps) => {
-            println!("Variable tracepoints: {} items", tps.len());
-        }
         TracepointType::Fastga(tps) => {
             println!("FastGA tracepoints: {} items", tps.len());
         }
+        _ => {}
     }
 
     // Sequential iteration

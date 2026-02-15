@@ -177,11 +177,11 @@ enum Args {
         )]
         complexity_metric: Option<ComplexityMetric>,
 
-        /// FASTA files containing sequences (repeatable)
-        #[arg(long = "sequence-files", value_name = "FASTA", num_args = 1..)]
+        /// Sequence files in FASTA or AGC format (repeatable)
+        #[arg(long = "sequence-files", value_name = "FILE", num_args = 1..)]
         sequence_files: Vec<String>,
 
-        /// File listing FASTA paths (one per line)
+        /// File listing sequence file paths (one per line)
         #[arg(long = "sequence-list", value_name = "FILE")]
         sequence_list: Option<String>,
 
@@ -286,11 +286,11 @@ enum Args {
         #[arg(long = "decode")]
         decode: bool,
 
-        /// FASTA files containing sequences (required with --decode)
-        #[arg(long = "sequence-files", value_name = "FASTA", num_args = 1.., required_if_eq("decode", "true"))]
+        /// Sequence files in FASTA or AGC format (required with --decode)
+        #[arg(long = "sequence-files", value_name = "FILE", num_args = 1.., required_if_eq("decode", "true"))]
         sequence_files: Vec<String>,
 
-        /// File listing FASTA paths (one per line)
+        /// File listing sequence file paths (one per line)
         #[arg(long = "sequence-list", value_name = "FILE")]
         sequence_list: Option<String>,
 
@@ -317,11 +317,11 @@ enum Args {
         #[arg(long = "threads", default_value_t = 4)]
         threads: usize,
 
-        /// FASTA files containing sequences referenced in the PAF (repeatable)
-        #[arg(long = "sequence-files", value_name = "FASTA", num_args = 1..)]
+        /// Sequence files in FASTA or AGC format (repeatable)
+        #[arg(long = "sequence-files", value_name = "FILE", num_args = 1..)]
         sequence_files: Vec<String>,
 
-        /// File listing FASTA paths (one per line)
+        /// File listing sequence file paths (one per line)
         #[arg(long = "sequence-list", value_name = "FILE")]
         sequence_list: Option<String>,
 
