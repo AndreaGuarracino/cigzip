@@ -46,9 +46,8 @@ impl ReaderCache {
             self.entries.remove(&lru_key);
         }
 
-        let reader = FastaReader::from_path(fasta_path).unwrap_or_else(|e| {
-            panic!("Failed to open FASTA '{}': {}", fasta_path.display(), e)
-        });
+        let reader = FastaReader::from_path(fasta_path)
+            .unwrap_or_else(|e| panic!("Failed to open FASTA '{}': {}", fasta_path.display(), e));
         self.entries.insert(fasta_idx, (reader, counter));
         &mut self.entries.get_mut(&fasta_idx).unwrap().0
     }
@@ -193,8 +192,7 @@ impl FastaIndex {
 
         let fasta_path = &self.fasta_paths[*fasta_idx];
 
-        let thread_idx = rayon::current_thread_index()
-            .unwrap_or(self.thread_readers.len() - 1);
+        let thread_idx = rayon::current_thread_index().unwrap_or(self.thread_readers.len() - 1);
         let mut slot = self.thread_readers[thread_idx].lock().unwrap();
         let cache = slot.get_or_insert_with(|| ReaderCache::new(self.readers_per_thread));
         let reader = cache.get_or_open(*fasta_idx, fasta_path);

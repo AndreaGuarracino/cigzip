@@ -51,9 +51,7 @@ impl AgcIndex {
                         (usize, String, Decompressor, Vec<(String, Vec<String>)>),
                         String,
                     > {
-                        let config = DecompressorConfig {
-                            verbosity: 0,
-                        };
+                        let config = DecompressorConfig { verbosity: 0 };
                         let mut decompressor = Decompressor::open(agc_path, config)
                             .map_err(|e| format!("Failed to open AGC file: {agc_path}: {e}"))?;
 
@@ -173,8 +171,8 @@ impl AgcIndex {
             agc_idx.ok_or_else(|| format!("Sequence '{seq_name}' not found in any AGC file"))?;
 
         // Use per-thread decompressors to avoid mutex contention
-        let thread_idx = rayon::current_thread_index()
-            .unwrap_or(self.thread_decompressors.len() - 1);
+        let thread_idx =
+            rayon::current_thread_index().unwrap_or(self.thread_decompressors.len() - 1);
         let mut slot = self.thread_decompressors[thread_idx].lock().unwrap();
         let decomps = slot.get_or_insert_with(|| {
             self.agc_paths
