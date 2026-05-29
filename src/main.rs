@@ -27,7 +27,8 @@ use tracepoints::{
 };
 use tracepoints::{
     cigar_to_mixed_tracepoints, cigar_to_tracepoints, cigar_to_tracepoints_fastga,
-    cigar_to_variable_tracepoints, ComplexityMetric, TracepointData, TracepointType,
+    cigar_to_tracepoints_fastga_no_diff, cigar_to_variable_tracepoints, ComplexityMetric,
+    TracepointData, TracepointType,
 };
 
 /// Distance model used for WFA re-alignment
@@ -491,11 +492,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 .num_threads(common.threads)
                 .build_global()?;
 
-            let is_fastga = matches!(tp_type, TracepointType::Fastga);
+            let is_fastga = matches!(tp_type, TracepointType::Fastga | TracepointType::FastgaNoDiff);
             let max_complexity = max_complexity.unwrap_or(if is_fastga { 100 } else { 32 });
 
             if is_fastga && complexity_metric.is_some() {
-                error!("--complexity-metric cannot be used with --type fastga");
+                error!("--complexity-metric cannot be used with --type fastga or fastga-no-diff");
                 error!("FastGA uses its own segmentation algorithm based on trace spacing");
                 std::process::exit(1);
             }
@@ -583,11 +584,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             let is_binary = tpa::is_tpa_file(&common.paf).unwrap_or(false);
 
             // Determine if we're using fastga based on tp_type
-            let is_fastga = matches!(tp_type, TracepointType::Fastga);
+            let is_fastga = matches!(tp_type, TracepointType::Fastga | TracepointType::FastgaNoDiff);
 
             // Validate that complexity-metric is not used with fastga
             if is_fastga && complexity_metric.is_some() {
-                error!("--complexity-metric cannot be used with --type fastga");
+                error!("--complexity-metric cannot be used with --type fastga or fastga-no-diff");
                 error!("FastGA uses its own segmentation algorithm based on trace spacing");
                 std::process::exit(1);
             }
@@ -596,13 +597,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             let complexity_metric = complexity_metric.unwrap_or(ComplexityMetric::EditDistance);
 
             let banded_max_complexity = if banded {
-                if is_fastga {
-                    // FastGA uses per-segment edit distance for banding; no global max-complexity needed
+                if matches!(tp_type, TracepointType::Fastga) {
+                    // Fastga stores exact segment lengths; per-segment edit distance drives banding
                     Some(0)
                 } else {
+                    // FastgaNoDiff and all standard types need a real band width
                     Some(max_complexity.unwrap_or_else(|| {
-                        error!("Banded alignment requires specifying --max-complexity for non-fastga types");
-                        std::process::exit(1);
+                        if matches!(tp_type, TracepointType::FastgaNoDiff) {
+                            100
+                        } else {
+                            error!("Banded alignment requires specifying --max-complexity for non-fastga types");
+                            std::process::exit(1);
+                        }
                     }))
                 }
             } else {
@@ -624,7 +630,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
 
             if is_fastga && penalties.is_some() && !penalties.as_deref().unwrap_or("").is_empty() {
-                error!("--penalties should only be used without --type fastga");
+                error!("--penalties should only be used without --type fastga or fastga-no-diff");
                 std::process::exit(1);
             }
 
@@ -782,12 +788,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 .num_threads(threads)
                 .build_global()?;
 
-            let is_fastga = matches!(tp_type, TracepointType::Fastga);
+            let is_fastga = matches!(tp_type, TracepointType::Fastga | TracepointType::FastgaNoDiff);
             let max_complexity = max_complexity.unwrap_or(if is_fastga { 100 } else { 32 });
 
             // Validate complexity_metric usage
             if is_fastga && complexity_metric.is_some() {
-                error!("--complexity-metric cannot be used with --type fastga");
+                error!("--complexity-metric cannot be used with --type fastga or fastga-no-diff");
                 error!("FastGA uses its own segmentation algorithm based on trace spacing");
                 std::process::exit(1);
             }
@@ -970,7 +976,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 };
 
                 // Process records using streaming parallelization
-                let is_fastga = matches!(tp_type, TracepointType::Fastga);
+                let is_fastga = matches!(tp_type, TracepointType::Fastga | TracepointType::FastgaNoDiff);
                 let trace_spacing = if is_fastga { max_complexity } else { 0 };
                 let memory_mode_wfa2 = memory_mode.to_lib_wfa2();
 
@@ -1796,10 +1802,11 @@ fn process_compress_line(
         .and_then(|&s| s[5..].parse::<usize>().ok());
 
     // Handle FastGA tracepoints with potential overflow splitting
-    if matches!(tp_type, TracepointType::Fastga) {
+    if matches!(tp_type, TracepointType::Fastga | TracepointType::FastgaNoDiff) {
         process_fastga_with_overflow(
             &fields,
             cigar,
+            tp_type,
             max_complexity,
             gap_compressed_identity,
             block_identity,
@@ -1830,6 +1837,7 @@ fn process_compress_line(
 fn process_fastga_with_overflow(
     fields: &[&str],
     cigar: &str,
+    tp_type: &TracepointType,
     max_complexity: u32,
     gap_compressed_identity: f32,
     block_identity: f32,
@@ -1866,101 +1874,131 @@ fn process_fastga_with_overflow(
     });
     let complement = fields[4] == "-";
 
-    // Process with overflow handling
-    let segments = cigar_to_tracepoints_fastga(
-        cigar,
-        max_complexity,
-        query_start,
-        query_end,
-        query_len,
-        target_start,
-        target_end,
-        target_len,
-        complement,
-    );
-
-    // Debug: log when an alignment is split into multiple segments
-    if segments.len() > 1 {
-        debug!(
-            "SPLIT: alignment {}:{}-{} -> {}:{}-{} ({}) split into {} segments (cause: indel overflow >200bp in tracepoint):",
-            fields[0], query_start, query_end,
-            fields[5], target_start, target_end,
-            if complement { "-" } else { "+" },
-            segments.len()
-        );
-        for (i, (tps, (qs, qe, ts, te))) in segments.iter().enumerate() {
-            // Convert target coordinates back to original space for display
-            let (display_ts, display_te) = if complement {
-                (target_len - te, target_len - ts)
-            } else {
-                (*ts, *te)
-            };
-            debug!(
-                "  Segment {}/{}: query {}..{} ({} bp), target {}..{} ({} bp), {} tracepoints",
-                i + 1,
-                segments.len(),
-                qs,
-                qe,
-                qe - qs,
-                display_ts,
-                display_te,
-                display_te - display_ts,
-                tps.len()
-            );
-
-            // Log the gap (overflow-causing indel) between this segment and the next
-            if i + 1 < segments.len() {
-                let (_, (next_qs, _, next_ts, _)) = &segments[i + 1];
-                let query_gap = next_qs.saturating_sub(*qe);
-                let target_gap = if complement {
-                    // In reversed space, target coords go in opposite direction
-                    te.saturating_sub(*next_ts)
-                } else {
-                    next_ts.saturating_sub(*te)
-                };
-
-                let gap_type = if query_gap > 0 && target_gap == 0 {
-                    format!("{}bp insertion", query_gap)
-                } else if target_gap > 0 && query_gap == 0 {
-                    format!("{}bp deletion", target_gap)
-                } else if query_gap > 0 && target_gap > 0 {
-                    format!("{}bp query gap + {}bp target gap", query_gap, target_gap)
-                } else {
-                    "unknown gap".to_string()
-                };
-                debug!("    -> split caused by: {}", gap_type);
+    // Unified segment representation: (tracepoints_str, sum_of_differences, seg_coords)
+    // sum_of_differences is None for FastgaNoDiff (no diff info available)
+    let unified_segments: Vec<(String, Option<usize>, usize, usize, usize, usize)> =
+        match tp_type {
+            TracepointType::Fastga => {
+                let segments = cigar_to_tracepoints_fastga(
+                    cigar,
+                    max_complexity,
+                    query_start,
+                    query_end,
+                    query_len,
+                    target_start,
+                    target_end,
+                    target_len,
+                    complement,
+                );
+                if segments.len() > 1 {
+                    debug!(
+                        "SPLIT: alignment {}:{}-{} -> {}:{}-{} ({}) split into {} segments (cause: indel overflow >200bp in tracepoint):",
+                        fields[0], query_start, query_end,
+                        fields[5], target_start, target_end,
+                        if complement { "-" } else { "+" },
+                        segments.len()
+                    );
+                    for (i, (tps, (qs, qe, ts, te))) in segments.iter().enumerate() {
+                        let (display_ts, display_te) = if complement {
+                            (target_len - te, target_len - ts)
+                        } else {
+                            (*ts, *te)
+                        };
+                        debug!(
+                            "  Segment {}/{}: query {}..{} ({} bp), target {}..{} ({} bp), {} tracepoints",
+                            i + 1, segments.len(), qs, qe, qe - qs,
+                            display_ts, display_te, display_te - display_ts, tps.len()
+                        );
+                        if i + 1 < segments.len() {
+                            let (_, (next_qs, _, next_ts, _)) = &segments[i + 1];
+                            let query_gap = next_qs.saturating_sub(*qe);
+                            let target_gap = if complement {
+                                te.saturating_sub(*next_ts)
+                            } else {
+                                next_ts.saturating_sub(*te)
+                            };
+                            let gap_type = if query_gap > 0 && target_gap == 0 {
+                                format!("{}bp insertion", query_gap)
+                            } else if target_gap > 0 && query_gap == 0 {
+                                format!("{}bp deletion", target_gap)
+                            } else if query_gap > 0 && target_gap > 0 {
+                                format!("{}bp query gap + {}bp target gap", query_gap, target_gap)
+                            } else {
+                                "unknown gap".to_string()
+                            };
+                            debug!("    -> split caused by: {}", gap_type);
+                        }
+                    }
+                }
+                segments
+                    .into_iter()
+                    .map(|(tps, (qs, qe, ts, te))| {
+                        let sum_diff: usize = tps.iter().map(|(diff, _)| diff).sum();
+                        let tp_str = if tps.is_empty() {
+                            "0,0".to_string()
+                        } else {
+                            format_tracepoints(&TracepointData::Fastga(tps))
+                        };
+                        (tp_str, Some(sum_diff), qs, qe, ts, te)
+                    })
+                    .collect()
             }
-        }
-    }
+            TracepointType::FastgaNoDiff => {
+                let segments = cigar_to_tracepoints_fastga_no_diff(
+                    cigar,
+                    max_complexity,
+                    query_start,
+                    query_end,
+                    query_len,
+                    target_start,
+                    target_end,
+                    target_len,
+                    complement,
+                );
+                if segments.len() > 1 {
+                    debug!(
+                        "SPLIT: alignment {}:{}-{} -> {}:{}-{} ({}) split into {} segments (cause: indel overflow >200bp in tracepoint):",
+                        fields[0], query_start, query_end,
+                        fields[5], target_start, target_end,
+                        if complement { "-" } else { "+" },
+                        segments.len()
+                    );
+                }
+                segments
+                    .into_iter()
+                    .map(|(tps, (qs, qe, ts, te))| {
+                        let tp_str = if tps.is_empty() {
+                            "0".to_string()
+                        } else {
+                            format_tracepoints(&TracepointData::FastgaNoDiff(tps))
+                        };
+                        (tp_str, None, qs, qe, ts, te)
+                    })
+                    .collect()
+            }
+            _ => unreachable!("only Fastga/FastgaNoDiff are routed here"),
+        };
 
-    // For FASTGA mode, output MULTIPLE records (one per segment) like PAFtoALN.c does
-    // Each segment has its own coordinates and tracepoints
-    // Gaps between segments are implicit in coordinate discontinuities
-
+    let seg_count = unified_segments.len();
     let mut valid_segment_count = 0;
-    for (tracepoints, (seg_query_start, seg_query_end, seg_target_start, seg_target_end)) in
-        segments.iter()
+    for (tracepoints_str, sum_of_differences, seg_query_start, seg_query_end, seg_target_start, seg_target_end) in
+        unified_segments.iter()
     {
         valid_segment_count += 1;
 
         // Convert target coordinates back to original space for output
         let (out_target_start, out_target_end) = if complement {
-            // Reversed space -> Original space
             (target_len - seg_target_end, target_len - seg_target_start)
         } else {
             (*seg_target_start, *seg_target_end)
         };
 
-        // Calculate segment-specific stats
-        let sum_of_differences: usize = tracepoints.iter().map(|(diff, _)| diff).sum();
-        // Empty tracepoints (0-length segments) should be represented as "0,0" (FASTGA behavior)
-        let tracepoints_str = if tracepoints.is_empty() {
-            "0,0".to_string()
-        } else {
-            format_tracepoints(&TracepointData::Fastga(tracepoints.clone()))
-        };
         let alignment_length = seg_query_end - seg_query_start;
-        let matches = alignment_length.saturating_sub(sum_of_differences);
+        let matches = match sum_of_differences {
+            Some(diff) => alignment_length.saturating_sub(*diff),
+            // FastgaNoDiff has no diff info; preserve original matches value from PAF field[9]
+            None => fields[9].parse().unwrap_or(0),
+        };
 
         // Create output fields for this segment
         let mut new_fields: Vec<String> = Vec::new();
@@ -1977,14 +2015,16 @@ fn process_fastga_with_overflow(
                     if field.starts_with("cg:Z:") {
                         // Add identity stats before tracepoints
                         if !minimal {
-                            new_fields.push(format!("gi:f:{:.6}", gap_compressed_identity));
-                            new_fields.push(format!("bi:f:{:.6}", block_identity));
+                            new_fields.push(format!("gi:f:{}", gap_compressed_identity));
+                            new_fields.push(format!("bi:f:{}", block_identity));
 
-                            // Add df fields (do = df-original, preserves old value)
-                            if let Some(old_df) = existing_df {
-                                new_fields.push(format!("do:i:{}", old_df));
+                            if let Some(diff) = sum_of_differences {
+                                // Add df fields (do = df-original, preserves old value)
+                                if let Some(old_df) = existing_df {
+                                    new_fields.push(format!("do:i:{}", old_df));
+                                }
+                                new_fields.push(format!("df:i:{}", diff));
                             }
-                            new_fields.push(format!("df:i:{}", sum_of_differences));
 
                             // Add alignment score
                             new_fields.push(format!("sc:i:{}", alignment_score));
@@ -2007,7 +2047,7 @@ fn process_fastga_with_overflow(
         }
 
         // Add segment marker if there are multiple valid segments
-        if segments.len() > 1 {
+        if seg_count > 1 {
             new_fields.push(format!("sg:i:{}", valid_segment_count - 1));
         }
 
@@ -2046,9 +2086,8 @@ fn process_single_record(
             let tp = cigar_to_variable_tracepoints(cigar, max_complexity, *complexity_metric);
             (format_tracepoints(&TracepointData::Variable(tp)), None)
         }
-        TracepointType::Fastga => {
-            // This should not happen as FastGA is handled separately
-            unreachable!("FastGA should be handled by process_fastga_with_overflow")
+        TracepointType::Fastga | TracepointType::FastgaNoDiff => {
+            unreachable!("FastGA/FastgaNoDiff should be routed to process_fastga_with_overflow")
         }
     };
 
@@ -2059,8 +2098,8 @@ fn process_single_record(
         if field.starts_with("cg:Z:") {
             // Add identity stats before tracepoints
             if !minimal {
-                new_fields.push(format!("gi:f:{:.12}", gap_compressed_identity));
-                new_fields.push(format!("bi:f:{:.12}", block_identity));
+                new_fields.push(format!("gi:f:{}", gap_compressed_identity));
+                new_fields.push(format!("bi:f:{}", block_identity));
                 new_fields.push(format!("sc:i:{}", alignment_score));
                 if let Some(new_df) = df_value {
                     if let Some(old_df) = existing_df {
@@ -2194,13 +2233,8 @@ fn process_decompress_line(
         target_seq = reverse_complement(&target_seq);
     }
 
-    // Parse tracepoints based on type
-    let tp_type_to_use = if fastga {
-        TracepointType::Fastga
-    } else {
-        *tp_type
-    };
-    let tracepoints = tpa::parse_tracepoints(tracepoints_str, tp_type_to_use)
+    // Parse tracepoints based on type; use tp_type directly so FastgaNoDiff is preserved
+    let tracepoints = tpa::parse_tracepoints(tracepoints_str, *tp_type)
         .expect("Failed to parse tracepoints");
 
     // Compute offsets (only used for FastGA)
@@ -2290,8 +2324,8 @@ fn process_decompress_line(
                     }
 
                     // Always add new identity stats and alignment score before the CIGAR
-                    new_fields.push(format!("gi:f:{:.12}", gap_compressed_identity));
-                    new_fields.push(format!("bi:f:{:.12}", block_identity));
+                    new_fields.push(format!("gi:f:{}", gap_compressed_identity));
+                    new_fields.push(format!("bi:f:{}", block_identity));
                     new_fields.push(format!("sc:i:{}", alignment_score));
 
                     // Replace tracepoints with CIGAR
@@ -2475,8 +2509,8 @@ fn process_decompress_record(
     }
 
     // Add new identity stats and alignment score
-    new_fields.push(format!("gi:f:{:.12}", gap_compressed_identity));
-    new_fields.push(format!("bi:f:{:.12}", block_identity));
+    new_fields.push(format!("gi:f:{}", gap_compressed_identity));
+    new_fields.push(format!("bi:f:{}", block_identity));
     new_fields.push(format!("sc:i:{}", alignment_score));
 
     // Replace tracepoints with CIGAR
