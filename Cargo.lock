@@ -1590,7 +1590,7 @@ dependencies = [
 [[package]]
 name = "tpa"
 version = "0.1.0"
-source = "git+https://github.com/AndreaGuarracino/tpa?rev=49f1801f9e0108c211571fa2614e517009446afe#49f1801f9e0108c211571fa2614e517009446afe"
+source = "git+https://github.com/chris7716/tpa?rev=dc72bcc9f01a634de456ccbc40878cef254a8437#dc72bcc9f01a634de456ccbc40878cef254a8437"
 dependencies = [
  "bgzip",
  "env_logger",
@@ -1606,7 +1606,7 @@ dependencies = [
 [[package]]
 name = "tracepoints"
 version = "0.1.0"
-source = "git+https://github.com/AndreaGuarracino/tracepoints?rev=66a5511b0b84d8502f9d7c99efd150616ff2cae3#66a5511b0b84d8502f9d7c99efd150616ff2cae3"
+source = "git+https://github.com/chris7716/lib_tracepoints?rev=0728c3a5aa41d4a0bcd00686d80170722f8bc251#0728c3a5aa41d4a0bcd00686d80170722f8bc251"
 dependencies = [
  "lib_wfa2",
 ]
