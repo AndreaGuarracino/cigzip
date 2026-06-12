@@ -21,13 +21,10 @@ Build without AGC archive support with `cargo build --release --no-default-featu
 The repository provides a small alignment in [`examples/`](examples/):
 
 ```sh
-cigzip encode     --paf examples/example.paf --distance edit --max-complexity 32 -o example.tp.paf  # CIGAR -> tracepoints
-cigzip compress   -i example.tp.paf -o example.tpa                                                   # text -> binary TPA (+ example.tpa.idx)
-cigzip decompress -i example.tpa    -o example.tp.back.paf                                           # binary TPA -> text
-cigzip decode     --paf example.tp.back.paf --sequence-files examples/example.fa \
-                  --distance edit --max-complexity 32 > restored.paf
-
-# restored.paf carries the same CIGAR as examples/example.paf
+cigzip encode     --paf examples/example.paf -o example.tp.paf                                  # CIGAR -> tracepoints
+cigzip compress   -i example.tp.paf -o example.tpa                                              # text -> binary TPA (+ example.tpa.idx)
+cigzip decompress -i example.tpa    -o example.tp.back.paf                                      # binary TPA -> text
+cigzip decode     --paf example.tp.back.paf --sequence-files examples/example.fa > restored.paf
 ```
 
 `decode` reads the sequences from FASTA or AGC (`--sequence-files`). Run `cigzip <command> --help` for the full options of `encode`, `decode`, `compress`, and `decompress`.

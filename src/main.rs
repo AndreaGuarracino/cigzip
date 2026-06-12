@@ -623,11 +623,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 std::process::exit(1);
             }
 
-            if is_fastga && penalties.is_some() && !penalties.as_deref().unwrap_or("").is_empty() {
-                error!("--penalties should only be used without --type fastga");
-                std::process::exit(1);
-            }
-
             let sequence_paths = match collect_sequence_paths(sequence_files, sequence_list) {
                 Ok(paths) if !paths.is_empty() => paths,
                 Ok(_) => {
