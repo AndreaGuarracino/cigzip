@@ -19,12 +19,12 @@ ragc-core = { git = "https://github.com/ekg/ragc", rev = "40e5cad" }
 #lib_wfa2 = { path = "/home/guarracino/Dropbox/git/lib_wfa2"}
 lib_wfa2 = { git = "https://github.com/AndreaGuarracino/lib_wfa2", rev = "8859b6a214141968f37d9bcb22552408318adda0" }
 #tracepoints = { path = "/Users/hasitha/Documents/biology/lib_tracepoints"}
-tracepoints = { git = "https://github.com/chris7716/lib_tracepoints", rev = "0728c3a5aa41d4a0bcd00686d80170722f8bc251" }
+tracepoints = { git = "https://github.com/chris7716/lib_tracepoints", rev = "c42a115e9879b6ee0377e84ad8142d70cb0af7f4" }
 #tpa = { path = "/Users/hasitha/Documents/biology/tpa" }
-tpa = { git = "https://github.com/chris7716/tpa", rev = "dc72bcc9f01a634de456ccbc40878cef254a8437" }
+tpa = { git = "https://github.com/chris7716/tpa", rev = "c580b9f5e3a79279a705d490d46dab7c9b22ee45" }
 
 [features]
 default = []
 
 [patch."https://github.com/AndreaGuarracino/tracepoints"]
-tracepoints = { git = "https://github.com/chris7716/lib_tracepoints", rev = "0728c3a5aa41d4a0bcd00686d80170722f8bc251" }
+tracepoints = { git = "https://github.com/chris7716/lib_tracepoints", rev = "c42a115e9879b6ee0377e84ad8142d70cb0af7f4" }
