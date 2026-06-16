@@ -21,7 +21,7 @@ lib_wfa2 = { git = "https://github.com/AndreaGuarracino/lib_wfa2", rev = "8859b6
 #tracepoints = { path = "/home/guarracino/git/tracepoints"}
 tracepoints = { git = "https://github.com/AndreaGuarracino/tracepoints", rev = "a8a225baf81fb3a78bbc75476f452228a8bf0922" }
 #tpa = { path = "/home/guarracino/git/tpa" }
-tpa = { git = "https://github.com/AndreaGuarracino/tpa", rev = "768012e5967fe8338cf7188ec40baf19f2fe9957" }
+tpa = { git = "https://github.com/AndreaGuarracino/tpa", rev = "a361e34c49fda118455a3aee8dab18897ad7244e" }
 
 [features]
 default = []

@@ -1633,7 +1633,7 @@ dependencies = [
 [[package]]
 name = "tpa"
 version = "0.1.0"
-source = "git+https://github.com/AndreaGuarracino/tpa?rev=768012e5967fe8338cf7188ec40baf19f2fe9957#768012e5967fe8338cf7188ec40baf19f2fe9957"
+source = "git+https://github.com/AndreaGuarracino/tpa?rev=a361e34c49fda118455a3aee8dab18897ad7244e#a361e34c49fda118455a3aee8dab18897ad7244e"
 dependencies = [
  "bgzip",
  "env_logger",
