@@ -1144,10 +1144,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     gap_extension2: gap_ext2,
                 };
                 let aligner = distance.create_aligner(None, None);
-                let paf_cigar = align_sequences_wfa(
+                let mut paf_cigar = Vec::new();
+                align_sequences_wfa(
                     &query_seq[a_start..a_end],
                     &target_seq[b_start..b_end],
                     &aligner,
+                    &mut paf_cigar,
                 );
                 let paf_cigar = cigar_ops_to_cigar_string(&paf_cigar);
                 let tracepoints = cigar_to_tracepoints(
@@ -1278,7 +1280,8 @@ fn process_debug_line(
         gap_extension2: gap_ext2,
     };
     let aligner = distance.create_aligner(None, None);
-    let realn_cigar = align_sequences_wfa(&query_seq, &target_seq, &aligner);
+    let mut realn_cigar = Vec::new();
+    align_sequences_wfa(&query_seq, &target_seq, &aligner, &mut realn_cigar);
     let realn_cigar = cigar_ops_to_cigar_string(&realn_cigar);
     // let paf_cigar = &realn_cigar;
 
