@@ -1530,9 +1530,9 @@ dependencies = [
 
 [[package]]
 name = "syn"
-version = "2.0.117"
+version = "2.0.118"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e665b8803e7b1d2a727f4023456bbbbe74da67099c585258af0ad9c5013b9b99"
+checksum = "1b9ae57f904213ebb649ce6895b8a66c66f0203b9319718f69a5612a065b1422"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -1633,7 +1633,7 @@ dependencies = [
 [[package]]
 name = "tpa"
 version = "0.1.0"
-source = "git+https://github.com/AndreaGuarracino/tpa?rev=3ef62f53212ca4a21dd59df24ed9e6a5112d9936#3ef62f53212ca4a21dd59df24ed9e6a5112d9936"
+source = "git+https://github.com/AndreaGuarracino/tpa?rev=c29bf931b26815d27d45a4740f148c4382546a12#c29bf931b26815d27d45a4740f148c4382546a12"
 dependencies = [
  "bgzip",
  "env_logger",
@@ -1649,7 +1649,7 @@ dependencies = [
 [[package]]
 name = "tracepoints"
 version = "0.1.0"
-source = "git+https://github.com/AndreaGuarracino/tracepoints?rev=ab1bcceb57cfbd1d1e6c2ead1f6ac572841f1431#ab1bcceb57cfbd1d1e6c2ead1f6ac572841f1431"
+source = "git+https://github.com/AndreaGuarracino/tracepoints?rev=e12f0cbd7f8577e518dc8a7b93b98ad88e967625#e12f0cbd7f8577e518dc8a7b93b98ad88e967625"
 dependencies = [
  "lib_wfa2",
 ]

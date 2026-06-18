@@ -491,7 +491,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 .num_threads(common.threads)
                 .build_global()?;
 
-            let is_fastga = matches!(tp_type, TracepointType::Fastga);
+            let is_fastga = matches!(tp_type, TracepointType::Fastga | TracepointType::FastgaNoDiff);
             let max_complexity = max_complexity.unwrap_or(if is_fastga { 100 } else { 32 });
 
             if is_fastga && complexity_metric.is_some() {
@@ -583,7 +583,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             let is_binary = tpa::is_tpa_file(&common.paf).unwrap_or(false);
 
             // Determine if we're using fastga based on tp_type
-            let is_fastga = matches!(tp_type, TracepointType::Fastga);
+            let is_fastga = matches!(tp_type, TracepointType::Fastga | TracepointType::FastgaNoDiff);
 
             // Validate that complexity-metric is not used with fastga
             if is_fastga && complexity_metric.is_some() {
@@ -777,7 +777,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 .num_threads(threads)
                 .build_global()?;
 
-            let is_fastga = matches!(tp_type, TracepointType::Fastga);
+            let is_fastga = matches!(tp_type, TracepointType::Fastga | TracepointType::FastgaNoDiff);
             let max_complexity = max_complexity.unwrap_or(if is_fastga { 100 } else { 32 });
 
             // Validate complexity_metric usage
@@ -965,7 +965,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 };
 
                 // Process records using streaming parallelization
-                let is_fastga = matches!(tp_type, TracepointType::Fastga);
+                let is_fastga = matches!(tp_type, TracepointType::Fastga | TracepointType::FastgaNoDiff);
                 let trace_spacing = if is_fastga { max_complexity } else { 0 };
                 let memory_mode_wfa2 = memory_mode.to_lib_wfa2();
 
@@ -1794,10 +1794,11 @@ fn process_compress_line(
         .and_then(|&s| s[5..].parse::<usize>().ok());
 
     // Handle FastGA tracepoints with potential overflow splitting
-    if matches!(tp_type, TracepointType::Fastga) {
+    if matches!(tp_type, TracepointType::Fastga | TracepointType::FastgaNoDiff) {
         process_fastga_with_overflow(
             &fields,
             cigar,
+            *tp_type,
             max_complexity,
             gap_compressed_identity,
             block_identity,
@@ -1828,6 +1829,7 @@ fn process_compress_line(
 fn process_fastga_with_overflow(
     fields: &[&str],
     cigar: &str,
+    tp_type: TracepointType,
     max_complexity: u32,
     gap_compressed_identity: f32,
     block_identity: f32,
@@ -1951,9 +1953,13 @@ fn process_fastga_with_overflow(
 
         // Calculate segment-specific stats
         let sum_of_differences: usize = tracepoints.iter().map(|(diff, _)| diff).sum();
-        // Empty tracepoints (0-length segments) should be represented as "0,0" (FASTGA behavior)
+        // Empty tracepoints (0-length segments) -> "0,0" (fastga) / "0" (fastga-no-diff), per FASTGA behavior.
+        let nodiff = matches!(tp_type, TracepointType::FastgaNoDiff);
         let tracepoints_str = if tracepoints.is_empty() {
-            "0,0".to_string()
+            if nodiff { "0".to_string() } else { "0,0".to_string() }
+        } else if nodiff {
+            let singles: Vec<usize> = tracepoints.iter().map(|(_d, b)| *b).collect();
+            format_tracepoints(&TracepointData::FastgaNoDiff(singles))
         } else {
             format_tracepoints(&TracepointData::Fastga(tracepoints.clone()))
         };
@@ -2044,7 +2050,7 @@ fn process_single_record(
             let tp = cigar_to_variable_tracepoints(cigar, max_complexity, *complexity_metric);
             (format_tracepoints(&TracepointData::Variable(tp)), None)
         }
-        TracepointType::Fastga => {
+        TracepointType::Fastga | TracepointType::FastgaNoDiff => {
             // This should not happen as FastGA is handled separately
             unreachable!("FastGA should be handled by process_fastga_with_overflow")
         }
@@ -2192,13 +2198,8 @@ fn process_decompress_line(
         target_seq = reverse_complement(&target_seq);
     }
 
-    // Parse tracepoints based on type
-    let tp_type_to_use = if fastga {
-        TracepointType::Fastga
-    } else {
-        *tp_type
-    };
-    let tracepoints = tpa::parse_tracepoints(tracepoints_str, tp_type_to_use)
+    // Parse tracepoints based on type (preserve Fastga vs FastgaNoDiff)
+    let tracepoints = tpa::parse_tracepoints(tracepoints_str, *tp_type)
         .expect("Failed to parse tracepoints");
 
     // Compute offsets (only used for FastGA)
