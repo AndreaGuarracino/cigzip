@@ -118,7 +118,7 @@ enum Args {
         #[clap(flatten)]
         common: CommonOpts,
 
-        /// Tracepoint type (standard, mixed, variable, fastga)
+        /// Tracepoint type (standard, mixed, variable, fastga, fastga-no-diff)
         #[arg(
             long = "type",
             default_value = "standard",
@@ -160,7 +160,7 @@ enum Args {
         #[clap(flatten)]
         common: CommonOpts,
 
-        /// Tracepoint type (standard, mixed, variable, fastga)
+        /// Tracepoint type (standard, mixed, variable, fastga, fastga-no-diff)
         #[arg(
             long = "type",
             default_value = "standard",
@@ -223,7 +223,7 @@ enum Args {
         #[arg(short = 'o', long = "output")]
         output: String,
 
-        /// Tracepoint type (standard, mixed, variable, fastga)
+        /// Tracepoint type (standard, mixed, variable, fastga, fastga-no-diff)
         #[arg(
             long = "type",
             default_value = "standard",
