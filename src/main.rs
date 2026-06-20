@@ -684,7 +684,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
             // Validate and apply conditional defaults
             let trace_spacing = if is_fastga {
-                trace_spacing.unwrap_or(100)
+                trace_spacing.or(max_complexity).unwrap_or(100)
             } else {
                 if trace_spacing.is_some() {
                     error!("--trace-spacing should only be used with --type fastga");
