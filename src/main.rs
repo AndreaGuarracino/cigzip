@@ -663,13 +663,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 }
             };
 
-            if is_fastga && !matches!(distance, DistanceChoice::GapAffine2p) {
-                warn!(
-                    "--distance {} is ignored with --type fastga (uses edit distance)",
-                    distance
-                );
-            }
-
             let penalties_summary = penalties_value.as_deref().unwrap_or("n/a");
 
             info!(
