@@ -25,10 +25,54 @@ use tracepoints::{
     cigar_to_variable_tracepoints_raw, mixed_tracepoints_to_cigar, tracepoints_to_cigar,
     variable_tracepoints_to_cigar,
 };
+use std::collections::HashMap;
 use tracepoints::{
     cigar_to_mixed_tracepoints, cigar_to_tracepoints, cigar_to_tracepoints_fastga,
-    cigar_to_variable_tracepoints, ComplexityMetric, TracepointData, TracepointType,
+    cigar_to_tracepoints_fastga_with_contigs, cigar_to_variable_tracepoints, ComplexityMetric,
+    TracepointData, TracepointType,
 };
+
+/// Load a FASTGA contig table: lines "scaffold<TAB>sbeg<TAB>send" -> scaffold -> sorted (sbeg,send).
+/// Zero-length contigs (leading-gap artifacts) are dropped.
+fn load_contig_table(path: &str) -> io::Result<HashMap<String, Vec<(usize, usize)>>> {
+    let mut map: HashMap<String, Vec<(usize, usize)>> = HashMap::new();
+    for line in BufReader::new(File::open(path)?).lines() {
+        let line = line?;
+        let f: Vec<&str> = line.split('\t').collect();
+        if f.len() < 3 {
+            continue;
+        }
+        let (sbeg, send) = (
+            f[1].parse::<usize>().unwrap_or(0),
+            f[2].parse::<usize>().unwrap_or(0),
+        );
+        if send > sbeg {
+            map.entry(f[0].to_string()).or_default().push((sbeg, send));
+        }
+    }
+    for v in map.values_mut() {
+        v.sort_unstable();
+    }
+    Ok(map)
+}
+
+/// Start of the contig (ACGT run) containing scaffold position `pos`.
+/// Returns 0 when `scaffold` has no table entry (contig-aware decoding off) or `pos` is in no
+/// contig; both keep query_offset = query_start (absolute grid).
+fn contig_start_in_table(
+    table: &HashMap<String, Vec<(usize, usize)>>,
+    scaffold: &str,
+    pos: usize,
+) -> usize {
+    match table.get(scaffold) {
+        Some(contigs) => contigs
+            .iter()
+            .find(|&&(s, e)| s <= pos && pos < e)
+            .map(|&(s, _)| s)
+            .unwrap_or(0),
+        None => 0,
+    }
+}
 
 /// Distance model used for WFA re-alignment
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
@@ -154,6 +198,12 @@ enum Args {
         /// Skip adding optional fields (gi/bi/sc fields)
         #[arg(long = "minimal")]
         minimal: bool,
+
+        /// FASTGA contig table (TSV: scaffold<TAB>sbeg<TAB>send per ACGT run, from the GDB).
+        /// When given, fastga encoding splits at query N-gaps and uses contig-local coordinates,
+        /// producing tracepoints byte-identical to PAFtoALN on gapped assemblies.
+        #[arg(long = "fastga-contigs")]
+        fastga_contigs: Option<String>,
     },
     /// Decode tracepoints to CIGAR (text PAF tp:Z: → text PAF cg:Z:)
     Decode {
@@ -212,6 +262,12 @@ enum Args {
         /// Memory mode for WFA aligner (high, medium, low, ultralow)
         #[arg(long = "memory-mode", default_value_t = MemoryModeChoice::High)]
         memory_mode: MemoryModeChoice,
+
+        /// FASTGA contig table (TSV: scaffold<TAB>sbeg<TAB>send). Required to decode tracepoints
+        /// produced with contig-aware fastga encoding: decode places the trace grid contig-locally
+        /// (query_start - contig_start), matching the encoder.
+        #[arg(long = "fastga-contigs")]
+        fastga_contigs: Option<String>,
     },
     /// Compress text PAF to binary TPA (text PAF → binary TPA)
     Compress {
@@ -361,6 +417,7 @@ impl fmt::Debug for Args {
                 distance,
                 penalties,
                 minimal,
+                fastga_contigs,
             } => f
                 .debug_struct("Args::Encode")
                 .field("common", common)
@@ -371,6 +428,7 @@ impl fmt::Debug for Args {
                 .field("distance", distance)
                 .field("penalties", penalties)
                 .field("minimal", minimal)
+                .field("fastga_contigs", fastga_contigs)
                 .finish(),
             Args::Decode {
                 common,
@@ -385,6 +443,7 @@ impl fmt::Debug for Args {
                 no_banded,
                 max_complexity,
                 memory_mode,
+                fastga_contigs,
             } => f
                 .debug_struct("Args::Decode")
                 .field("common", common)
@@ -399,6 +458,7 @@ impl fmt::Debug for Args {
                 .field("banded", &!no_banded)
                 .field("max_complexity", max_complexity)
                 .field("memory_mode", memory_mode)
+                .field("fastga_contigs", fastga_contigs)
                 .finish(),
             Args::Compress {
                 input,
@@ -483,6 +543,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             distance,
             penalties,
             minimal,
+            fastga_contigs,
         } => {
             setup_logger(common.verbose);
 
@@ -534,6 +595,22 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 Arc::new(Mutex::new(Box::new(BufWriter::new(std::io::stdout()))))
             };
 
+            // Optional FASTGA contig table: scaffold -> sorted (sbeg,send) ACGT runs.
+            // Enables PAFtoALN-identical contig-aware fastga encoding (split at query N-gaps).
+            let contig_table: HashMap<String, Vec<(usize, usize)>> = match &fastga_contigs {
+                Some(path) => match load_contig_table(path) {
+                    Ok(t) => {
+                        info!("Loaded fastga contig table: {} scaffolds from {}", t.len(), path);
+                        t
+                    }
+                    Err(e) => {
+                        error!("Failed to read --fastga-contigs {}: {}", path, e);
+                        std::process::exit(1);
+                    }
+                },
+                None => HashMap::new(),
+            };
+
             let paf_reader = get_paf_reader(&common.paf)?;
 
             paf_reader
@@ -550,6 +627,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         &distance_mode,
                         &writer,
                         minimal,
+                        &contig_table,
                     );
                 });
 
@@ -569,6 +647,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             no_banded,
             keep_old_stats,
             memory_mode,
+            fastga_contigs,
         } => {
             setup_logger(common.verbose);
 
@@ -578,6 +657,22 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             rayon::ThreadPoolBuilder::new()
                 .num_threads(common.threads)
                 .build_global()?;
+
+            // Optional FASTGA contig table: enables decoding contig-aware fastga tracepoints by
+            // placing the trace grid contig-locally (query_start - contig_start), matching the encoder.
+            let contig_table: HashMap<String, Vec<(usize, usize)>> = match &fastga_contigs {
+                Some(path) => match load_contig_table(path) {
+                    Ok(t) => {
+                        info!("Loaded fastga contig table: {} scaffolds from {}", t.len(), path);
+                        t
+                    }
+                    Err(e) => {
+                        error!("Failed to read --fastga-contigs {}: {}", path, e);
+                        std::process::exit(1);
+                    }
+                },
+                None => HashMap::new(),
+            };
 
             // Detect input format
             let is_binary = tpa::is_tpa_file(&common.paf).unwrap_or(false);
@@ -717,6 +812,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 banded_max_complexity,
                                 keep_old_stats,
                                 aligner,
+                                &contig_table,
                             );
                         },
                     );
@@ -745,6 +841,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 banded_max_complexity,
                                 keep_old_stats,
                                 aligner,
+                                &contig_table,
                             );
                         },
                     );
@@ -980,6 +1077,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 None,  // banded_max_complexity
                                 keep_old_stats,
                                 aligner,
+                                &HashMap::new(), // no contig table for the Decompress command
                             );
                         },
                     );
@@ -1755,6 +1853,7 @@ fn process_compress_line(
     distance_mode: &Distance,
     writer: &Arc<Mutex<Box<dyn Write + Send>>>,
     minimal: bool,
+    contig_table: &HashMap<String, Vec<(usize, usize)>>,
 ) {
     let fields: Vec<&str> = line.split('\t').collect();
     if fields.len() < 12 {
@@ -1800,6 +1899,7 @@ fn process_compress_line(
             complexity_metric,
             writer,
             minimal,
+            contig_table,
         );
     } else {
         // Handle other tracepoint types (no overflow splitting needed)
@@ -1831,6 +1931,7 @@ fn process_fastga_with_overflow(
     _complexity_metric: &ComplexityMetric,
     writer: &Arc<Mutex<Box<dyn Write + Send>>>,
     minimal: bool,
+    contig_table: &HashMap<String, Vec<(usize, usize)>>,
 ) {
     // Parse coordinates
     let query_len = fields[1].parse().unwrap_or_else(|_| {
@@ -1859,18 +1960,39 @@ fn process_fastga_with_overflow(
     });
     let complement = fields[4] == "-";
 
-    // Process with overflow handling
-    let segments = cigar_to_tracepoints_fastga(
-        cigar,
-        max_complexity,
-        query_start,
-        query_end,
-        query_len,
-        target_start,
-        target_end,
-        target_len,
-        complement,
-    );
+    // If either scaffold has a contig table, take the contig-aware path (split at query AND target
+    // N-gaps, contig-local grid) to match PAFtoALN exactly. Pass an empty slice for a scaffold with
+    // no table entry.
+    let empty_contigs: Vec<(usize, usize)> = Vec::new();
+    let qcontigs = contig_table.get(fields[0]);
+    let tcontigs = contig_table.get(fields[5]);
+    let segments = if qcontigs.is_some() || tcontigs.is_some() {
+        cigar_to_tracepoints_fastga_with_contigs(
+            cigar,
+            max_complexity,
+            query_start,
+            query_end,
+            query_len,
+            target_start,
+            target_end,
+            target_len,
+            complement,
+            qcontigs.unwrap_or(&empty_contigs),
+            tcontigs.unwrap_or(&empty_contigs),
+        )
+    } else {
+        cigar_to_tracepoints_fastga(
+            cigar,
+            max_complexity,
+            query_start,
+            query_end,
+            query_len,
+            target_start,
+            target_end,
+            target_len,
+            complement,
+        )
+    };
 
     // Debug: log when an alignment is split into multiple segments
     if segments.len() > 1 {
@@ -2098,6 +2220,7 @@ fn process_decompress_line(
     banded_max_complexity: Option<u32>,
     keep_old_stats: bool,
     aligner: &mut lib_wfa2::affine_wavefront::AffineWavefronts,
+    contig_table: &HashMap<String, Vec<(usize, usize)>>,
 ) {
     let fields: Vec<&str> = line.split('\t').collect();
     if fields.len() < 12 {
@@ -2216,7 +2339,12 @@ fn process_decompress_line(
         } else {
             target_start
         };
-        (query_start, target_offset, strand == "-")
+        // Query grid is the absolute query_start, made contig-local when a contig table is given.
+        let query_offset =
+            query_start - contig_start_in_table(contig_table, query_name, query_start);
+        // fastga/1aln tracepoints are query-forward vs revcomp-target, so '-' strand needs reversal.
+        let complement = strand == "-";
+        (query_offset, target_offset, complement)
     } else {
         (0, 0, false)
     };
@@ -2316,6 +2444,7 @@ fn process_decompress_record(
     banded_max_complexity: Option<u32>,
     keep_old_stats: bool,
     aligner: &mut lib_wfa2::affine_wavefront::AffineWavefronts,
+    contig_table: &HashMap<String, Vec<(usize, usize)>>,
 ) {
     // Get sequence names directly from record
     let query_name = &record.query_name;
@@ -2379,11 +2508,10 @@ fn process_decompress_record(
         } else {
             record.target_start as usize
         };
-        (
-            record.query_start as usize,
-            target_offset,
-            record.strand == '-',
-        )
+        let qs = record.query_start as usize;
+        // Contig-local trace grid when a contig table is provided (matches the contig-aware encoder).
+        let query_offset = qs - contig_start_in_table(contig_table, query_name, qs);
+        (query_offset, target_offset, record.strand == '-')
     } else {
         (0, 0, false)
     };
