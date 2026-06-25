@@ -24,10 +24,19 @@ The repository provides a small alignment in [`examples/`](examples/):
 cigzip encode     --paf examples/example.paf -o example.tp.paf                                  # CIGAR -> tracepoints
 cigzip compress   -i example.tp.paf -o example.tpa                                              # text -> binary TPA (+ example.tpa.idx)
 cigzip decompress -i example.tpa    -o example.tp.back.paf                                      # binary TPA -> text
-cigzip decode     --paf example.tp.back.paf --sequence-files examples/example.fa > restored.paf
+cigzip decode     --paf example.tp.back.paf --sequence-files examples/example.fa --max-complexity 32 > restored.paf
 ```
 
 `decode` reads the sequences from FASTA or AGC (`--sequence-files`). Run `cigzip <command> --help` for the full options of `encode`, `decode`, `compress`, and `decompress`.
+
+### FastGA tracepoints
+
+Use `--type fastga` for fixed-spacing tracepoints compatible with [FastGA](https://github.com/thegenemyers/FASTGA) (spacing set by `--max-complexity`, default 100). On gapped assemblies, pass a contig table (`--fastga-contigs`: `scaffold<TAB>sbeg<TAB>send` per ACGT run) so encoding splits at N-gaps and stays identical to FastGA's `PAFtoALN`; `decode` needs the same table.
+
+```sh
+cigzip compress -i aln.cg.paf -o aln.tpa --type fastga --fastga-contigs contigs.tsv                 # CIGAR PAF -> TPA, one step
+cigzip decode   --paf aln.tp.paf --type fastga --fastga-contigs contigs.tsv --sequence-files genome.fa > restored.paf
+```
 
 ## Related repositories
 
