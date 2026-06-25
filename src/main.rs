@@ -17,7 +17,7 @@ use std::sync::{Arc, Mutex};
 // tpa: CIGAR stats, formatting, and tracepoints → CIGAR reconstruction
 #[cfg(debug_assertions)]
 use tpa::calculate_alignment_score;
-use tpa::{format_tracepoints, reconstruct_cigar_with_aligner, CigarStats};
+use tpa::{format_ab_tracepoints, format_tracepoints, reconstruct_cigar_with_aligner, CigarStats};
 // tracepoints: CIGAR → tracepoints encoding
 #[cfg(debug_assertions)]
 use tracepoints::{
@@ -139,7 +139,7 @@ impl fmt::Display for MemoryModeChoice {
 }
 
 /// Common options shared between all commands
-#[derive(Parser)]
+#[derive(Parser, Debug)]
 struct CommonOpts {
     /// PAF file for alignments (use "-" to read from standard input)
     #[arg(short = 'p', long = "paf")]
@@ -154,7 +154,38 @@ struct CommonOpts {
     verbose: u8,
 }
 
-#[derive(Parser)]
+/// Tracepoint conversion options shared by encode/decode/compress.
+#[derive(Parser, Debug)]
+#[command(next_help_heading = "Tracepoint options")]
+struct TracepointOpts {
+    /// Tracepoint type (standard, mixed, variable, fastga, fastga-no-diff)
+    #[arg(long = "type", default_value = "standard", value_parser = TracepointType::from_str, value_name = "TYPE")]
+    tp_type: TracepointType,
+
+    /// Maximum complexity (max_diff for standard/mixed/variable; trace spacing for fastga; default 32, 100 for fastga)
+    #[arg(long = "max-complexity")]
+    max_complexity: Option<u32>,
+
+    /// Complexity metric (edit-distance, diagonal-distance). Not used with fastga
+    #[arg(long = "complexity-metric", value_parser = ComplexityMetric::from_str, value_name = "METRIC")]
+    complexity_metric: Option<ComplexityMetric>,
+
+    /// Distance metric (edit, gap-affine, gap-affine2p)
+    #[arg(long = "distance", default_value_t = DistanceChoice::Edit)]
+    distance: DistanceChoice,
+
+    /// Gap penalties for gap-affine distances (mismatch,go1,ge1[,go2,ge2]; ignored with edit)
+    #[arg(long)]
+    penalties: Option<String>,
+
+    /// FASTGA contig table (TSV: scaffold<TAB>sbeg<TAB>send per ACGT run, from the GDB). Enables
+    /// contig-aware fastga: encode/compress split at N-gaps (byte-identical to PAFtoALN); decode
+    /// places the trace grid contig-locally.
+    #[arg(long = "fastga-contigs")]
+    fastga_contigs: Option<String>,
+}
+
+#[derive(Parser, Debug)]
 #[command(author, version, about, disable_help_subcommand = true)]
 enum Args {
     /// Encode CIGAR to tracepoints (text PAF cg:Z: → text PAF tp:Z:)
@@ -162,70 +193,24 @@ enum Args {
         #[clap(flatten)]
         common: CommonOpts,
 
-        /// Tracepoint type (standard, mixed, variable, fastga, fastga-no-diff)
-        #[arg(
-            long = "type",
-            default_value = "standard",
-            value_parser = TracepointType::from_str,
-            value_name = "TYPE"
-        )]
-        tp_type: TracepointType,
-
-        /// Complexity metric (edit-distance, diagonal-distance). Not used with fastga
-        #[arg(
-            long = "complexity-metric",
-            value_parser = ComplexityMetric::from_str,
-            value_name = "METRIC"
-        )]
-        complexity_metric: Option<ComplexityMetric>,
-
-        /// Maximum complexity (default: 32; 100 for fastga)
-        #[arg(long = "max-complexity")]
-        max_complexity: Option<u32>,
+        #[clap(flatten)]
+        tp: TracepointOpts,
 
         /// Output file (use "-" for stdout)
         #[arg(short = 'o', long = "output")]
         output: Option<String>,
 
-        /// Distance metric (edit, gap-affine, gap-affine2p)
-        #[arg(long = "distance", default_value_t = DistanceChoice::Edit)]
-        distance: DistanceChoice,
-
-        /// Gap penalties (only for gap-affine distances; ignored with edit distance)
-        #[arg(long)]
-        penalties: Option<String>,
-
         /// Skip adding optional fields (gi/bi/sc fields)
         #[arg(long = "minimal")]
         minimal: bool,
-
-        /// FASTGA contig table (TSV: scaffold<TAB>sbeg<TAB>send per ACGT run, from the GDB).
-        /// When given, fastga encoding splits at query N-gaps and uses contig-local coordinates,
-        /// producing tracepoints byte-identical to PAFtoALN on gapped assemblies.
-        #[arg(long = "fastga-contigs")]
-        fastga_contigs: Option<String>,
     },
     /// Decode tracepoints to CIGAR (text PAF tp:Z: → text PAF cg:Z:)
     Decode {
         #[clap(flatten)]
         common: CommonOpts,
 
-        /// Tracepoint type (standard, mixed, variable, fastga, fastga-no-diff)
-        #[arg(
-            long = "type",
-            default_value = "standard",
-            value_parser = TracepointType::from_str,
-            value_name = "TYPE"
-        )]
-        tp_type: TracepointType,
-
-        /// Complexity metric (edit-distance, diagonal-distance). Not used with fastga
-        #[arg(
-            long = "complexity-metric",
-            value_parser = ComplexityMetric::from_str,
-            value_name = "METRIC"
-        )]
-        complexity_metric: Option<ComplexityMetric>,
+        #[clap(flatten)]
+        tp: TracepointOpts,
 
         /// Sequence files in FASTA or AGC format (repeatable)
         #[arg(long = "sequence-files", value_name = "FILE", num_args = 1..)]
@@ -243,70 +228,26 @@ enum Args {
         #[arg(long)]
         trace_spacing: Option<u32>,
 
-        /// Distance metric (edit, gap-affine, gap-affine2p)
-        #[arg(long = "distance", default_value_t = DistanceChoice::Edit)]
-        distance: DistanceChoice,
-
-        /// Gap penalties for gap-affine distances (ignored with edit)
-        #[arg(long)]
-        penalties: Option<String>,
-
         /// Disable banded alignment (banded is on by default)
         #[arg(long = "no-banded")]
         no_banded: bool,
 
-        /// Maximum complexity (required with banded for non-fastga types)
-        #[arg(long = "max-complexity")]
-        max_complexity: Option<u32>,
-
         /// Memory mode for WFA aligner (high, medium, low, ultralow)
         #[arg(long = "memory-mode", default_value_t = MemoryModeChoice::High)]
         memory_mode: MemoryModeChoice,
-
-        /// FASTGA contig table (TSV: scaffold<TAB>sbeg<TAB>send). Required to decode tracepoints
-        /// produced with contig-aware fastga encoding: decode places the trace grid contig-locally
-        /// (query_start - contig_start), matching the encoder.
-        #[arg(long = "fastga-contigs")]
-        fastga_contigs: Option<String>,
     },
     /// Compress text PAF to binary TPA (text PAF → binary TPA)
     Compress {
         /// Input text PAF file (accepts cg:Z: or tp:Z: tags)
-        #[arg(short = 'i', long = "input")]
+        #[arg(short = 'i', long = "input", visible_alias = "paf")]
         input: String,
 
         /// Output binary TPA file
         #[arg(short = 'o', long = "output")]
         output: String,
 
-        /// Tracepoint type (standard, mixed, variable, fastga, fastga-no-diff)
-        #[arg(
-            long = "type",
-            default_value = "standard",
-            value_parser = TracepointType::from_str,
-            value_name = "TYPE"
-        )]
-        tp_type: TracepointType,
-
-        /// Maximum complexity (max_diff for standard/mixed/variable; trace_spacing for fastga)
-        #[arg(long = "max-complexity")]
-        max_complexity: Option<u32>,
-
-        /// Complexity metric (edit-distance, diagonal-distance). Not used with fastga
-        #[arg(
-            long = "complexity-metric",
-            value_parser = ComplexityMetric::from_str,
-            value_name = "METRIC"
-        )]
-        complexity_metric: Option<ComplexityMetric>,
-
-        /// Distance metric (edit, gap-affine, gap-affine2p)
-        #[arg(long = "distance", default_value_t = DistanceChoice::Edit)]
-        distance: DistanceChoice,
-
-        /// Gap penalties for gap-affine distances (ignored with edit)
-        #[arg(long)]
-        penalties: Option<String>,
+        #[clap(flatten)]
+        tp: TracepointOpts,
 
         /// Compression strategy (automatic, benchmark, raw, zigzag-delta, 2d-delta, etc.)
         #[arg(
@@ -395,139 +336,6 @@ enum Args {
     },
 }
 
-impl fmt::Debug for CommonOpts {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("CommonOpts")
-            .field("paf", &self.paf)
-            .field("threads", &self.threads)
-            .field("verbose", &self.verbose)
-            .finish()
-    }
-}
-
-impl fmt::Debug for Args {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Args::Encode {
-                common,
-                tp_type,
-                complexity_metric,
-                max_complexity,
-                output,
-                distance,
-                penalties,
-                minimal,
-                fastga_contigs,
-            } => f
-                .debug_struct("Args::Encode")
-                .field("common", common)
-                .field("tp_type", tp_type)
-                .field("complexity_metric", complexity_metric)
-                .field("max_complexity", max_complexity)
-                .field("output", output)
-                .field("distance", distance)
-                .field("penalties", penalties)
-                .field("minimal", minimal)
-                .field("fastga_contigs", fastga_contigs)
-                .finish(),
-            Args::Decode {
-                common,
-                tp_type,
-                complexity_metric,
-                sequence_files,
-                sequence_list,
-                keep_old_stats,
-                trace_spacing,
-                distance,
-                penalties,
-                no_banded,
-                max_complexity,
-                memory_mode,
-                fastga_contigs,
-            } => f
-                .debug_struct("Args::Decode")
-                .field("common", common)
-                .field("tp_type", tp_type)
-                .field("complexity_metric", complexity_metric)
-                .field("sequence_files", sequence_files)
-                .field("sequence_list", sequence_list)
-                .field("keep_old_stats", keep_old_stats)
-                .field("trace_spacing", trace_spacing)
-                .field("distance", distance)
-                .field("penalties", penalties)
-                .field("banded", &!no_banded)
-                .field("max_complexity", max_complexity)
-                .field("memory_mode", memory_mode)
-                .field("fastga_contigs", fastga_contigs)
-                .finish(),
-            Args::Compress {
-                input,
-                output,
-                tp_type,
-                max_complexity,
-                complexity_metric,
-                distance,
-                penalties,
-                strategy_str,
-                all_records,
-                threads,
-                verbose,
-            } => f
-                .debug_struct("Args::Compress")
-                .field("input", input)
-                .field("output", output)
-                .field("tp_type", tp_type)
-                .field("max_complexity", max_complexity)
-                .field("complexity_metric", complexity_metric)
-                .field("distance", distance)
-                .field("penalties", penalties)
-                .field("strategy_str", strategy_str)
-                .field("all_records", all_records)
-                .field("threads", threads)
-                .field("verbose", verbose)
-                .finish(),
-            Args::Decompress {
-                input,
-                output,
-                decode,
-                sequence_files,
-                sequence_list,
-                keep_old_stats,
-                memory_mode,
-                verbose,
-            } => f
-                .debug_struct("Args::Decompress")
-                .field("input", input)
-                .field("output", output)
-                .field("decode", decode)
-                .field("sequence_files", sequence_files)
-                .field("sequence_list", sequence_list)
-                .field("keep_old_stats", keep_old_stats)
-                .field("memory_mode", memory_mode)
-                .field("verbose", verbose)
-                .finish(),
-            #[cfg(debug_assertions)]
-            Args::Debug {
-                paf,
-                threads,
-                sequence_files,
-                sequence_list,
-                penalties,
-                max_complexity,
-                verbose,
-            } => f
-                .debug_struct("Args::Debug")
-                .field("paf", paf)
-                .field("threads", threads)
-                .field("sequence_files", sequence_files)
-                .field("sequence_list", sequence_list)
-                .field("penalties", penalties)
-                .field("max_complexity", max_complexity)
-                .field("verbose", verbose)
-                .finish(),
-        }
-    }
-}
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Parse command-line arguments.
@@ -536,15 +344,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     match args {
         Args::Encode {
             common,
-            tp_type,
-            max_complexity,
-            complexity_metric,
+            tp,
             output,
-            distance,
-            penalties,
             minimal,
-            fastga_contigs,
         } => {
+            let TracepointOpts {
+                tp_type,
+                max_complexity,
+                complexity_metric,
+                distance,
+                penalties,
+                fastga_contigs,
+            } = tp;
             setup_logger(common.verbose);
 
             // Set the thread pool size before any rayon use
@@ -636,19 +447,22 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
         Args::Decode {
             common,
-            tp_type,
+            tp,
             sequence_files,
             sequence_list,
-            penalties,
             trace_spacing,
-            distance,
-            complexity_metric,
-            max_complexity,
             no_banded,
             keep_old_stats,
             memory_mode,
-            fastga_contigs,
         } => {
+            let TracepointOpts {
+                tp_type,
+                max_complexity,
+                complexity_metric,
+                distance,
+                penalties,
+                fastga_contigs,
+            } = tp;
             setup_logger(common.verbose);
 
             let banded = !no_banded;
@@ -850,16 +664,20 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         Args::Compress {
             input,
             output,
-            tp_type,
-            max_complexity,
-            complexity_metric,
-            distance,
-            penalties,
+            tp,
             strategy_str,
             all_records,
             threads,
             verbose,
         } => {
+            let TracepointOpts {
+                tp_type,
+                max_complexity,
+                complexity_metric,
+                distance,
+                penalties,
+                fastga_contigs,
+            } = tp;
             setup_logger(verbose);
 
             // Set the thread pool size before any rayon use
@@ -882,6 +700,29 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 ComplexityMetric::EditDistance // Dummy value, not used
             } else {
                 complexity_metric.unwrap_or(ComplexityMetric::EditDistance)
+            };
+
+            // Optional FASTGA contig table: enables contig-aware per-segment fastga compression
+            // (each cg:Z record splits into per-segment records, like `encode --fastga-contigs`).
+            let contig_table = match &fastga_contigs {
+                Some(path) => {
+                    if !matches!(tp_type, TracepointType::Fastga) {
+                        warn!("--fastga-contigs is only used with --type fastga; ignoring");
+                        None
+                    } else {
+                        match load_contig_table(path) {
+                            Ok(t) => {
+                                info!("Loaded fastga contig table: {} scaffolds from {}", t.len(), path);
+                                Some(t)
+                            }
+                            Err(e) => {
+                                error!("Failed to load --fastga-contigs '{}': {}", path, e);
+                                std::process::exit(1);
+                            }
+                        }
+                    }
+                }
+                None => None,
             };
 
             if all_records {
@@ -959,7 +800,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     .tp_type(tp_type)
                     .max_complexity(max_complexity)
                     .complexity_metric(complexity_metric)
-                    .distance(tpa_distance);
+                    .distance(tpa_distance)
+                    .contig_table(contig_table);
 
                 if all_records {
                     cfg = cfg.all_records();
@@ -982,7 +824,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     .tp_type(tp_type)
                     .max_complexity(max_complexity)
                     .complexity_metric(complexity_metric)
-                    .distance(tpa_distance);
+                    .distance(tpa_distance)
+                    .contig_table(contig_table);
 
                 if all_records {
                     cfg = cfg.all_records();
@@ -2076,7 +1919,7 @@ fn process_fastga_with_overflow(
             let singles: Vec<usize> = tracepoints.iter().map(|(_d, b)| *b).collect();
             format_tracepoints(&TracepointData::FastgaNoDiff(singles))
         } else {
-            format_tracepoints(&TracepointData::Fastga(tracepoints.clone()))
+            format_ab_tracepoints(tracepoints)
         };
         let alignment_length = seg_query_end - seg_query_start;
         let matches = alignment_length.saturating_sub(sum_of_differences);
