@@ -94,9 +94,9 @@ dependencies = [
 
 [[package]]
 name = "anyhow"
-version = "1.0.102"
+version = "1.0.103"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7f202df86484c868dbad7eaa557ef785d5c66295e41b460ef922eca0723b842c"
+checksum = "2a4385e2e34eb35d6b3efe798b9eb88096925d87726c0798709bf56d9ed84af3"
 
 [[package]]
 name = "arbitrary-chunks"
@@ -292,6 +292,7 @@ dependencies = [
  "indicatif",
  "lib_wfa2",
  "log",
+ "mimalloc",
  "ragc-core",
  "rayon",
  "rust-htslib",
@@ -1019,6 +1020,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "libmimalloc-sys"
+version = "0.1.49"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6a45a52f43e1c16f667ccfe4dd8c85b7f7c204fd5e3bf46c5b0db9a5c3c0b8e9"
+dependencies = [
+ "cc",
+]
+
+[[package]]
 name = "libz-sys"
 version = "1.1.29"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1063,6 +1073,15 @@ name = "memchr"
 version = "2.8.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "88904434abc2901f197fe8cc55f0445e7ded921dba5911dad2e2b39b48e663c4"
+
+[[package]]
+name = "mimalloc"
+version = "0.1.52"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "2d4139bb28d14ad1facf21d5eb8825051b326e172d216b39f6d31df53cc97862"
+dependencies = [
+ "libmimalloc-sys",
+]
 
 [[package]]
 name = "minimal-lexical"
@@ -1694,7 +1713,6 @@ dependencies = [
 [[package]]
 name = "tpa"
 version = "0.1.0"
-source = "git+https://github.com/AndreaGuarracino/tpa?rev=774b89f544bdcee3c8fd5fc2b48fa53be555464b#774b89f544bdcee3c8fd5fc2b48fa53be555464b"
 dependencies = [
  "bgzip",
  "env_logger",
@@ -1710,7 +1728,7 @@ dependencies = [
 [[package]]
 name = "tracepoints"
 version = "0.1.0"
-source = "git+https://github.com/AndreaGuarracino/tracepoints?rev=9e11140392fe242081a38faa7255ef4775b235fa#9e11140392fe242081a38faa7255ef4775b235fa"
+source = "git+https://github.com/AndreaGuarracino/tracepoints?rev=c0feb1dfc13ef877171ceae3ac58a14c5a9dfff4#c0feb1dfc13ef877171ceae3ac58a14c5a9dfff4"
 dependencies = [
  "lib_wfa2",
 ]

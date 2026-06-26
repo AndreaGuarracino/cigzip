@@ -12,6 +12,7 @@ log = "0.4"
 env_logger = "0.11"
 rayon = "1.10"
 indicatif="0.18"
+mimalloc = "0.1"
 
 # Dependencies for AGC format (for sequences) support
 ragc-core = { git = "https://github.com/ekg/ragc", rev = "40e5cad" }
@@ -19,9 +20,9 @@ ragc-core = { git = "https://github.com/ekg/ragc", rev = "40e5cad" }
 #lib_wfa2 = { path = "/home/guarracino/Dropbox/git/lib_wfa2"}
 lib_wfa2 = { git = "https://github.com/AndreaGuarracino/lib_wfa2", rev = "8859b6a214141968f37d9bcb22552408318adda0" }
 #tracepoints = { path = "/home/guarracino/git/tracepoints"}
-tracepoints = { git = "https://github.com/AndreaGuarracino/tracepoints", rev = "9e11140392fe242081a38faa7255ef4775b235fa" }
-#tpa = { path = "/home/guarracino/git/tpa" }
-tpa = { git = "https://github.com/AndreaGuarracino/tpa", rev = "774b89f544bdcee3c8fd5fc2b48fa53be555464b" }
+tracepoints = { git = "https://github.com/AndreaGuarracino/tracepoints", rev = "c0feb1dfc13ef877171ceae3ac58a14c5a9dfff4" }
+tpa = { path = "/home/guarracino/git/tpa" }
+#tpa = { git = "https://github.com/AndreaGuarracino/tpa", rev = "fb8892c95a2945c3669bafd3c4c3f4df06a50e22" }
 
 [features]
 default = []

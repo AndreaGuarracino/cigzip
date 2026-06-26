@@ -1,3 +1,6 @@
+#[global_allocator]
+static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
+
 mod sequence;
 
 use crate::sequence::{collect_sequence_paths, SequenceIndex};
@@ -27,9 +30,9 @@ use tracepoints::{
 };
 use std::collections::HashMap;
 use tracepoints::{
-    cigar_to_mixed_tracepoints, cigar_to_tracepoints, cigar_to_tracepoints_fastga,
-    cigar_to_tracepoints_fastga_with_contigs, cigar_to_variable_tracepoints, ComplexityMetric,
-    TracepointData, TracepointType,
+    cigar_to_mixed_tracepoints, cigar_to_tracepoints_fastga,
+    cigar_to_tracepoints_fastga_with_contigs, cigar_to_tracepoints_from_ops,
+    cigar_to_variable_tracepoints, ComplexityMetric, TracepointData, TracepointType,
 };
 
 /// Load a FASTGA contig table: lines "scaffold<TAB>sbeg<TAB>send" -> scaffold -> sorted (sbeg,send).
@@ -290,6 +293,10 @@ enum Args {
         /// File listing sequence file paths (one per line)
         #[arg(long = "sequence-list", value_name = "FILE")]
         sequence_list: Option<String>,
+
+        /// FASTGA contig table (required with --decode to correctly reconstruct contig-aware FASTGA TPA)
+        #[arg(long = "fastga-contigs", value_name = "FILE")]
+        fastga_contigs: Option<String>,
 
         /// Keep original gi/bi/sc/df fields as go/bo/so/do
         #[arg(long = "keep-old-stats")]
@@ -608,57 +615,87 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
                 let memory_mode_wfa2 = memory_mode.to_lib_wfa2();
 
-                reader
-                    .iter_records()?
-                    .map_while(Result::ok)
-                    .par_bridge()
-                    .for_each_init(
-                        || distance_mode.create_aligner(None, Some(&memory_mode_wfa2)),
-                        |aligner, record| {
-                            process_decompress_record(
-                                &record,
-                                sequence_index.as_ref(),
-                                &distance_mode,
-                                is_fastga,
-                                trace_spacing,
-                                &complexity_metric,
-                                banded,
-                                banded_max_complexity,
-                                keep_old_stats,
-                                aligner,
-                                &contig_table,
-                            );
-                        },
-                    );
+                // Decode chunks in parallel (per-thread aligner) but emit in input order.
+                let stdout = io::stdout();
+                let mut writer = BufWriter::new(stdout.lock());
+                let mut it = reader.iter_records()?;
+                loop {
+                    // collect::<io::Result<Vec<_>>>()? propagates a mid-stream read error instead
+                    // of silently truncating (no more map_while(Result::ok)).
+                    let chunk: Vec<_> = it.by_ref().take(2048).collect::<io::Result<Vec<_>>>()?;
+                    if chunk.is_empty() {
+                        break;
+                    }
+                    let lines: Vec<String> = chunk
+                        .par_iter()
+                        .map_init(
+                            || distance_mode.create_aligner(None, Some(&memory_mode_wfa2)),
+                            |aligner, record| {
+                                process_decompress_record(
+                                    record,
+                                    sequence_index.as_ref(),
+                                    &distance_mode,
+                                    is_fastga,
+                                    trace_spacing,
+                                    &complexity_metric,
+                                    banded,
+                                    banded_max_complexity,
+                                    keep_old_stats,
+                                    aligner,
+                                    &contig_table,
+                                )
+                            },
+                        )
+                        .collect();
+                    for l in &lines {
+                        writeln!(writer, "{}", l)?;
+                    }
+                }
+                writer.flush()?;
             } else {
-                // Read from text PAF format using streaming parallelization
+                // Read from text PAF; decode chunks in parallel but emit in input order.
                 let paf_reader = get_paf_reader(&common.paf)?;
                 let memory_mode_wfa2 = memory_mode.to_lib_wfa2();
-
-                paf_reader
-                    .lines()
-                    .map_while(Result::ok)
-                    .filter(|line| !line.trim().is_empty() && !line.starts_with('#'))
-                    .par_bridge()
-                    .for_each_init(
-                        || distance_mode.create_aligner(None, Some(&memory_mode_wfa2)),
-                        |aligner, line| {
-                            process_decompress_line(
-                                &line,
-                                &tp_type,
-                                sequence_index.as_ref(),
-                                &distance_mode,
-                                is_fastga,
-                                trace_spacing,
-                                &complexity_metric,
-                                banded,
-                                banded_max_complexity,
-                                keep_old_stats,
-                                aligner,
-                                &contig_table,
-                            );
-                        },
-                    );
+                let stdout = io::stdout();
+                let mut writer = BufWriter::new(stdout.lock());
+                // Keep Err lines so a read failure propagates instead of silently truncating.
+                let mut lines_it = paf_reader.lines().filter(|r| match r {
+                    Ok(line) => !line.trim().is_empty() && !line.starts_with('#'),
+                    Err(_) => true,
+                });
+                loop {
+                    let chunk: Vec<String> =
+                        lines_it.by_ref().take(2048).collect::<io::Result<Vec<_>>>()?;
+                    if chunk.is_empty() {
+                        break;
+                    }
+                    let out: Vec<Option<String>> = chunk
+                        .par_iter()
+                        .map_init(
+                            || distance_mode.create_aligner(None, Some(&memory_mode_wfa2)),
+                            |aligner, line| {
+                                process_decompress_line(
+                                    line,
+                                    &tp_type,
+                                    sequence_index.as_ref(),
+                                    &distance_mode,
+                                    is_fastga,
+                                    trace_spacing,
+                                    &complexity_metric,
+                                    banded,
+                                    banded_max_complexity,
+                                    keep_old_stats,
+                                    aligner,
+                                    &contig_table,
+                                )
+                            },
+                        )
+                        .collect();
+                    for l in out.into_iter().flatten() {
+                        writeln!(writer, "{}", l)?;
+                    }
+                }
+                writer.flush()?;
             }
         }
         Args::Compress {
@@ -846,6 +883,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             decode,
             sequence_files,
             sequence_list,
+            fastga_contigs,
             keep_old_stats,
             memory_mode,
             verbose,
@@ -902,28 +940,61 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 let trace_spacing = if is_fastga { max_complexity } else { 0 };
                 let memory_mode_wfa2 = memory_mode.to_lib_wfa2();
 
-                reader
-                    .iter_records()?
-                    .map_while(Result::ok)
-                    .par_bridge()
-                    .for_each_init(
-                        || distance_mode.create_aligner(None, Some(&memory_mode_wfa2)),
-                        |aligner, record| {
-                            process_decompress_record(
-                                &record,
-                                &sequence_index,
-                                &distance_mode,
-                                is_fastga,
-                                trace_spacing,
-                                &complexity_metric,
-                                false, // banded
-                                None,  // banded_max_complexity
-                                keep_old_stats,
-                                aligner,
-                                &HashMap::new(), // no contig table for the Decompress command
-                            );
-                        },
-                    );
+                // Contig table is required to reconstruct contig-aware FASTGA TPA correctly (the
+                // trace grid is contig-local). Without it, N-gap-split records decode at the wrong
+                // offset.
+                let contig_table: HashMap<String, Vec<(usize, usize)>> = match &fastga_contigs {
+                    Some(path) => load_contig_table(path).unwrap_or_else(|e| {
+                        error!("Failed to read --fastga-contigs {}: {}", path, e);
+                        std::process::exit(1);
+                    }),
+                    None => HashMap::new(),
+                };
+                if is_fastga && contig_table.is_empty() {
+                    warn!("Decoding contig-aware FASTGA TPA without --fastga-contigs; reconstruction may be incorrect at N-gap boundaries");
+                }
+
+                // Decode chunks in parallel (per-thread aligner) but emit in input order, to the
+                // selected output (file or stdout) — not unordered stdout from worker threads.
+                let mut writer: Box<dyn Write> = if output == "-" {
+                    Box::new(BufWriter::new(io::stdout()))
+                } else {
+                    Box::new(BufWriter::new(File::create(&output)?))
+                };
+                let mut it = reader.iter_records()?;
+                loop {
+                    // collect::<io::Result<Vec<_>>>()? propagates a mid-stream read error instead
+                    // of silently truncating (no more map_while(Result::ok)).
+                    let chunk: Vec<_> = it.by_ref().take(2048).collect::<io::Result<Vec<_>>>()?;
+                    if chunk.is_empty() {
+                        break;
+                    }
+                    let lines: Vec<String> = chunk
+                        .par_iter()
+                        .map_init(
+                            || distance_mode.create_aligner(None, Some(&memory_mode_wfa2)),
+                            |aligner, record| {
+                                process_decompress_record(
+                                    record,
+                                    &sequence_index,
+                                    &distance_mode,
+                                    is_fastga,
+                                    trace_spacing,
+                                    &complexity_metric,
+                                    false, // banded
+                                    None,  // banded_max_complexity
+                                    keep_old_stats,
+                                    aligner,
+                                    &contig_table,
+                                )
+                            },
+                        )
+                        .collect();
+                    for l in &lines {
+                        writeln!(writer, "{}", l)?;
+                    }
+                }
+                writer.flush()?;
 
                 if output == "-" {
                     info!("Decompressed and decoded {} to stdout", input);
@@ -1716,12 +1787,6 @@ fn process_compress_line(
     };
     let cigar = &cg_field[5..];
 
-    // Parse CIGAR once and compute all stats
-    let stats = CigarStats::from_cigar(cigar);
-    let gap_compressed_identity = stats.gap_compressed_identity();
-    let block_identity = stats.block_identity();
-    let alignment_score = stats.alignment_score(distance_mode);
-
     // Check for existing df:i: field
     let existing_df = fields
         .iter()
@@ -1730,14 +1795,16 @@ fn process_compress_line(
 
     // Handle FastGA tracepoints with potential overflow splitting
     if matches!(tp_type, TracepointType::Fastga | TracepointType::FastgaNoDiff) {
+        // FastGA path unchanged: it does its own CIGAR handling (N-gap splitting).
+        let stats = CigarStats::from_cigar(cigar);
         process_fastga_with_overflow(
             &fields,
             cigar,
             *tp_type,
             max_complexity,
-            gap_compressed_identity,
-            block_identity,
-            alignment_score,
+            stats.gap_compressed_identity(),
+            stats.block_identity(),
+            stats.alignment_score(distance_mode),
             existing_df,
             complexity_metric,
             writer,
@@ -1745,15 +1812,19 @@ fn process_compress_line(
             contig_table,
         );
     } else {
-        // Handle other tracepoint types (no overflow splitting needed)
+        // Standard/Mixed/Variable: parse the CIGAR once, share the ops between stats and the
+        // tracepoint conversion instead of parsing the string twice.
+        let ops = tracepoints::cigar_str_to_cigar_ops(cigar);
+        let stats = CigarStats::from_ops(&ops);
         process_single_record(
             &fields,
             cigar,
+            ops,
             tp_type,
             max_complexity,
-            gap_compressed_identity,
-            block_identity,
-            alignment_score,
+            stats.gap_compressed_identity(),
+            stats.block_identity(),
+            stats.alignment_score(distance_mode),
             existing_df,
             complexity_metric,
             writer,
@@ -1981,6 +2052,7 @@ fn process_fastga_with_overflow(
 fn process_single_record(
     fields: &[&str],
     cigar: &str,
+    ops: Vec<(usize, char)>,
     tp_type: &TracepointType,
     max_complexity: u32,
     gap_compressed_identity: f32,
@@ -1994,7 +2066,8 @@ fn process_single_record(
     // Convert CIGAR based on tracepoint type and complexity metric
     let (tracepoints_str, df_value) = match tp_type {
         TracepointType::Standard => {
-            let tp = cigar_to_tracepoints(cigar, max_complexity, *complexity_metric);
+            // Reuse the ops already parsed for stats instead of re-parsing the CIGAR string.
+            let tp = cigar_to_tracepoints_from_ops(&ops, max_complexity, *complexity_metric);
             (format_tracepoints(&TracepointData::Standard(tp)), None)
         }
         TracepointType::Mixed => {
@@ -2064,14 +2137,14 @@ fn process_decompress_line(
     keep_old_stats: bool,
     aligner: &mut lib_wfa2::affine_wavefront::AffineWavefronts,
     contig_table: &HashMap<String, Vec<(usize, usize)>>,
-) {
+) -> Option<String> {
     let fields: Vec<&str> = line.split('\t').collect();
     if fields.len() < 12 {
         warn!(
             "{}",
             message_with_truncate_paf_file("Skipping malformed PAF line", line)
         );
-        return;
+        return None;
     }
 
     let Some(tp_field) = fields.iter().find(|&&s| s.starts_with("tp:Z:")) else {
@@ -2079,7 +2152,7 @@ fn process_decompress_line(
             "{}",
             message_with_truncate_paf_file("Skipping tracepoints-less PAF line", line)
         );
-        return;
+        return None;
     };
     let tracepoints_str = &tp_field[5..]; // Direct slice instead of strip_prefix("tp:Z:")
 
@@ -2272,7 +2345,7 @@ fn process_decompress_line(
         }
     }
 
-    println!("{}", new_fields.join("\t"));
+    Some(new_fields.join("\t"))
 }
 
 /// Process a single binary record for decompression (called from par_bridge())
@@ -2288,7 +2361,7 @@ fn process_decompress_record(
     keep_old_stats: bool,
     aligner: &mut lib_wfa2::affine_wavefront::AffineWavefronts,
     contig_table: &HashMap<String, Vec<(usize, usize)>>,
-) {
+) -> String {
     // Get sequence names directly from record
     let query_name = &record.query_name;
     let target_name = &record.target_name;
@@ -2445,7 +2518,7 @@ fn process_decompress_record(
     // Replace tracepoints with CIGAR
     new_fields.push(format!("cg:Z:{}", cigar));
 
-    println!("{}", new_fields.join("\t"));
+    new_fields.join("\t")
 }
 
 /// Combines a message with the first 9 columns of a PAF line.
