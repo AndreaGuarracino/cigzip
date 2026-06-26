@@ -1,6 +1,3 @@
-#[global_allocator]
-static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
-
 mod sequence;
 
 use crate::sequence::{collect_sequence_paths, SequenceIndex};
