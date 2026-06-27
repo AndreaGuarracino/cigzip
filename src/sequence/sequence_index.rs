@@ -83,4 +83,24 @@ impl SequenceIndex {
             SequenceIndex::Agc(index) => index.fetch_sequence(seq_name, start, end),
         }
     }
+
+    /// Fetch into a caller-provided buffer (reused across records). Clears `out` first.
+    pub fn fetch_sequence_into(
+        &self,
+        seq_name: &str,
+        start: usize,
+        end: usize,
+        out: &mut Vec<u8>,
+    ) -> Result<(), String> {
+        match self {
+            SequenceIndex::Fasta(index) => index.fetch_sequence_into(seq_name, start, end, out),
+            SequenceIndex::Agc(index) => {
+                // AGC is not the hot path here; reuse `out` via copy.
+                let v = index.fetch_sequence(seq_name, start, end)?;
+                out.clear();
+                out.extend_from_slice(&v);
+                Ok(())
+            }
+        }
+    }
 }
