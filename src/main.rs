@@ -626,8 +626,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     let lines: Vec<String> = chunk
                         .par_iter()
                         .map_init(
-                            || distance_mode.create_aligner(None, Some(&memory_mode_wfa2)),
-                            |aligner, record| {
+                            || {
+                                (
+                                    distance_mode.create_aligner(None, Some(&memory_mode_wfa2)),
+                                    Vec::<u8>::new(),
+                                    Vec::<u8>::new(),
+                                )
+                            },
+                            |(aligner, query_buf, target_buf), record| {
                                 process_decompress_record(
                                     record,
                                     sequence_index.as_ref(),
@@ -639,6 +645,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                     banded_max_complexity,
                                     keep_old_stats,
                                     aligner,
+                                    query_buf,
+                                    target_buf,
                                     &contig_table,
                                 )
                             },
@@ -669,8 +677,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     let out: Vec<Option<String>> = chunk
                         .par_iter()
                         .map_init(
-                            || distance_mode.create_aligner(None, Some(&memory_mode_wfa2)),
-                            |aligner, line| {
+                            || {
+                                (
+                                    distance_mode.create_aligner(None, Some(&memory_mode_wfa2)),
+                                    Vec::<u8>::new(),
+                                    Vec::<u8>::new(),
+                                )
+                            },
+                            |(aligner, query_buf, target_buf), line| {
                                 process_decompress_line(
                                     line,
                                     &tp_type,
@@ -683,6 +697,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                     banded_max_complexity,
                                     keep_old_stats,
                                     aligner,
+                                    query_buf,
+                                    target_buf,
                                     &contig_table,
                                 )
                             },
@@ -969,8 +985,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     let lines: Vec<String> = chunk
                         .par_iter()
                         .map_init(
-                            || distance_mode.create_aligner(None, Some(&memory_mode_wfa2)),
-                            |aligner, record| {
+                            || {
+                                (
+                                    distance_mode.create_aligner(None, Some(&memory_mode_wfa2)),
+                                    Vec::<u8>::new(),
+                                    Vec::<u8>::new(),
+                                )
+                            },
+                            |(aligner, query_buf, target_buf), record| {
                                 process_decompress_record(
                                     record,
                                     &sequence_index,
@@ -982,6 +1004,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                     None,  // banded_max_complexity
                                     keep_old_stats,
                                     aligner,
+                                    query_buf,
+                                    target_buf,
                                     &contig_table,
                                 )
                             },
@@ -2133,6 +2157,8 @@ fn process_decompress_line(
     banded_max_complexity: Option<u32>,
     keep_old_stats: bool,
     aligner: &mut lib_wfa2::affine_wavefront::AffineWavefronts,
+    query_buf: &mut Vec<u8>,
+    target_buf: &mut Vec<u8>,
     contig_table: &HashMap<String, Vec<(usize, usize)>>,
 ) -> Option<String> {
     let fields: Vec<&str> = line.split('\t').collect();
@@ -2200,14 +2226,14 @@ fn process_decompress_line(
         query_end,
         if strand == "-" && !fastga { "-" } else { "+" }
     );
-    let mut query_seq = sequence_index
-        .fetch_sequence(query_name, query_start, query_end)
-        .unwrap_or_else(|msg| {
-            error!("{}", message_with_truncate_paf_file(&msg, line));
-            std::process::exit(1);
-        });
+    if let Err(msg) =
+        sequence_index.fetch_sequence_into(query_name, query_start, query_end, query_buf)
+    {
+        error!("{}", message_with_truncate_paf_file(&msg, line));
+        std::process::exit(1);
+    }
     if strand == "-" && !fastga {
-        query_seq = reverse_complement(&query_seq);
+        reverse_complement_in_place(query_buf);
     }
 
     debug!(
@@ -2217,14 +2243,14 @@ fn process_decompress_line(
         target_end,
         if strand == "-" && fastga { "-" } else { "+" }
     );
-    let mut target_seq = sequence_index
-        .fetch_sequence(target_name, target_start, target_end)
-        .unwrap_or_else(|msg| {
-            error!("{}", message_with_truncate_paf_file(&msg, line));
-            std::process::exit(1);
-        });
+    if let Err(msg) =
+        sequence_index.fetch_sequence_into(target_name, target_start, target_end, target_buf)
+    {
+        error!("{}", message_with_truncate_paf_file(&msg, line));
+        std::process::exit(1);
+    }
     if fastga && strand == "-" {
-        target_seq = reverse_complement(&target_seq);
+        reverse_complement_in_place(target_buf);
     }
 
     // Parse tracepoints based on type (preserve Fastga vs FastgaNoDiff)
@@ -2269,8 +2295,8 @@ fn process_decompress_line(
     };
     let cigar = reconstruct_cigar_with_aligner(
         &tracepoints,
-        &query_seq,
-        &target_seq,
+        &query_buf[..],
+        &target_buf[..],
         query_offset,
         target_offset,
         *complexity_metric,
@@ -2357,6 +2383,8 @@ fn process_decompress_record(
     banded_max_complexity: Option<u32>,
     keep_old_stats: bool,
     aligner: &mut lib_wfa2::affine_wavefront::AffineWavefronts,
+    query_buf: &mut Vec<u8>,
+    target_buf: &mut Vec<u8>,
     contig_table: &HashMap<String, Vec<(usize, usize)>>,
 ) -> String {
     // Get sequence names directly from record
@@ -2374,18 +2402,17 @@ fn process_decompress_record(
             "+"
         }
     );
-    let mut query_seq = sequence_index
-        .fetch_sequence(
-            query_name,
-            record.query_start as usize,
-            record.query_end as usize,
-        )
-        .unwrap_or_else(|msg| {
-            error!("{}", msg);
-            std::process::exit(1);
-        });
+    if let Err(msg) = sequence_index.fetch_sequence_into(
+        query_name,
+        record.query_start as usize,
+        record.query_end as usize,
+        query_buf,
+    ) {
+        error!("{}", msg);
+        std::process::exit(1);
+    }
     if record.strand == '-' && !fastga {
-        query_seq = reverse_complement(&query_seq);
+        reverse_complement_in_place(query_buf);
     }
 
     debug!(
@@ -2399,18 +2426,17 @@ fn process_decompress_record(
             "+"
         }
     );
-    let mut target_seq = sequence_index
-        .fetch_sequence(
-            target_name,
-            record.target_start as usize,
-            record.target_end as usize,
-        )
-        .unwrap_or_else(|msg| {
-            error!("{}", msg);
-            std::process::exit(1);
-        });
+    if let Err(msg) = sequence_index.fetch_sequence_into(
+        target_name,
+        record.target_start as usize,
+        record.target_end as usize,
+        target_buf,
+    ) {
+        error!("{}", msg);
+        std::process::exit(1);
+    }
     if fastga && record.strand == '-' {
-        target_seq = reverse_complement(&target_seq);
+        reverse_complement_in_place(target_buf);
     }
 
     // Compute offsets (only used for FastGA)
@@ -2436,8 +2462,8 @@ fn process_decompress_record(
     };
     let cigar = reconstruct_cigar_with_aligner(
         &record.tracepoints,
-        &query_seq,
-        &target_seq,
+        &query_buf[..],
+        &target_buf[..],
         query_offset,
         target_offset,
         *complexity_metric,
@@ -2693,6 +2719,30 @@ fn reverse_complement(seq: &[u8]) -> Vec<u8> {
             _ => b'N', // Convert any unexpected bases to N
         })
         .collect()
+}
+
+/// In-place reverse-complement (same base mapping as `reverse_complement`), so a
+/// reused fetch buffer can be complemented without a fresh allocation.
+fn reverse_complement_in_place(seq: &mut [u8]) {
+    let comp = |c: u8| match c {
+        b'A' => b'T',
+        b'T' => b'A',
+        b'G' => b'C',
+        b'C' => b'G',
+        b'N' => b'N',
+        _ => b'N',
+    };
+    let n = seq.len();
+    let mut i = 0;
+    let mut j = n;
+    while i < j {
+        j -= 1;
+        let a = comp(seq[i]);
+        let b = comp(seq[j]);
+        seq[i] = b;
+        seq[j] = a;
+        i += 1;
+    }
 }
 
 // /// Calculate alignment coordinates from a CIGAR string and starting positions
