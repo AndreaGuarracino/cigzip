@@ -114,12 +114,13 @@ enum MemoryModeChoice {
     Medium,
     Low,
     Ultralow,
+    Adaptive,
 }
 
 impl MemoryModeChoice {
     fn to_lib_wfa2(self) -> lib_wfa2::affine_wavefront::MemoryMode {
         match self {
-            Self::High => lib_wfa2::affine_wavefront::MemoryMode::High,
+            Self::High | Self::Adaptive => lib_wfa2::affine_wavefront::MemoryMode::High,
             Self::Medium => lib_wfa2::affine_wavefront::MemoryMode::Medium,
             Self::Low => lib_wfa2::affine_wavefront::MemoryMode::Low,
             Self::Ultralow => lib_wfa2::affine_wavefront::MemoryMode::Ultralow,
@@ -134,7 +135,79 @@ impl fmt::Display for MemoryModeChoice {
             MemoryModeChoice::Medium => write!(f, "medium"),
             MemoryModeChoice::Low => write!(f, "low"),
             MemoryModeChoice::Ultralow => write!(f, "ultralow"),
+            MemoryModeChoice::Adaptive => write!(f, "adaptive"),
         }
+    }
+}
+
+/// Largest single-segment span in a tracepoint record. Used by adaptive memory-mode selection.
+fn max_segment_span(tp: &TracepointData) -> usize {
+    use tracepoints::MixedRepresentation;
+    match tp {
+        TracepointData::Standard(v) | TracepointData::Fastga(v) => {
+            v.iter().map(|(a, b)| (*a).max(*b)).max().unwrap_or(0)
+        }
+        TracepointData::FastgaNoDiff(v) => v.iter().copied().max().unwrap_or(0),
+        TracepointData::Variable(v) => {
+            v.iter().map(|(a, b)| (*a).max(b.unwrap_or(0))).max().unwrap_or(0)
+        }
+        TracepointData::Mixed(v) => v
+            .iter()
+            .map(|it| match it {
+                MixedRepresentation::Tracepoint(a, b) => (*a).max(*b),
+                MixedRepresentation::CigarOp(len, _) => *len,
+            })
+            .max()
+            .unwrap_or(0),
+    }
+}
+
+/// Per-thread aligner(s) for decode.
+struct Aligners {
+    primary: lib_wfa2::affine_wavefront::AffineWavefronts,
+    /// Present only in adaptive mode.
+    medium: Option<lib_wfa2::affine_wavefront::AffineWavefronts>,
+    /// Adaptive applies only where medium actually helps: DB-TP + gap-affine2p + mc>=64.
+    gate: bool,
+    /// Route a record to the medium aligner when `max_segment_span * divergence > threshold`.
+    threshold: f64,
+}
+
+impl Aligners {
+    /// Aligner for one record, given its largest segment span and input divergence.
+    #[inline]
+    fn select(
+        &mut self,
+        max_seg: usize,
+        divergence: f64,
+    ) -> &mut lib_wfa2::affine_wavefront::AffineWavefronts {
+        match self.medium.as_mut() {
+            Some(med) if self.gate && (max_seg as f64) * divergence > self.threshold => med,
+            _ => &mut self.primary,
+        }
+    }
+}
+
+/// Build a per-thread `Aligners`: the primary aligner in 
+// `primary_mode`, plus a medium aligner only when `adaptive`.
+fn make_aligners(
+    distance_mode: &Distance,
+    primary_mode: &lib_wfa2::affine_wavefront::MemoryMode,
+    adaptive: bool,
+    gate: bool,
+    threshold: u64,
+) -> Aligners {
+    let primary = distance_mode.create_aligner(None, Some(primary_mode));
+    let medium = if adaptive {
+        Some(distance_mode.create_aligner(None, Some(&lib_wfa2::affine_wavefront::MemoryMode::Medium)))
+    } else {
+        None
+    };
+    Aligners {
+        primary,
+        medium,
+        gate,
+        threshold: threshold as f64,
     }
 }
 
@@ -232,9 +305,14 @@ enum Args {
         #[arg(long = "no-banded")]
         no_banded: bool,
 
-        /// Memory mode for WFA aligner (high, medium, low, ultralow)
+        /// Memory mode for WFA aligner (high, medium, low, ultralow, adaptive)
         #[arg(long = "memory-mode", default_value_t = MemoryModeChoice::High)]
         memory_mode: MemoryModeChoice,
+
+        /// Adaptive threshold: route a record to medium when max_segment_span * divergence
+        /// exceeds this (only with --memory-mode adaptive, DB-TP + gap-affine2p + mc>=64)
+        #[arg(long = "adaptive-threshold", default_value_t = 5000)]
+        adaptive_threshold: u64,
     },
     /// Compress text PAF to binary TPA (text PAF → binary TPA)
     Compress {
@@ -299,9 +377,14 @@ enum Args {
         #[arg(long = "keep-old-stats")]
         keep_old_stats: bool,
 
-        /// Memory mode for WFA aligner (high, medium, low, ultralow)
+        /// Memory mode for WFA aligner (high, medium, low, ultralow, adaptive)
         #[arg(long = "memory-mode", default_value_t = MemoryModeChoice::High)]
         memory_mode: MemoryModeChoice,
+
+        /// Adaptive threshold: route a record to medium when max_segment_span * divergence
+        /// exceeds this (only with --memory-mode adaptive, DB-TP + gap-affine2p + mc>=64)
+        #[arg(long = "adaptive-threshold", default_value_t = 5000)]
+        adaptive_threshold: u64,
 
         /// Verbosity level (0 = error, 1 = info, 2 = debug)
         #[arg(short, long, default_value = "1")]
@@ -458,6 +541,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             no_banded,
             keep_old_stats,
             memory_mode,
+            adaptive_threshold,
         } => {
             let TracepointOpts {
                 tp_type,
@@ -576,6 +660,20 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 }
             };
 
+            // Adaptive memory mode: only with DB-TP (diagonal-distance) + gap-affine2p + mc>=64
+            let adaptive = memory_mode == MemoryModeChoice::Adaptive;
+            let adaptive_gate = adaptive
+                && matches!(complexity_metric, ComplexityMetric::DiagonalDistance)
+                && matches!(distance_mode, Distance::GapAffine2p { .. })
+                && max_complexity.unwrap_or(32) >= 64;
+            if adaptive {
+                info!(
+                    "memory-mode=adaptive: per-record routing {} (needs DB-TP + gap-affine2p + mc>=64); threshold max_seg*div > {}",
+                    if adaptive_gate { "ENABLED" } else { "OFF (regime not eligible -> all high)" },
+                    adaptive_threshold
+                );
+            }
+
             let penalties_summary = penalties_value.as_deref().unwrap_or("n/a");
 
             info!(
@@ -628,12 +726,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         .map_init(
                             || {
                                 (
-                                    distance_mode.create_aligner(None, Some(&memory_mode_wfa2)),
+                                    make_aligners(
+                                        &distance_mode,
+                                        &memory_mode_wfa2,
+                                        adaptive,
+                                        adaptive_gate,
+                                        adaptive_threshold,
+                                    ),
                                     Vec::<u8>::new(),
                                     Vec::<u8>::new(),
                                 )
                             },
-                            |(aligner, query_buf, target_buf), record| {
+                            |(aligners, query_buf, target_buf), record| {
                                 process_decompress_record(
                                     record,
                                     sequence_index.as_ref(),
@@ -644,7 +748,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                     banded,
                                     banded_max_complexity,
                                     keep_old_stats,
-                                    aligner,
+                                    aligners,
                                     query_buf,
                                     target_buf,
                                     &contig_table,
@@ -679,12 +783,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         .map_init(
                             || {
                                 (
-                                    distance_mode.create_aligner(None, Some(&memory_mode_wfa2)),
+                                    make_aligners(
+                                        &distance_mode,
+                                        &memory_mode_wfa2,
+                                        adaptive,
+                                        adaptive_gate,
+                                        adaptive_threshold,
+                                    ),
                                     Vec::<u8>::new(),
                                     Vec::<u8>::new(),
                                 )
                             },
-                            |(aligner, query_buf, target_buf), line| {
+                            |(aligners, query_buf, target_buf), line| {
                                 process_decompress_line(
                                     line,
                                     &tp_type,
@@ -696,7 +806,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                     banded,
                                     banded_max_complexity,
                                     keep_old_stats,
-                                    aligner,
+                                    aligners,
                                     query_buf,
                                     target_buf,
                                     &contig_table,
@@ -899,6 +1009,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             fastga_contigs,
             keep_old_stats,
             memory_mode,
+            adaptive_threshold,
             verbose,
         } => {
             setup_logger(verbose);
@@ -953,6 +1064,20 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 let trace_spacing = if is_fastga { max_complexity } else { 0 };
                 let memory_mode_wfa2 = memory_mode.to_lib_wfa2();
 
+                // Adaptive memory mode: gate to DB-TP + gap-affine2p + mc>=64.
+                let adaptive = memory_mode == MemoryModeChoice::Adaptive;
+                let adaptive_gate = adaptive
+                    && matches!(complexity_metric, ComplexityMetric::DiagonalDistance)
+                    && matches!(distance_mode, Distance::GapAffine2p { .. })
+                    && max_complexity >= 64;
+                if adaptive {
+                    info!(
+                        "memory-mode=adaptive: per-record routing {} (needs DB-TP + gap-affine2p + mc>=64); threshold max_seg*div > {}",
+                        if adaptive_gate { "ENABLED" } else { "OFF (regime not eligible -> all high)" },
+                        adaptive_threshold
+                    );
+                }
+
                 // Contig table is required to reconstruct contig-aware FASTGA TPA correctly (the
                 // trace grid is contig-local). Without it, N-gap-split records decode at the wrong
                 // offset.
@@ -987,12 +1112,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         .map_init(
                             || {
                                 (
-                                    distance_mode.create_aligner(None, Some(&memory_mode_wfa2)),
+                                    make_aligners(
+                                        &distance_mode,
+                                        &memory_mode_wfa2,
+                                        adaptive,
+                                        adaptive_gate,
+                                        adaptive_threshold,
+                                    ),
                                     Vec::<u8>::new(),
                                     Vec::<u8>::new(),
                                 )
                             },
-                            |(aligner, query_buf, target_buf), record| {
+                            |(aligners, query_buf, target_buf), record| {
                                 process_decompress_record(
                                     record,
                                     &sequence_index,
@@ -1003,7 +1134,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                     false, // banded
                                     None,  // banded_max_complexity
                                     keep_old_stats,
-                                    aligner,
+                                    aligners,
                                     query_buf,
                                     target_buf,
                                     &contig_table,
@@ -2156,7 +2287,7 @@ fn process_decompress_line(
     banded: bool,
     banded_max_complexity: Option<u32>,
     keep_old_stats: bool,
-    aligner: &mut lib_wfa2::affine_wavefront::AffineWavefronts,
+    aligners: &mut Aligners,
     query_buf: &mut Vec<u8>,
     target_buf: &mut Vec<u8>,
     contig_table: &HashMap<String, Vec<(usize, usize)>>,
@@ -2293,6 +2424,18 @@ fn process_decompress_line(
     } else {
         None
     };
+    // Adaptive memory-mode pick (no-op unless adaptive + eligible regime). Divergence from
+    // the input PAF: col10 = residue matches, col11 = alignment block length.
+    let divergence = {
+        let matches = fields.get(9).and_then(|s| s.parse::<f64>().ok()).unwrap_or(0.0);
+        let blocklen = fields.get(10).and_then(|s| s.parse::<f64>().ok()).unwrap_or(0.0);
+        if blocklen > 0.0 {
+            1.0 - matches / blocklen
+        } else {
+            0.0
+        }
+    };
+    let aligner = aligners.select(max_segment_span(&tracepoints), divergence);
     let cigar = reconstruct_cigar_with_aligner(
         &tracepoints,
         &query_buf[..],
@@ -2382,7 +2525,7 @@ fn process_decompress_record(
     banded: bool,
     banded_max_complexity: Option<u32>,
     keep_old_stats: bool,
-    aligner: &mut lib_wfa2::affine_wavefront::AffineWavefronts,
+    aligners: &mut Aligners,
     query_buf: &mut Vec<u8>,
     target_buf: &mut Vec<u8>,
     contig_table: &HashMap<String, Vec<(usize, usize)>>,
@@ -2460,6 +2603,14 @@ fn process_decompress_record(
     } else {
         None
     };
+    // Adaptive memory-mode pick: medium for divergent, big-segment records (no-op unless
+    // adaptive mode + eligible regime). divergence from the input PAF identity.
+    let divergence = if record.alignment_block_len > 0 {
+        1.0 - (record.residue_matches as f64) / (record.alignment_block_len as f64)
+    } else {
+        0.0
+    };
+    let aligner = aligners.select(max_segment_span(&record.tracepoints), divergence);
     let cigar = reconstruct_cigar_with_aligner(
         &record.tracepoints,
         &query_buf[..],
