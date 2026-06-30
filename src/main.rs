@@ -1,5 +1,8 @@
 mod sequence;
 
+#[global_allocator]
+static GLOBAL: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
+
 use crate::sequence::{collect_sequence_paths, SequenceIndex};
 use clap::{Parser, ValueEnum};
 use flate2::read::MultiGzDecoder;
@@ -10,6 +13,7 @@ use indicatif::ProgressStyle;
 use lib_wfa2::affine_wavefront::Distance;
 use log::{debug, error, info, warn};
 use rayon::prelude::*;
+use std::cell::RefCell;
 use std::fmt;
 use std::fs::File;
 use std::io::{self, BufRead, BufReader, BufWriter, Write};
@@ -21,7 +25,7 @@ use tpa::{format_ab_tracepoints, format_tracepoints, reconstruct_cigar_with_alig
 // tracepoints: CIGAR → tracepoints encoding
 #[cfg(debug_assertions)]
 use tracepoints::{
-    align_sequences_wfa, cigar_ops_to_cigar_string, cigar_to_tracepoints_raw,
+    align_sequences_wfa, cigar_ops_to_cigar_string, cigar_to_tracepoints, cigar_to_tracepoints_raw,
     cigar_to_variable_tracepoints_raw, mixed_tracepoints_to_cigar, tracepoints_to_cigar,
     variable_tracepoints_to_cigar,
 };
@@ -209,6 +213,43 @@ fn make_aligners(
         gate,
         threshold: threshold as f64,
     }
+}
+
+// Per-thread decode state (aligners + reusable seq buffers), created once per worker and reused across
+// chunks. The old per-chunk `map_init` rebuilt the aligners every chunk -> first-touch fault storm.
+thread_local! {
+    static DECODE_STATE: RefCell<Option<(Aligners, Vec<u8>, Vec<u8>)>> = const { RefCell::new(None) };
+}
+
+/// Drop every worker's cached state so the next `with_decode_state` rebuilds with the current config.
+/// Called once per decode command (the state otherwise lives for the whole process).
+fn reset_decode_state() {
+    DECODE_STATE.with(|cell| *cell.borrow_mut() = None);
+    rayon::broadcast(|_| DECODE_STATE.with(|cell| *cell.borrow_mut() = None));
+}
+
+/// Run `f` with this worker's reusable decode state, shared by all three decode paths. Built lazily
+/// from the first call's config; `reset_decode_state` clears it per command.
+#[inline]
+fn with_decode_state<R>(
+    distance_mode: &Distance,
+    memory_mode: &lib_wfa2::affine_wavefront::MemoryMode,
+    adaptive: bool,
+    gate: bool,
+    threshold: u64,
+    f: impl FnOnce(&mut Aligners, &mut Vec<u8>, &mut Vec<u8>) -> R,
+) -> R {
+    DECODE_STATE.with(|cell| {
+        let mut slot = cell.borrow_mut();
+        let s = slot.get_or_insert_with(|| {
+            (
+                make_aligners(distance_mode, memory_mode, adaptive, gate, threshold),
+                Vec::new(),
+                Vec::new(),
+            )
+        });
+        f(&mut s.0, &mut s.1, &mut s.2)
+    })
 }
 
 /// Common options shared between all commands
@@ -559,6 +600,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             rayon::ThreadPoolBuilder::new()
                 .num_threads(common.threads)
                 .build_global()?;
+            reset_decode_state();
 
             // Optional FASTGA contig table: enables decoding contig-aware fastga tracepoints by
             // placing the trace grid contig-locally (query_start - contig_start), matching the encoder.
@@ -717,44 +759,38 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 loop {
                     // collect::<io::Result<Vec<_>>>()? propagates a mid-stream read error instead
                     // of silently truncating (no more map_while(Result::ok)).
-                    let chunk: Vec<_> = it.by_ref().take(2048).collect::<io::Result<Vec<_>>>()?;
+                    let chunk: Vec<_> = it.by_ref().take(65536).collect::<io::Result<Vec<_>>>()?;
                     if chunk.is_empty() {
                         break;
                     }
                     let lines: Vec<String> = chunk
                         .par_iter()
-                        .map_init(
-                            || {
-                                (
-                                    make_aligners(
+                        .map(|record| {
+                            with_decode_state(
+                                &distance_mode,
+                                &memory_mode_wfa2,
+                                adaptive,
+                                adaptive_gate,
+                                adaptive_threshold,
+                                |aligners, query_buf, target_buf| {
+                                    process_decompress_record(
+                                        record,
+                                        sequence_index.as_ref(),
                                         &distance_mode,
-                                        &memory_mode_wfa2,
-                                        adaptive,
-                                        adaptive_gate,
-                                        adaptive_threshold,
-                                    ),
-                                    Vec::<u8>::new(),
-                                    Vec::<u8>::new(),
-                                )
-                            },
-                            |(aligners, query_buf, target_buf), record| {
-                                process_decompress_record(
-                                    record,
-                                    sequence_index.as_ref(),
-                                    &distance_mode,
-                                    is_fastga,
-                                    trace_spacing,
-                                    &complexity_metric,
-                                    banded,
-                                    banded_max_complexity,
-                                    keep_old_stats,
-                                    aligners,
-                                    query_buf,
-                                    target_buf,
-                                    &contig_table,
-                                )
-                            },
-                        )
+                                        is_fastga,
+                                        trace_spacing,
+                                        &complexity_metric,
+                                        banded,
+                                        banded_max_complexity,
+                                        keep_old_stats,
+                                        aligners,
+                                        query_buf,
+                                        target_buf,
+                                        &contig_table,
+                                    )
+                                },
+                            )
+                        })
                         .collect();
                     for l in &lines {
                         writeln!(writer, "{}", l)?;
@@ -762,63 +798,96 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 }
                 writer.flush()?;
             } else {
-                // Read from text PAF; decode chunks in parallel but emit in input order.
+                // Pipeline: reader prefetches chunks, rayon pool decodes, writer emits in input order.
+                // Bounded channels overlap the serial read/write with the parallel decode.
+                const CHUNK: usize = 65536;
+                // Byte cap so a burst of huge tp:Z lines can't balloon a chunk before it's drained.
+                const CHUNK_BYTES: usize = 256 << 20; // 256 MiB
                 let paf_reader = get_paf_reader(&common.paf)?;
                 let memory_mode_wfa2 = memory_mode.to_lib_wfa2();
-                let stdout = io::stdout();
-                let mut writer = BufWriter::new(stdout.lock());
-                // Keep Err lines so a read failure propagates instead of silently truncating.
-                let mut lines_it = paf_reader.lines().filter(|r| match r {
-                    Ok(line) => !line.trim().is_empty() && !line.starts_with('#'),
-                    Err(_) => true,
-                });
-                loop {
-                    let chunk: Vec<String> =
-                        lines_it.by_ref().take(2048).collect::<io::Result<Vec<_>>>()?;
-                    if chunk.is_empty() {
-                        break;
-                    }
-                    let out: Vec<Option<String>> = chunk
-                        .par_iter()
-                        .map_init(
-                            || {
-                                (
-                                    make_aligners(
-                                        &distance_mode,
-                                        &memory_mode_wfa2,
-                                        adaptive,
-                                        adaptive_gate,
-                                        adaptive_threshold,
-                                    ),
-                                    Vec::<u8>::new(),
-                                    Vec::<u8>::new(),
-                                )
-                            },
-                            |(aligners, query_buf, target_buf), line| {
-                                process_decompress_line(
-                                    line,
-                                    &tp_type,
-                                    sequence_index.as_ref(),
+                let (tx_in, rx_in) = std::sync::mpsc::sync_channel::<Vec<String>>(2);
+                let (tx_out, rx_out) = std::sync::mpsc::sync_channel::<Vec<Option<String>>>(2);
+                std::thread::scope(|s| -> io::Result<()> {
+                    // Reader: skip blank/comment lines; keep Err so a read failure propagates.
+                    let reader = s.spawn(move || -> io::Result<()> {
+                        let mut it = paf_reader.lines().filter(|r| match r {
+                            Ok(l) => !l.trim().is_empty() && !l.starts_with('#'),
+                            Err(_) => true,
+                        });
+                        loop {
+                            // Fill to CHUNK lines or CHUNK_BYTES, whichever first; errors propagate.
+                            let mut chunk: Vec<String> = Vec::new();
+                            let mut bytes = 0usize;
+                            while chunk.len() < CHUNK && bytes < CHUNK_BYTES {
+                                match it.next() {
+                                    Some(Ok(l)) => {
+                                        bytes += l.len() + 1;
+                                        chunk.push(l);
+                                    }
+                                    Some(Err(e)) => return Err(e),
+                                    None => break,
+                                }
+                            }
+                            if chunk.is_empty() || tx_in.send(chunk).is_err() {
+                                break;
+                            }
+                        }
+                        Ok(())
+                    });
+                    // Writer: chunks arrive in input order, so output order is preserved.
+                    let stdout = io::stdout();
+                    let writer = s.spawn(move || -> io::Result<()> {
+                        let mut w = BufWriter::new(stdout.lock());
+                        for out in rx_out {
+                            for l in out.into_iter().flatten() {
+                                writeln!(w, "{}", l)?;
+                            }
+                        }
+                        w.flush()
+                    });
+                    // Decode each chunk on the global rayon pool.
+                    for chunk in rx_in {
+                        let out: Vec<Option<String>> = chunk
+                            .par_iter()
+                            .map(|line| {
+                                with_decode_state(
                                     &distance_mode,
-                                    is_fastga,
-                                    trace_spacing,
-                                    &complexity_metric,
-                                    banded,
-                                    banded_max_complexity,
-                                    keep_old_stats,
-                                    aligners,
-                                    query_buf,
-                                    target_buf,
-                                    &contig_table,
+                                    &memory_mode_wfa2,
+                                    adaptive,
+                                    adaptive_gate,
+                                    adaptive_threshold,
+                                    |aligners, query_buf, target_buf| {
+                                        process_decompress_line(
+                                            line,
+                                            &tp_type,
+                                            sequence_index.as_ref(),
+                                            &distance_mode,
+                                            is_fastga,
+                                            trace_spacing,
+                                            &complexity_metric,
+                                            banded,
+                                            banded_max_complexity,
+                                            keep_old_stats,
+                                            aligners,
+                                            query_buf,
+                                            target_buf,
+                                            &contig_table,
+                                        )
+                                    },
                                 )
-                            },
-                        )
-                        .collect();
-                    for l in out.into_iter().flatten() {
-                        writeln!(writer, "{}", l)?;
+                            })
+                            .collect();
+                        if tx_out.send(out).is_err() {
+                            break;
+                        }
                     }
-                }
-                writer.flush()?;
+                    drop(tx_out);
+                    // Map a thread panic to an io::Error and propagate I/O errors (e.g. broken pipe).
+                    let panicked = |w| io::Error::new(io::ErrorKind::Other, format!("{w} thread panicked"));
+                    reader.join().map_err(|_| panicked("reader"))??;
+                    writer.join().map_err(|_| panicked("writer"))??;
+                    Ok(())
+                })?;
             }
         }
         Args::Compress {
@@ -1099,48 +1168,43 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 } else {
                     Box::new(BufWriter::new(File::create(&output)?))
                 };
+                reset_decode_state();
                 let mut it = reader.iter_records()?;
                 loop {
                     // collect::<io::Result<Vec<_>>>()? propagates a mid-stream read error instead
                     // of silently truncating (no more map_while(Result::ok)).
-                    let chunk: Vec<_> = it.by_ref().take(2048).collect::<io::Result<Vec<_>>>()?;
+                    let chunk: Vec<_> = it.by_ref().take(65536).collect::<io::Result<Vec<_>>>()?;
                     if chunk.is_empty() {
                         break;
                     }
                     let lines: Vec<String> = chunk
                         .par_iter()
-                        .map_init(
-                            || {
-                                (
-                                    make_aligners(
+                        .map(|record| {
+                            with_decode_state(
+                                &distance_mode,
+                                &memory_mode_wfa2,
+                                adaptive,
+                                adaptive_gate,
+                                adaptive_threshold,
+                                |aligners, query_buf, target_buf| {
+                                    process_decompress_record(
+                                        record,
+                                        &sequence_index,
                                         &distance_mode,
-                                        &memory_mode_wfa2,
-                                        adaptive,
-                                        adaptive_gate,
-                                        adaptive_threshold,
-                                    ),
-                                    Vec::<u8>::new(),
-                                    Vec::<u8>::new(),
-                                )
-                            },
-                            |(aligners, query_buf, target_buf), record| {
-                                process_decompress_record(
-                                    record,
-                                    &sequence_index,
-                                    &distance_mode,
-                                    is_fastga,
-                                    trace_spacing,
-                                    &complexity_metric,
-                                    false, // banded
-                                    None,  // banded_max_complexity
-                                    keep_old_stats,
-                                    aligners,
-                                    query_buf,
-                                    target_buf,
-                                    &contig_table,
-                                )
-                            },
-                        )
+                                        is_fastga,
+                                        trace_spacing,
+                                        &complexity_metric,
+                                        false, // banded
+                                        None,  // banded_max_complexity
+                                        keep_old_stats,
+                                        aligners,
+                                        query_buf,
+                                        target_buf,
+                                        &contig_table,
+                                    )
+                                },
+                            )
+                        })
                         .collect();
                     for l in &lines {
                         writeln!(writer, "{}", l)?;
