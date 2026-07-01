@@ -168,50 +168,65 @@ fn max_segment_span(tp: &TracepointData) -> usize {
 
 /// Per-thread aligner(s) for decode.
 struct Aligners {
-    primary: lib_wfa2::affine_wavefront::AffineWavefronts,
-    /// Present only in adaptive mode.
+    primary: lib_wfa2::affine_wavefront::AffineWavefronts, // High
     medium: Option<lib_wfa2::affine_wavefront::AffineWavefronts>,
-    /// Adaptive applies only where medium actually helps: DB-TP + gap-affine2p + mc>=64.
+    low: Option<lib_wfa2::affine_wavefront::AffineWavefronts>,
     gate: bool,
-    /// Route a record to the medium aligner when `max_segment_span * divergence > threshold`.
-    threshold: f64,
+    med_threshold: f64,
+    low_threshold: f64,
 }
 
 impl Aligners {
-    /// Aligner for one record, given its largest segment span and input divergence.
+    /// Aligner for one record given its largest segment span and input divergence.
     #[inline]
     fn select(
         &mut self,
         max_seg: usize,
         divergence: f64,
     ) -> &mut lib_wfa2::affine_wavefront::AffineWavefronts {
-        match self.medium.as_mut() {
-            Some(med) if self.gate && (max_seg as f64) * divergence > self.threshold => med,
-            _ => &mut self.primary,
+        let t = (max_seg as f64) * divergence;
+        if self.gate {
+            if self.low.is_some() && t > self.low_threshold {
+                return self.low.as_mut().unwrap();
+            }
+            if self.medium.is_some() && t > self.med_threshold {
+                return self.medium.as_mut().unwrap();
+            }
         }
+        &mut self.primary
     }
 }
 
-/// Build a per-thread `Aligners`: the primary aligner in 
-// `primary_mode`, plus a medium aligner only when `adaptive`.
+/// Build a per-thread `Aligners`: the primary aligner in `primary_mode`, plus Medium and Low aligners
+/// (for adaptive routing) only when `adaptive`.
 fn make_aligners(
     distance_mode: &Distance,
     primary_mode: &lib_wfa2::affine_wavefront::MemoryMode,
     adaptive: bool,
     gate: bool,
-    threshold: u64,
+    med_threshold: u64,
+    low_threshold: u64,
 ) -> Aligners {
+    use lib_wfa2::affine_wavefront::MemoryMode;
     let primary = distance_mode.create_aligner(None, Some(primary_mode));
-    let medium = if adaptive {
-        Some(distance_mode.create_aligner(None, Some(&lib_wfa2::affine_wavefront::MemoryMode::Medium)))
-    } else {
-        None
-    };
+    let mk = |m| Some(distance_mode.create_aligner(None, Some(m)));
     Aligners {
         primary,
-        medium,
+        medium: if adaptive { mk(&MemoryMode::Medium) } else { None },
+        low: if adaptive { mk(&MemoryMode::Low) } else { None },
         gate,
-        threshold: threshold as f64,
+        med_threshold: med_threshold as f64,
+        low_threshold: low_threshold as f64,
+    }
+}
+
+/// Parse the `--adaptive-threshold` tuple "MEDIUM,LOW" (e.g. "5000,20000") into (medium, low).
+fn parse_adaptive_thresholds(s: &str) -> Result<(u64, u64), String> {
+    let bad = || format!("--adaptive-threshold must be \"MEDIUM,LOW\" (two integers), got '{s}'");
+    let mut it = s.split(',').map(|p| p.trim().parse::<u64>());
+    match (it.next(), it.next(), it.next()) {
+        (Some(Ok(m)), Some(Ok(l)), None) => Ok((m, l)),
+        _ => Err(bad()),
     }
 }
 
@@ -236,14 +251,15 @@ fn with_decode_state<R>(
     memory_mode: &lib_wfa2::affine_wavefront::MemoryMode,
     adaptive: bool,
     gate: bool,
-    threshold: u64,
+    med_threshold: u64,
+    low_threshold: u64,
     f: impl FnOnce(&mut Aligners, &mut Vec<u8>, &mut Vec<u8>) -> R,
 ) -> R {
     DECODE_STATE.with(|cell| {
         let mut slot = cell.borrow_mut();
         let s = slot.get_or_insert_with(|| {
             (
-                make_aligners(distance_mode, memory_mode, adaptive, gate, threshold),
+                make_aligners(distance_mode, memory_mode, adaptive, gate, med_threshold, low_threshold),
                 Vec::new(),
                 Vec::new(),
             )
@@ -350,10 +366,12 @@ enum Args {
         #[arg(long = "memory-mode", default_value_t = MemoryModeChoice::High)]
         memory_mode: MemoryModeChoice,
 
-        /// Adaptive threshold: route a record to medium when max_segment_span * divergence
-        /// exceeds this (only with --memory-mode adaptive, DB-TP + gap-affine2p + mc>=64)
-        #[arg(long = "adaptive-threshold", default_value_t = 5000)]
-        adaptive_threshold: u64,
+        /// Adaptive routing thresholds on T = max_segment_span * divergence, as "MEDIUM,LOW": route a
+        /// record to the Medium WFA memory mode when T > MEDIUM and to Low when T > LOW (LOW > MEDIUM;
+        /// Low bounds memory on the largest segments). Only with --memory-mode adaptive
+        /// (DB-TP + gap-affine2p + mc>=32).
+        #[arg(long = "adaptive-threshold", default_value = "5000,20000")]
+        adaptive_threshold: String,
     },
     /// Compress text PAF to binary TPA (text PAF → binary TPA)
     Compress {
@@ -422,10 +440,12 @@ enum Args {
         #[arg(long = "memory-mode", default_value_t = MemoryModeChoice::High)]
         memory_mode: MemoryModeChoice,
 
-        /// Adaptive threshold: route a record to medium when max_segment_span * divergence
-        /// exceeds this (only with --memory-mode adaptive, DB-TP + gap-affine2p + mc>=64)
-        #[arg(long = "adaptive-threshold", default_value_t = 5000)]
-        adaptive_threshold: u64,
+        /// Adaptive routing thresholds on T = max_segment_span * divergence, as "MEDIUM,LOW": route a
+        /// record to the Medium WFA memory mode when T > MEDIUM and to Low when T > LOW (LOW > MEDIUM;
+        /// Low bounds memory on the largest segments). Only with --memory-mode adaptive
+        /// (DB-TP + gap-affine2p + mc>=32).
+        #[arg(long = "adaptive-threshold", default_value = "5000,20000")]
+        adaptive_threshold: String,
 
         /// Verbosity level (0 = error, 1 = info, 2 = debug)
         #[arg(short, long, default_value = "1")]
@@ -702,17 +722,19 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 }
             };
 
-            // Adaptive memory mode: only with DB-TP (diagonal-distance) + gap-affine2p + mc>=64
+            // Adaptive memory mode: only with DB-TP (diagonal-distance) + gap-affine2p + mc>=32
             let adaptive = memory_mode == MemoryModeChoice::Adaptive;
+            let (adaptive_med, adaptive_low) = parse_adaptive_thresholds(&adaptive_threshold)
+                .unwrap_or_else(|e| { error!("{e}"); std::process::exit(1); });
             let adaptive_gate = adaptive
                 && matches!(complexity_metric, ComplexityMetric::DiagonalDistance)
                 && matches!(distance_mode, Distance::GapAffine2p { .. })
-                && max_complexity.unwrap_or(32) >= 64;
+                && max_complexity.unwrap_or(32) >= 32;
             if adaptive {
                 info!(
-                    "memory-mode=adaptive: per-record routing {} (needs DB-TP + gap-affine2p + mc>=64); threshold max_seg*div > {}",
+                    "memory-mode=adaptive: per-record routing {} (needs DB-TP + gap-affine2p + mc>=32); T=max_seg*div > {} -> Medium, > {} -> Low",
                     if adaptive_gate { "ENABLED" } else { "OFF (regime not eligible -> all high)" },
-                    adaptive_threshold
+                    adaptive_med, adaptive_low
                 );
             }
 
@@ -771,7 +793,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 &memory_mode_wfa2,
                                 adaptive,
                                 adaptive_gate,
-                                adaptive_threshold,
+                                adaptive_med,
+                                adaptive_low,
                                 |aligners, query_buf, target_buf| {
                                     process_decompress_record(
                                         record,
@@ -855,7 +878,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                     &memory_mode_wfa2,
                                     adaptive,
                                     adaptive_gate,
-                                    adaptive_threshold,
+                                    adaptive_med,
+                                    adaptive_low,
                                     |aligners, query_buf, target_buf| {
                                         process_decompress_line(
                                             line,
@@ -1133,17 +1157,19 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 let trace_spacing = if is_fastga { max_complexity } else { 0 };
                 let memory_mode_wfa2 = memory_mode.to_lib_wfa2();
 
-                // Adaptive memory mode: gate to DB-TP + gap-affine2p + mc>=64.
+                // Adaptive memory mode: gate to DB-TP + gap-affine2p + mc>=32.
                 let adaptive = memory_mode == MemoryModeChoice::Adaptive;
+                let (adaptive_med, adaptive_low) = parse_adaptive_thresholds(&adaptive_threshold)
+                    .unwrap_or_else(|e| { error!("{e}"); std::process::exit(1); });
                 let adaptive_gate = adaptive
                     && matches!(complexity_metric, ComplexityMetric::DiagonalDistance)
                     && matches!(distance_mode, Distance::GapAffine2p { .. })
-                    && max_complexity >= 64;
+                    && max_complexity >= 32;
                 if adaptive {
                     info!(
-                        "memory-mode=adaptive: per-record routing {} (needs DB-TP + gap-affine2p + mc>=64); threshold max_seg*div > {}",
+                        "memory-mode=adaptive: per-record routing {} (needs DB-TP + gap-affine2p + mc>=32); T=max_seg*div > {} -> Medium, > {} -> Low",
                         if adaptive_gate { "ENABLED" } else { "OFF (regime not eligible -> all high)" },
-                        adaptive_threshold
+                        adaptive_med, adaptive_low
                     );
                 }
 
@@ -1185,7 +1211,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 &memory_mode_wfa2,
                                 adaptive,
                                 adaptive_gate,
-                                adaptive_threshold,
+                                adaptive_med,
+                                adaptive_low,
                                 |aligners, query_buf, target_buf| {
                                     process_decompress_record(
                                         record,
