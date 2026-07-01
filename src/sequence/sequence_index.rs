@@ -3,6 +3,7 @@ use std::fs;
 
 use super::agc_index::AgcIndex;
 use super::faidx::FastaIndex;
+use super::gdb_index::GdbIndex;
 
 pub fn collect_sequence_paths(
     mut files: Vec<String>,
@@ -39,6 +40,7 @@ fn get_extension(filename: &str) -> &str {
 pub enum SequenceIndex {
     Fasta(FastaIndex),
     Agc(AgcIndex),
+    Gdb(GdbIndex),
 }
 
 impl SequenceIndex {
@@ -64,6 +66,10 @@ impl SequenceIndex {
                 let index = AgcIndex::build(files)?;
                 Ok(SequenceIndex::Agc(index))
             }
+            "gdb" | "1gdb" => {
+                let index = GdbIndex::build(files)?;
+                Ok(SequenceIndex::Gdb(index))
+            }
             _ => {
                 // Default to FASTA for unknown extensions or no extension
                 let index = FastaIndex::build(files)?;
@@ -81,6 +87,7 @@ impl SequenceIndex {
         match self {
             SequenceIndex::Fasta(index) => index.fetch_sequence(seq_name, start, end),
             SequenceIndex::Agc(index) => index.fetch_sequence(seq_name, start, end),
+            SequenceIndex::Gdb(index) => index.fetch_sequence(seq_name, start, end),
         }
     }
 
@@ -101,6 +108,7 @@ impl SequenceIndex {
                 out.extend_from_slice(&v);
                 Ok(())
             }
+            SequenceIndex::Gdb(index) => index.fetch_sequence_into(seq_name, start, end, out),
         }
     }
 }

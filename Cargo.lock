@@ -228,6 +228,7 @@ dependencies = [
  "indicatif",
  "lib_wfa2",
  "log",
+ "onecode",
  "ragc-core",
  "rayon",
  "rust-htslib",
@@ -998,6 +999,15 @@ name = "once_cell_polyfill"
 version = "1.70.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "384b8ab6d37215f3c5301a95a4accb5d64aa607f1fcb26a11b5303878451b4fe"
+
+[[package]]
+name = "onecode"
+version = "0.1.0"
+source = "git+https://github.com/pangenome/onecode-rs#f531f5b0ff54001a898ec4e0c0c761b2bd0a1f34"
+dependencies = [
+ "cc",
+ "libc",
+]
 
 [[package]]
 name = "parking_lot_core"
