@@ -27,6 +27,3 @@ tpa = { git = "https://github.com/AndreaGuarracino/tpa", rev = "f3cef3cd974c8756
 [features]
 default = []
 sysmalloc = []
-
-[patch."https://github.com/AndreaGuarracino/lib_wfa2"]
-lib_wfa2 = { path = "../lib_wfa2" }
