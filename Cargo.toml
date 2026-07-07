@@ -18,12 +18,15 @@ onecode = { git = "https://github.com/pangenome/onecode-rs" }
 # Dependencies for AGC format (for sequences) support
 ragc-core = { git = "https://github.com/ekg/ragc", rev = "40e5cad" }
 
-#lib_wfa2 = { path = "/home/guarracino/Dropbox/git/lib_wfa2"}
 lib_wfa2 = { git = "https://github.com/AndreaGuarracino/lib_wfa2", rev = "8859b6a214141968f37d9bcb22552408318adda0" }
 #tracepoints = { path = "/home/guarracino/git/tracepoints"}
-tracepoints = { git = "https://github.com/AndreaGuarracino/tracepoints", rev = "b9246c2e4b2167341d4c9ce48e25a42383637e58" }
+tracepoints = { git = "https://github.com/AndreaGuarracino/tracepoints", rev = "044c710839f71b3f822d0248ba0dd84aa22bd929" }
 #tpa = { path = "/home/guarracino/git/tpa" }
-tpa = { git = "https://github.com/AndreaGuarracino/tpa", rev = "9005bbb0959bdd0dffda897008d32a7d83d6b15d" }
+tpa = { git = "https://github.com/AndreaGuarracino/tpa", rev = "f3cef3cd974c875611d88a29d0829b34366ea5ad" }
 
 [features]
 default = []
+sysmalloc = []
+
+[patch."https://github.com/AndreaGuarracino/lib_wfa2"]
+lib_wfa2 = { path = "../lib_wfa2" }
