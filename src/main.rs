@@ -823,9 +823,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             } else {
                 // Pipeline: reader prefetches chunks, rayon pool decodes, writer emits in input order.
                 // Bounded channels overlap the serial read/write with the parallel decode.
-                const CHUNK: usize = 65536;
-                // Byte cap so a burst of huge tp:Z lines can't balloon a chunk before it's drained.
-                const CHUNK_BYTES: usize = 256 << 20; // 256 MiB
+                const CHUNK: usize = 1_000_000;
+                // Bigger chunks keep the rayon work-stealing pool full across the per-chunk collect() barrier,
+                // so a fast per-record decode saturates all cores instead of stalling at each chunk tail.
+                const CHUNK_BYTES: usize = 1024 << 20; // 1 GiB
                 let paf_reader = get_paf_reader(&common.paf)?;
                 let memory_mode_wfa2 = memory_mode.to_lib_wfa2();
                 let (tx_in, rx_in) = std::sync::mpsc::sync_channel::<Vec<String>>(2);
