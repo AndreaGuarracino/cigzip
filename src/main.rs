@@ -447,6 +447,10 @@ enum Args {
         #[arg(long = "adaptive-threshold", default_value = "5000,20000")]
         adaptive_threshold: String,
 
+        /// Number of threads to use (default: 4)
+        #[arg(short, long = "threads", default_value_t = 4)]
+        threads: usize,
+
         /// Verbosity level (0 = error, 1 = info, 2 = debug)
         #[arg(short, long, default_value = "1")]
         verbose: u8,
@@ -991,31 +995,32 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 }
             };
 
-            // Auto-detect input format by checking first non-empty line
-            let mut has_cigar = false;
-            let mut has_tracepoints = false;
+            // Auto-detect the input format from the first non-empty line, for logging only
+            if input != "-" {
+                let mut has_cigar = false;
+                let mut has_tracepoints = false;
 
-            let reader = get_paf_reader(&input)?;
-            for line in reader.lines().take(10).flatten() {
-                if line.trim().is_empty() || line.starts_with('#') {
-                    continue;
+                let reader = get_paf_reader(&input)?;
+                for line in reader.lines().take(10).flatten() {
+                    if line.trim().is_empty() || line.starts_with('#') {
+                        continue;
+                    }
+                    has_cigar = line.contains("\tcg:Z:");
+                    has_tracepoints = line.contains("\ttp:Z:");
+                    break;
                 }
-                has_cigar = line.contains("\tcg:Z:");
-                has_tracepoints = line.contains("\ttp:Z:");
-                break;
-            }
 
-            // Log what was detected (informational only - TPA auto-detects per row)
-            if has_cigar && has_tracepoints {
-                info!("Input PAF has both cg:Z: and tp:Z: tags; will prefer tracepoints");
-            } else if has_cigar {
-                info!("Detected CIGAR tags (cg:Z:); will convert to tracepoints");
-            } else if has_tracepoints {
-                info!("Detected tracepoint tags (tp:Z:); compressing directly");
-            } else {
-                warn!(
-                    "First line has neither cg:Z: nor tp:Z: tags; TPA will error per row if needed"
-                );
+                if has_cigar && has_tracepoints {
+                    info!("Input PAF has both cg:Z: and tp:Z: tags; will prefer tracepoints");
+                } else if has_cigar {
+                    info!("Detected CIGAR tags (cg:Z:); will convert to tracepoints");
+                } else if has_tracepoints {
+                    info!("Detected tracepoint tags (tp:Z:); compressing directly");
+                } else {
+                    warn!(
+                        "First line has neither cg:Z: nor tp:Z: tags; TPA will error per row if needed"
+                    );
+                }
             }
 
             // Parse strategy string: "single" or "first;second" for dual mode
@@ -1102,11 +1107,17 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             sequence_list,
             fastga_contigs,
             keep_old_stats,
+            threads,
             memory_mode,
             adaptive_threshold,
             verbose,
         } => {
             setup_logger(verbose);
+
+            // Set the thread pool size before any rayon use
+            rayon::ThreadPoolBuilder::new()
+                .num_threads(threads)
+                .build_global()?;
 
             if decode {
                 // Decompress and decode: binary → tracepoints → CIGAR
