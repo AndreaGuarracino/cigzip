@@ -224,7 +224,7 @@ dependencies = [
  "env_logger",
  "flate2",
  "indicatif",
- "lib_wfa2 0.1.0 (git+https://github.com/AndreaGuarracino/lib_wfa2?rev=dac5d8b23aeaf4b76bebd5e4e2e1511fc25d18ac)",
+ "lib_wfa2",
  "log",
  "onecode",
  "ragc-core",
@@ -232,7 +232,7 @@ dependencies = [
  "rust-htslib",
  "tikv-jemallocator",
  "tpa",
- "tracepoints 0.1.0 (git+https://github.com/AndreaGuarracino/tracepoints?rev=f6dfb026e558e0398852ffb5376ab4119efe3e7d)",
+ "tracepoints",
 ]
 
 [[package]]
@@ -866,11 +866,6 @@ version = "0.1.0"
 source = "git+https://github.com/AndreaGuarracino/lib_wfa2?rev=32ad5bb4442df4a5782b35bf024a319ba0676f50#32ad5bb4442df4a5782b35bf024a319ba0676f50"
 
 [[package]]
-name = "lib_wfa2"
-version = "0.1.0"
-source = "git+https://github.com/AndreaGuarracino/lib_wfa2?rev=dac5d8b23aeaf4b76bebd5e4e2e1511fc25d18ac#dac5d8b23aeaf4b76bebd5e4e2e1511fc25d18ac"
-
-[[package]]
 name = "libc"
 version = "0.2.189"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1495,11 +1490,11 @@ dependencies = [
  "bgzip",
  "env_logger",
  "flate2",
- "lib_wfa2 0.1.0 (git+https://github.com/AndreaGuarracino/lib_wfa2?rev=32ad5bb4442df4a5782b35bf024a319ba0676f50)",
+ "lib_wfa2",
  "log",
  "noodles",
  "rayon",
- "tracepoints 0.1.0 (git+https://github.com/AndreaGuarracino/tracepoints?rev=5303cde5359ffd9c54234a825d1923d26a2a0b20)",
+ "tracepoints",
  "zstd",
 ]
 
@@ -1508,15 +1503,7 @@ name = "tracepoints"
 version = "0.1.0"
 source = "git+https://github.com/AndreaGuarracino/tracepoints?rev=5303cde5359ffd9c54234a825d1923d26a2a0b20#5303cde5359ffd9c54234a825d1923d26a2a0b20"
 dependencies = [
- "lib_wfa2 0.1.0 (git+https://github.com/AndreaGuarracino/lib_wfa2?rev=32ad5bb4442df4a5782b35bf024a319ba0676f50)",
-]
-
-[[package]]
-name = "tracepoints"
-version = "0.1.0"
-source = "git+https://github.com/AndreaGuarracino/tracepoints?rev=f6dfb026e558e0398852ffb5376ab4119efe3e7d#f6dfb026e558e0398852ffb5376ab4119efe3e7d"
-dependencies = [
- "lib_wfa2 0.1.0 (git+https://github.com/AndreaGuarracino/lib_wfa2?rev=dac5d8b23aeaf4b76bebd5e4e2e1511fc25d18ac)",
+ "lib_wfa2",
 ]
 
 [[package]]
