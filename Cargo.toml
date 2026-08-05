@@ -20,9 +20,9 @@ ragc-core = { git = "https://github.com/ekg/ragc", rev = "40e5cad" }
 
 lib_wfa2 = { git = "https://github.com/AndreaGuarracino/lib_wfa2", rev = "32ad5bb4442df4a5782b35bf024a319ba0676f50" }
 #tracepoints = { path = "/home/guarracino/git/tracepoints"}
-tracepoints = { git = "https://github.com/AndreaGuarracino/tracepoints", rev = "5303cde5359ffd9c54234a825d1923d26a2a0b20" }
+tracepoints = { git = "https://github.com/AndreaGuarracino/tracepoints", rev = "a25424e753c8d70cbbf1d307fd9017e3770031f4" }
 #tpa = { path = "/home/guarracino/git/tpa" }
-tpa = { git = "https://github.com/AndreaGuarracino/tpa", rev = "f48f998c8fd0c0eaa83a89155eaf8a2cf7d45186" }
+tpa = { git = "https://github.com/AndreaGuarracino/tpa", rev = "801b1b73a00e36f9aa2eba06583657ca9685cfb1" }
 
 [features]
 default = []
