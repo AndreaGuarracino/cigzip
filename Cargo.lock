@@ -23,9 +23,9 @@ dependencies = [
 
 [[package]]
 name = "aho-corasick"
-version = "1.1.4"
+version = "1.1.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ddd31a130427c27518df266943a5308ed92d4b226cc639f5a8f1002816174301"
+checksum = "c982642fa9e8606056828ee9a8505737230110bb1099153c79efe865c59d12ba"
 dependencies = [
  "memchr",
 ]
@@ -863,7 +863,7 @@ checksum = "bbd2bcb4c963f2ddae06a2efc7e9f3591312473c50c6685e1f298068316e66fe"
 [[package]]
 name = "lib_wfa2"
 version = "0.1.0"
-source = "git+https://github.com/AndreaGuarracino/lib_wfa2?rev=32ad5bb4442df4a5782b35bf024a319ba0676f50#32ad5bb4442df4a5782b35bf024a319ba0676f50"
+source = "git+https://github.com/AndreaGuarracino/lib_wfa2?rev=1f8972d7c292418492c68501d8d4ef2e611fc444#1f8972d7c292418492c68501d8d4ef2e611fc444"
 
 [[package]]
 name = "libc"
@@ -1213,9 +1213,9 @@ dependencies = [
 
 [[package]]
 name = "regex-automata"
-version = "0.4.16"
+version = "0.4.18"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8fcfdb36bda0c880c5931cdc7a2bcdc8ba4556847b9d912bca70bc94708711ad"
+checksum = "ad8553b9b26413251cbf30e620595c7a41b3887f03da04579c0e6b0d6a06b4b2"
 dependencies = [
  "aho-corasick",
  "memchr",
@@ -1485,7 +1485,7 @@ dependencies = [
 [[package]]
 name = "tpa"
 version = "0.1.0"
-source = "git+https://github.com/AndreaGuarracino/tpa?rev=801b1b73a00e36f9aa2eba06583657ca9685cfb1#801b1b73a00e36f9aa2eba06583657ca9685cfb1"
+source = "git+https://github.com/AndreaGuarracino/tpa?rev=12eabf864c5b074fe28809de080c0cb0499afb24#12eabf864c5b074fe28809de080c0cb0499afb24"
 dependencies = [
  "bgzip",
  "env_logger",
@@ -1501,7 +1501,7 @@ dependencies = [
 [[package]]
 name = "tracepoints"
 version = "0.1.0"
-source = "git+https://github.com/AndreaGuarracino/tracepoints?rev=a25424e753c8d70cbbf1d307fd9017e3770031f4#a25424e753c8d70cbbf1d307fd9017e3770031f4"
+source = "git+https://github.com/AndreaGuarracino/tracepoints?rev=bd21f3746ddfec9991cd2578d84f1563f958a17d#bd21f3746ddfec9991cd2578d84f1563f958a17d"
 dependencies = [
  "lib_wfa2",
 ]
@@ -1756,9 +1756,9 @@ dependencies = [
 
 [[package]]
 name = "zlib-rs"
-version = "0.6.6"
+version = "0.6.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b142a20ec14a91d5bc708c1dc21b080c550113d8aa77afa29635673a65dd02c5"
+checksum = "34b31d188d9d685a4f9c7b46d6e36631b07058d2cfe190267adce54dc230bf12"
 
 [[package]]
 name = "zstd"
