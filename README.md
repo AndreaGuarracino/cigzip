@@ -4,7 +4,7 @@ Command-line tool to convert CIGAR strings to compact tracepoints and back, with
 
 ## Overview
 
-`cigzip` is built on the [tracepoints](https://github.com/AndreaGuarracino/tracepoints) library (tracepoint sampling and alignment reconstruction) and the [tpa](https://github.com/AndreaGuarracino/tpa) binary format.
+`cigzip` is built on the [tracepoints](https://github.com/GuarracinoLab/tracepoints) library (tracepoint sampling and alignment reconstruction) and the [tpa](https://github.com/AndreaGuarracino/tpa) binary format.
 
 ## Installation
 
@@ -40,7 +40,7 @@ cigzip decode   --paf aln.tp.paf --type fastga --fastga-contigs contigs.tsv --se
 
 ## Related repositories
 
-- **[tracepoints](https://github.com/AndreaGuarracino/tracepoints)**: the core library implementing tracepoint sampling and reconstruction, which cigzip is built on.
+- **[tracepoints](https://github.com/GuarracinoLab/tracepoints)**: the core library implementing tracepoint sampling and reconstruction, which cigzip is built on.
 - **[tpa](https://github.com/AndreaGuarracino/tpa)**: the TracePoint Alignment (TPA) binary format library used for storage and random access.
 
 ## License
