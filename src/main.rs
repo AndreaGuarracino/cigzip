@@ -369,7 +369,7 @@ enum Args {
         /// Adaptive routing thresholds on T = max_segment_span * divergence, as "MEDIUM,LOW": route a
         /// record to the Medium WFA memory mode when T > MEDIUM and to Low when T > LOW (LOW > MEDIUM;
         /// Low bounds memory on the largest segments). Only with --memory-mode adaptive
-        /// (DB-TP + gap-affine2p + mc>=32).
+        /// (DB-TP + gap-affine2p).
         #[arg(long = "adaptive-threshold", default_value = "5000,20000")]
         adaptive_threshold: String,
     },
@@ -443,7 +443,7 @@ enum Args {
         /// Adaptive routing thresholds on T = max_segment_span * divergence, as "MEDIUM,LOW": route a
         /// record to the Medium WFA memory mode when T > MEDIUM and to Low when T > LOW (LOW > MEDIUM;
         /// Low bounds memory on the largest segments). Only with --memory-mode adaptive
-        /// (DB-TP + gap-affine2p + mc>=32).
+        /// (DB-TP + gap-affine2p).
         #[arg(long = "adaptive-threshold", default_value = "5000,20000")]
         adaptive_threshold: String,
 
@@ -726,17 +726,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 }
             };
 
-            // Adaptive memory mode: only with DB-TP (diagonal-distance) + gap-affine2p + mc>=32
+            // Adaptive memory mode: only with DB-TP (diagonal-distance) + gap-affine2p
             let adaptive = memory_mode == MemoryModeChoice::Adaptive;
             let (adaptive_med, adaptive_low) = parse_adaptive_thresholds(&adaptive_threshold)
                 .unwrap_or_else(|e| { error!("{e}"); std::process::exit(1); });
             let adaptive_gate = adaptive
                 && matches!(complexity_metric, ComplexityMetric::DiagonalDistance)
-                && matches!(distance_mode, Distance::GapAffine2p { .. })
-                && max_complexity.unwrap_or(32) >= 32;
+                && matches!(distance_mode, Distance::GapAffine2p { .. });
             if adaptive {
                 info!(
-                    "memory-mode=adaptive: per-record routing {} (needs DB-TP + gap-affine2p + mc>=32); T=max_seg*div > {} -> Medium, > {} -> Low",
+                    "memory-mode=adaptive: per-record routing {} (needs DB-TP + gap-affine2p); T=max_seg*div > {} -> Medium, > {} -> Low",
                     if adaptive_gate { "ENABLED" } else { "OFF (regime not eligible -> all high)" },
                     adaptive_med, adaptive_low
                 );
@@ -1169,17 +1168,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 let trace_spacing = if is_fastga { max_complexity } else { 0 };
                 let memory_mode_wfa2 = memory_mode.to_lib_wfa2();
 
-                // Adaptive memory mode: gate to DB-TP + gap-affine2p + mc>=32.
+                // Adaptive memory mode: gate to DB-TP + gap-affine2p.
                 let adaptive = memory_mode == MemoryModeChoice::Adaptive;
                 let (adaptive_med, adaptive_low) = parse_adaptive_thresholds(&adaptive_threshold)
                     .unwrap_or_else(|e| { error!("{e}"); std::process::exit(1); });
                 let adaptive_gate = adaptive
                     && matches!(complexity_metric, ComplexityMetric::DiagonalDistance)
-                    && matches!(distance_mode, Distance::GapAffine2p { .. })
-                    && max_complexity >= 32;
+                    && matches!(distance_mode, Distance::GapAffine2p { .. });
                 if adaptive {
                     info!(
-                        "memory-mode=adaptive: per-record routing {} (needs DB-TP + gap-affine2p + mc>=32); T=max_seg*div > {} -> Medium, > {} -> Low",
+                        "memory-mode=adaptive: per-record routing {} (needs DB-TP + gap-affine2p); T=max_seg*div > {} -> Medium, > {} -> Low",
                         if adaptive_gate { "ENABLED" } else { "OFF (regime not eligible -> all high)" },
                         adaptive_med, adaptive_low
                     );
