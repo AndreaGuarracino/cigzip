@@ -845,10 +845,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 // Streaming pipeline: rayon workers take small batches as they free up, with no
                 // per-chunk barrier, and the writer restores input order. Query bases read but not
                 // yet written stay under MAX_BP_IN_FLIGHT, so a slow record holds memory, not threads.
-                // Batches (BATCH_LINES records or BATCH_BP query bases) keep per-record overhead low.
+                // Small batches (BATCH_LINES records or BATCH_BP query bases) cut the per-record
+                // overhead and keep threads busy at the head of the queue.
                 const MAX_BP_IN_FLIGHT: u64 = 8_000_000_000;
-                const BATCH_LINES: usize = 1000;
-                const BATCH_BP: u64 = 10_000_000;
+                const BATCH_LINES: usize = 64;
+                const BATCH_BP: u64 = 1_000_000;
                 let paf_reader = get_paf_reader(&common.paf)?;
                 let memory_mode_wfa2 = memory_mode.to_lib_wfa2();
                 // (bases in flight, writer closed)
