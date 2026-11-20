@@ -249,13 +249,13 @@ fn reset_decode_state() {
 /// Run `f` on PAF records on the rayon pool and write its output in input order.
 /// Workers take batches (BATCH_LINES records or BATCH_BP query bases) as they free up,
 /// with no per-chunk barrier. Query bases read but not yet written stay under
-/// MAX_BP_IN_FLIGHT, so a slow record holds memory, not threads.
+/// max_bp_in_flight, so a slow record holds memory, not threads.
 fn stream_ordered<W: Write + Send>(
     reader: impl BufRead + Send,
     out: W,
+    max_bp_in_flight: u64,
     f: impl Fn(&str, &mut Vec<u8>) + Sync,
 ) -> io::Result<()> {
-    const MAX_BP_IN_FLIGHT: u64 = 8_000_000_000;
     const BATCH_LINES: usize = 64;
     const BATCH_BP: u64 = 1_000_000;
     // (bases in flight, writer closed)
@@ -304,7 +304,7 @@ fn stream_ordered<W: Write + Send>(
                 return None;
             }
             let mut g = budget.0.lock().unwrap();
-            while g.0 > 0 && g.0 + bp > MAX_BP_IN_FLIGHT && !g.1 {
+            while g.0 > 0 && g.0 + bp > max_bp_in_flight && !g.1 {
                 g = budget.1.wait(g).unwrap();
             }
             if g.1 {
@@ -680,7 +680,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             let paf_reader = get_paf_reader(&common.paf)?;
 
             // Records are written in input order, so the tp.paf (and the TPA) is reproducible
-            stream_ordered(paf_reader, out, |line, buf| {
+            // 1 Gbp in flight: encode records are cheap, so a small window keeps memory low
+            stream_ordered(paf_reader, out, 1_000_000_000, |line, buf| {
                 process_compress_line(
                     line,
                     &tp_type,
@@ -922,7 +923,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             } else {
                 let paf_reader = get_paf_reader(&common.paf)?;
                 let memory_mode_wfa2 = memory_mode.to_lib_wfa2();
-                stream_ordered(paf_reader, io::stdout(), |line, buf| {
+                // 8 Gbp in flight: no slowdown on FL-TP l=1000 and EB/DB (HG00272, 96 threads)
+                stream_ordered(paf_reader, io::stdout(), 8_000_000_000, |line, buf| {
                     if let Some(l) = with_decode_state(
                             &distance_mode,
                             &memory_mode_wfa2,
