@@ -225,6 +225,7 @@ dependencies = [
  "flate2",
  "indicatif",
  "lib_wfa2",
+ "libc",
  "log",
  "onecode",
  "ragc-core",

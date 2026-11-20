@@ -246,6 +246,15 @@ fn reset_decode_state() {
 /// Run `f` with this worker's reusable decode state, shared by all three decode paths. Built lazily
 /// from the first call's config; `reset_decode_state` clears it per command.
 #[inline]
+/// Query bases of a PAF line (columns 3-4); 0 for a malformed line, which the decoder reports.
+fn query_bp(line: &str) -> u64 {
+    let mut f = line.split('\t').skip(2);
+    match (f.next().and_then(|x| x.parse::<u64>().ok()), f.next().and_then(|x| x.parse::<u64>().ok())) {
+        (Some(a), Some(b)) if b >= a => b - a,
+        _ => 0,
+    }
+}
+
 fn with_decode_state<R>(
     distance_mode: &Distance,
     memory_mode: &lib_wfa2::affine_wavefront::MemoryMode,
@@ -490,6 +499,15 @@ enum Args {
 
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
+    // WFA2-lib allocates with glibc malloc. Above 128 KiB use mmap and trim
+    // at once, so buffers freed by one thread do not stay in its arena.
+    #[cfg(all(target_os = "linux", target_env = "gnu"))]
+    unsafe {
+        if libc::mallopt(libc::M_MMAP_THRESHOLD, 128 * 1024) != 1 || libc::mallopt(libc::M_TRIM_THRESHOLD, 0) != 1 {
+            return Err("mallopt failed".into());
+        }
+    }
+
     // Parse command-line arguments.
     let args = Args::parse();
 
@@ -824,98 +842,111 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 }
                 writer.flush()?;
             } else {
-                // Pipeline: reader prefetches chunks, rayon pool decodes, writer emits in input order.
-                // Bounded channels overlap the serial read/write with the parallel decode.
-                const CHUNK: usize = 1_000_000;
-                // Bigger chunks keep the rayon work-stealing pool full across the per-chunk collect() barrier,
-                // so a fast per-record decode saturates all cores instead of stalling at each chunk tail.
-                const CHUNK_BYTES: usize = 1024 << 20; // 1 GiB
+                // Streaming pipeline: rayon workers take small batches as they free up, with no
+                // per-chunk barrier, and the writer restores input order. Query bases read but not
+                // yet written stay under MAX_BP_IN_FLIGHT, so a slow record holds memory, not threads.
+                // Batches (BATCH_LINES records or BATCH_BP query bases) keep per-record overhead low.
+                const MAX_BP_IN_FLIGHT: u64 = 8_000_000_000;
+                const BATCH_LINES: usize = 1000;
+                const BATCH_BP: u64 = 10_000_000;
                 let paf_reader = get_paf_reader(&common.paf)?;
                 let memory_mode_wfa2 = memory_mode.to_lib_wfa2();
-                let (tx_in, rx_in) = std::sync::mpsc::sync_channel::<Vec<String>>(2);
-                let (tx_out, rx_out) = std::sync::mpsc::sync_channel::<Vec<Option<String>>>(2);
+                // (bases in flight, writer closed)
+                let budget = (Mutex::new((0u64, false)), std::sync::Condvar::new());
+                let (tx_out, rx_out) = std::sync::mpsc::channel::<(usize, u64, Vec<Option<String>>)>();
+                let mut read_err = None;
                 std::thread::scope(|s| -> io::Result<()> {
-                    // Reader: skip blank/comment lines; keep Err so a read failure propagates.
-                    let reader = s.spawn(move || -> io::Result<()> {
-                        let mut it = paf_reader.lines().filter(|r| match r {
-                            Ok(l) => !l.trim().is_empty() && !l.starts_with('#'),
-                            Err(_) => true,
-                        });
-                        loop {
-                            // Fill to CHUNK lines or CHUNK_BYTES, whichever first; errors propagate.
-                            let mut chunk: Vec<String> = Vec::new();
-                            let mut bytes = 0usize;
-                            while chunk.len() < CHUNK && bytes < CHUNK_BYTES {
-                                match it.next() {
-                                    Some(Ok(l)) => {
-                                        bytes += l.len() + 1;
-                                        chunk.push(l);
-                                    }
-                                    Some(Err(e)) => return Err(e),
-                                    None => break,
-                                }
-                            }
-                            if chunk.is_empty() || tx_in.send(chunk).is_err() {
-                                break;
-                            }
-                        }
-                        Ok(())
-                    });
-                    // Writer: chunks arrive in input order, so output order is preserved.
+                    let budget = &budget;
+                    // Writer: emit batches in input order, then release their bases.
                     let stdout = io::stdout();
                     let writer = s.spawn(move || -> io::Result<()> {
-                        let mut w = BufWriter::new(stdout.lock());
-                        for out in rx_out {
-                            for l in out.into_iter().flatten() {
-                                writeln!(w, "{}", l)?;
+                        let write = || -> io::Result<()> {
+                            let mut w = BufWriter::new(stdout.lock());
+                            let mut pending = std::collections::BTreeMap::new();
+                            let mut next = 0usize;
+                            for (i, bp, out) in rx_out {
+                                pending.insert(i, (bp, out));
+                                while let Some((bp, out)) = pending.remove(&next) {
+                                    for l in out.into_iter().flatten() {
+                                        writeln!(w, "{}", l)?;
+                                    }
+                                    budget.0.lock().unwrap().0 -= bp;
+                                    budget.1.notify_one();
+                                    next += 1;
+                                }
                             }
-                        }
-                        w.flush()
+                            w.flush()
+                        };
+                        let r = write();
+                        // Wake the reader so it stops if the writer failed.
+                        budget.0.lock().unwrap().1 = true;
+                        budget.1.notify_all();
+                        r
                     });
-                    // Decode each chunk on the global rayon pool.
-                    for chunk in rx_in {
-                        let out: Vec<Option<String>> = chunk
-                            .par_iter()
-                            .map(|line| {
-                                with_decode_state(
-                                    &distance_mode,
-                                    &memory_mode_wfa2,
-                                    adaptive,
-                                    adaptive_gate,
-                                    adaptive_med,
-                                    adaptive_low,
-                                    |aligners, query_buf, target_buf| {
-                                        process_decompress_line(
-                                            line,
-                                            &tp_type,
-                                            sequence_index.as_ref(),
-                                            &distance_mode,
-                                            is_fastga,
-                                            trace_spacing,
-                                            &complexity_metric,
-                                            banded,
-                                            banded_max_complexity,
-                                            keep_old_stats,
-                                            aligners,
-                                            query_buf,
-                                            target_buf,
-                                            &contig_table,
-                                        )
-                                    },
-                                )
-                            })
-                            .collect();
-                        if tx_out.send(out).is_err() {
-                            break;
+                    // Reader: skip blank/comment lines, wait while the bases in flight are full.
+                    let mut lines = paf_reader
+                        .lines()
+                        .map_while(|r| r.map_err(|e| read_err = Some(e)).ok())
+                        .filter(|l| !l.trim().is_empty() && !l.starts_with('#'));
+                    let mut i = 0usize;
+                    let batches = std::iter::from_fn(|| {
+                        let (mut batch, mut bp) = (Vec::new(), 0u64);
+                        while batch.len() < BATCH_LINES && bp < BATCH_BP {
+                            let Some(line) = lines.next() else { break };
+                            bp += query_bp(&line);
+                            batch.push(line);
                         }
-                    }
-                    drop(tx_out);
-                    // Map a thread panic to an io::Error and propagate I/O errors (e.g. broken pipe).
-                    let panicked = |w| io::Error::new(io::ErrorKind::Other, format!("{w} thread panicked"));
-                    reader.join().map_err(|_| panicked("reader"))??;
-                    writer.join().map_err(|_| panicked("writer"))??;
-                    Ok(())
+                        if batch.is_empty() {
+                            return None;
+                        }
+                        let mut g = budget.0.lock().unwrap();
+                        while g.0 > 0 && g.0 + bp > MAX_BP_IN_FLIGHT && !g.1 {
+                            g = budget.1.wait(g).unwrap();
+                        }
+                        if g.1 {
+                            return None;
+                        }
+                        g.0 += bp;
+                        i += 1;
+                        Some((i - 1, bp, batch))
+                    });
+                    batches.par_bridge().for_each_with(tx_out, |tx, (i, bp, batch)| {
+                        let out = batch.iter().map(|line| with_decode_state(
+                            &distance_mode,
+                            &memory_mode_wfa2,
+                            adaptive,
+                            adaptive_gate,
+                            adaptive_med,
+                            adaptive_low,
+                            |aligners, query_buf, target_buf| {
+                                process_decompress_line(
+                                    line,
+                                    &tp_type,
+                                    sequence_index.as_ref(),
+                                    &distance_mode,
+                                    is_fastga,
+                                    trace_spacing,
+                                    &complexity_metric,
+                                    banded,
+                                    banded_max_complexity,
+                                    keep_old_stats,
+                                    aligners,
+                                    query_buf,
+                                    target_buf,
+                                    &contig_table,
+                                )
+                            },
+                        )).collect();
+                        // A send fails only after a writer error, which join() returns.
+                        let _ = tx.send((i, bp, out));
+                    });
+                    writer
+                        .join()
+                        .map_err(|_| io::Error::new(io::ErrorKind::Other, "writer thread panicked"))?
                 })?;
+                if let Some(e) = read_err {
+                    return Err(e.into());
+                }
             }
         }
         Args::Compress {
