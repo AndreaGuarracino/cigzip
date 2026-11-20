@@ -246,6 +246,92 @@ fn reset_decode_state() {
 /// Run `f` with this worker's reusable decode state, shared by all three decode paths. Built lazily
 /// from the first call's config; `reset_decode_state` clears it per command.
 #[inline]
+/// Run `f` on PAF records on the rayon pool and write its output in input order.
+/// Workers take batches (BATCH_LINES records or BATCH_BP query bases) as they free up,
+/// with no per-chunk barrier. Query bases read but not yet written stay under
+/// MAX_BP_IN_FLIGHT, so a slow record holds memory, not threads.
+fn stream_ordered<W: Write + Send>(
+    reader: impl BufRead + Send,
+    out: W,
+    f: impl Fn(&str, &mut Vec<u8>) + Sync,
+) -> io::Result<()> {
+    const MAX_BP_IN_FLIGHT: u64 = 8_000_000_000;
+    const BATCH_LINES: usize = 64;
+    const BATCH_BP: u64 = 1_000_000;
+    // (bases in flight, writer closed)
+    let budget = (Mutex::new((0u64, false)), std::sync::Condvar::new());
+    let (tx_out, rx_out) = std::sync::mpsc::channel::<(usize, u64, Vec<u8>)>();
+    let mut read_err = None;
+    std::thread::scope(|s| -> io::Result<()> {
+        let budget = &budget;
+        // Writer: emit batches in input order, then release their bases.
+        let writer = s.spawn(move || -> io::Result<()> {
+            let write = || -> io::Result<()> {
+                let mut w = BufWriter::with_capacity(1 << 20, out);
+                let mut pending = std::collections::BTreeMap::new();
+                let mut next = 0usize;
+                for (i, bp, buf) in rx_out {
+                    pending.insert(i, (bp, buf));
+                    while let Some((bp, buf)) = pending.remove(&next) {
+                        w.write_all(&buf)?;
+                        budget.0.lock().unwrap().0 -= bp;
+                        budget.1.notify_one();
+                        next += 1;
+                    }
+                }
+                w.flush()
+            };
+            let r = write();
+            // Wake the reader so it stops if the writer failed.
+            budget.0.lock().unwrap().1 = true;
+            budget.1.notify_all();
+            r
+        });
+        // Reader: skip blank/comment lines, wait while the bases in flight are full.
+        let mut lines = reader
+            .lines()
+            .map_while(|r| r.map_err(|e| read_err = Some(e)).ok())
+            .filter(|l| !l.trim().is_empty() && !l.starts_with('#'));
+        let mut i = 0usize;
+        let batches = std::iter::from_fn(|| {
+            let (mut batch, mut bp) = (Vec::new(), 0u64);
+            while batch.len() < BATCH_LINES && bp < BATCH_BP {
+                let Some(line) = lines.next() else { break };
+                bp += query_bp(&line);
+                batch.push(line);
+            }
+            if batch.is_empty() {
+                return None;
+            }
+            let mut g = budget.0.lock().unwrap();
+            while g.0 > 0 && g.0 + bp > MAX_BP_IN_FLIGHT && !g.1 {
+                g = budget.1.wait(g).unwrap();
+            }
+            if g.1 {
+                return None;
+            }
+            g.0 += bp;
+            i += 1;
+            Some((i - 1, bp, batch))
+        });
+        batches.par_bridge().for_each_with(tx_out, |tx, (i, bp, batch)| {
+            let mut buf = Vec::new();
+            for line in &batch {
+                f(line, &mut buf);
+            }
+            // A send fails only after a writer error, which join() returns.
+            let _ = tx.send((i, bp, buf));
+        });
+        writer
+            .join()
+            .map_err(|_| io::Error::new(io::ErrorKind::Other, "writer thread panicked"))?
+    })?;
+    match read_err {
+        Some(e) => Err(e),
+        None => Ok(()),
+    }
+}
+
 /// Query bases of a PAF line (columns 3-4); 0 for a malformed line, which the decoder reports.
 fn query_bp(line: &str) -> u64 {
     let mut f = line.split('\t').skip(2);
@@ -569,11 +655,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
 
             // Create output writer
-            let writer: Arc<Mutex<Box<dyn Write + Send>>> = if let Some(output_path) = output {
-                let file = File::create(&output_path)?;
-                Arc::new(Mutex::new(Box::new(BufWriter::new(file))))
+            let out: Box<dyn Write + Send> = if let Some(output_path) = output {
+                Box::new(File::create(&output_path)?)
             } else {
-                Arc::new(Mutex::new(Box::new(BufWriter::new(std::io::stdout()))))
+                Box::new(std::io::stdout())
             };
 
             // Optional FASTGA contig table: scaffold -> sorted (sbeg,send) ACGT runs.
@@ -594,26 +679,19 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
             let paf_reader = get_paf_reader(&common.paf)?;
 
-            paf_reader
-                .lines()
-                .map_while(Result::ok)
-                .filter(|line| !line.trim().is_empty() && !line.starts_with('#'))
-                .par_bridge()
-                .for_each(|line| {
-                    process_compress_line(
-                        &line,
-                        &tp_type,
-                        max_complexity,
-                        &complexity_metric,
-                        &distance_mode,
-                        &writer,
-                        minimal,
-                        &contig_table,
-                    );
-                });
-
-            // Flush the writer
-            writer.lock().unwrap().flush()?;
+            // Records are written in input order, so the tp.paf (and the TPA) is reproducible
+            stream_ordered(paf_reader, out, |line, buf| {
+                process_compress_line(
+                    line,
+                    &tp_type,
+                    max_complexity,
+                    &complexity_metric,
+                    &distance_mode,
+                    buf,
+                    minimal,
+                    &contig_table,
+                )
+            })?;
         }
         Args::Decode {
             common,
@@ -842,77 +920,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 }
                 writer.flush()?;
             } else {
-                // Streaming pipeline: rayon workers take small batches as they free up, with no
-                // per-chunk barrier, and the writer restores input order. Query bases read but not
-                // yet written stay under MAX_BP_IN_FLIGHT, so a slow record holds memory, not threads.
-                // Small batches (BATCH_LINES records or BATCH_BP query bases) cut the per-record
-                // overhead and keep threads busy at the head of the queue.
-                const MAX_BP_IN_FLIGHT: u64 = 8_000_000_000;
-                const BATCH_LINES: usize = 64;
-                const BATCH_BP: u64 = 1_000_000;
                 let paf_reader = get_paf_reader(&common.paf)?;
                 let memory_mode_wfa2 = memory_mode.to_lib_wfa2();
-                // (bases in flight, writer closed)
-                let budget = (Mutex::new((0u64, false)), std::sync::Condvar::new());
-                let (tx_out, rx_out) = std::sync::mpsc::channel::<(usize, u64, Vec<Option<String>>)>();
-                let mut read_err = None;
-                std::thread::scope(|s| -> io::Result<()> {
-                    let budget = &budget;
-                    // Writer: emit batches in input order, then release their bases.
-                    let stdout = io::stdout();
-                    let writer = s.spawn(move || -> io::Result<()> {
-                        let write = || -> io::Result<()> {
-                            let mut w = BufWriter::new(stdout.lock());
-                            let mut pending = std::collections::BTreeMap::new();
-                            let mut next = 0usize;
-                            for (i, bp, out) in rx_out {
-                                pending.insert(i, (bp, out));
-                                while let Some((bp, out)) = pending.remove(&next) {
-                                    for l in out.into_iter().flatten() {
-                                        writeln!(w, "{}", l)?;
-                                    }
-                                    budget.0.lock().unwrap().0 -= bp;
-                                    budget.1.notify_one();
-                                    next += 1;
-                                }
-                            }
-                            w.flush()
-                        };
-                        let r = write();
-                        // Wake the reader so it stops if the writer failed.
-                        budget.0.lock().unwrap().1 = true;
-                        budget.1.notify_all();
-                        r
-                    });
-                    // Reader: skip blank/comment lines, wait while the bases in flight are full.
-                    let mut lines = paf_reader
-                        .lines()
-                        .map_while(|r| r.map_err(|e| read_err = Some(e)).ok())
-                        .filter(|l| !l.trim().is_empty() && !l.starts_with('#'));
-                    let mut i = 0usize;
-                    let batches = std::iter::from_fn(|| {
-                        let (mut batch, mut bp) = (Vec::new(), 0u64);
-                        while batch.len() < BATCH_LINES && bp < BATCH_BP {
-                            let Some(line) = lines.next() else { break };
-                            bp += query_bp(&line);
-                            batch.push(line);
-                        }
-                        if batch.is_empty() {
-                            return None;
-                        }
-                        let mut g = budget.0.lock().unwrap();
-                        while g.0 > 0 && g.0 + bp > MAX_BP_IN_FLIGHT && !g.1 {
-                            g = budget.1.wait(g).unwrap();
-                        }
-                        if g.1 {
-                            return None;
-                        }
-                        g.0 += bp;
-                        i += 1;
-                        Some((i - 1, bp, batch))
-                    });
-                    batches.par_bridge().for_each_with(tx_out, |tx, (i, bp, batch)| {
-                        let out = batch.iter().map(|line| with_decode_state(
+                stream_ordered(paf_reader, io::stdout(), |line, buf| {
+                    if let Some(l) = with_decode_state(
                             &distance_mode,
                             &memory_mode_wfa2,
                             adaptive,
@@ -937,17 +948,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                     &contig_table,
                                 )
                             },
-                        )).collect();
-                        // A send fails only after a writer error, which join() returns.
-                        let _ = tx.send((i, bp, out));
-                    });
-                    writer
-                        .join()
-                        .map_err(|_| io::Error::new(io::ErrorKind::Other, "writer thread panicked"))?
+                        ) {
+                        buf.extend_from_slice(l.as_bytes());
+                        buf.push(b'\n');
+                    }
                 })?;
-                if let Some(e) = read_err {
-                    return Err(e.into());
-                }
             }
         }
         Args::Compress {
@@ -2050,7 +2055,7 @@ fn process_compress_line(
     max_complexity: u32,
     complexity_metric: &ComplexityMetric,
     distance_mode: &Distance,
-    writer: &Arc<Mutex<Box<dyn Write + Send>>>,
+    out: &mut Vec<u8>,
     minimal: bool,
     contig_table: &HashMap<String, Vec<(usize, usize)>>,
 ) {
@@ -2092,7 +2097,7 @@ fn process_compress_line(
             stats.alignment_score(distance_mode),
             existing_df,
             complexity_metric,
-            writer,
+            out,
             minimal,
             contig_table,
         );
@@ -2112,7 +2117,7 @@ fn process_compress_line(
             stats.alignment_score(distance_mode),
             existing_df,
             complexity_metric,
-            writer,
+            out,
             minimal,
         );
     }
@@ -2128,7 +2133,7 @@ fn process_fastga_with_overflow(
     alignment_score: i32,
     existing_df: Option<usize>,
     _complexity_metric: &ComplexityMetric,
-    writer: &Arc<Mutex<Box<dyn Write + Send>>>,
+    out: &mut Vec<u8>,
     minimal: bool,
     contig_table: &HashMap<String, Vec<(usize, usize)>>,
 ) {
@@ -2329,8 +2334,8 @@ fn process_fastga_with_overflow(
             new_fields.push(format!("sg:i:{}", valid_segment_count - 1));
         }
 
-        let mut w = writer.lock().unwrap();
-        writeln!(w, "{}", new_fields.join("\t")).unwrap();
+        out.extend_from_slice(new_fields.join("\t").as_bytes());
+        out.push(b'\n');
     }
 }
 
@@ -2345,7 +2350,7 @@ fn process_single_record(
     alignment_score: i32,
     existing_df: Option<usize>,
     complexity_metric: &ComplexityMetric,
-    writer: &Arc<Mutex<Box<dyn Write + Send>>>,
+    out: &mut Vec<u8>,
     minimal: bool,
 ) {
     // Convert CIGAR based on tracepoint type and complexity metric
@@ -2404,8 +2409,8 @@ fn process_single_record(
         }
     }
 
-    let mut w = writer.lock().unwrap();
-    writeln!(w, "{}", new_fields.join("\t")).unwrap();
+    out.extend_from_slice(new_fields.join("\t").as_bytes());
+    out.push(b'\n');
 }
 
 /// Process a single PAF line for decompression (called from par_bridge())
