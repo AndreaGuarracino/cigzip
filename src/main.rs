@@ -31,9 +31,11 @@ use tracepoints::{
 };
 use std::collections::HashMap;
 use tracepoints::{
-    cigar_to_mixed_tracepoints, cigar_to_tracepoints_fastga,
+    cigar_str_to_cigar_ops, cigar_to_mixed_tracepoints, cigar_to_tracepoints_fastga,
     cigar_to_tracepoints_fastga_with_contigs, cigar_to_tracepoints_from_ops,
-    cigar_to_variable_tracepoints, ComplexityMetric, TracepointData, TracepointType,
+    cigar_to_variable_tracepoints, tracepoints_to_cigar_fastga_nodiff_with_aligner,
+    tracepoints_to_cigar_fastga_with_aligner, tracepoints_to_cigar_with_aligner,
+    ComplexityMetric, TracepointData, TracepointType,
 };
 
 /// Load a FASTGA contig table: lines "scaffold<TAB>sbeg<TAB>send" -> scaffold -> sorted (sbeg,send).
@@ -142,6 +144,158 @@ impl fmt::Display for MemoryModeChoice {
             MemoryModeChoice::Adaptive => write!(f, "adaptive"),
         }
     }
+}
+
+/// Sequence span reconstructed per window of segments.
+const WINDOW_BP: usize = 1 << 20;
+
+/// Append a CIGAR, merging the boundary op.
+fn append_cigar(acc: &mut String, s: &str) {
+    let Some(k) = s.find(|c: char| !c.is_ascii_digit()) else {
+        return;
+    };
+    if acc.ends_with(&s[k..k + 1]) {
+        let end = acc.len() - 1;
+        let j = acc[..end]
+            .rfind(|c: char| !c.is_ascii_digit())
+            .map_or(0, |p| p + 1);
+        let n = acc[j..end].parse::<usize>().unwrap() + s[..k].parse::<usize>().unwrap();
+        acc.truncate(j);
+        acc.push_str(&n.to_string());
+        acc.push_str(&s[k..]);
+    } else {
+        acc.push_str(s);
+    }
+}
+
+/// Reconstruct a record's CIGAR one window at a time.
+/// q, t: (name, start, end). Sequences are fetched per window, so memory does not grow with the record.
+#[allow(clippy::too_many_arguments)]
+fn reconstruct_windowed(
+    tp: &TracepointData,
+    seqs: &SequenceIndex,
+    q: (&str, usize, usize),
+    t: (&str, usize, usize),
+    minus: bool,
+    fastga: bool,
+    query_offset: usize,
+    target_offset: usize,
+    metric: ComplexityMetric,
+    spacing: u32,
+    aligner: &mut lib_wfa2::affine_wavefront::AffineWavefronts,
+    max_value: Option<u32>,
+    qbuf: &mut Vec<u8>,
+    tbuf: &mut Vec<u8>,
+) -> Result<String, String> {
+    // '-' strand: query reversed for standard, target for FASTGA
+    let fetch = |s: (&str, usize, usize), a: usize, b: usize, rc: bool, buf: &mut Vec<u8>| {
+        let (x, y) = if rc {
+            (s.2 - b, s.2 - a)
+        } else {
+            (s.1 + a, s.1 + b)
+        };
+        seqs.fetch_sequence_into(s.0, x, y, buf)?;
+        if rc {
+            reverse_complement_in_place(buf);
+        }
+        Ok::<(), String>(())
+    };
+    let (qlen, tlen, ts) = (q.2 - q.1, t.2 - t.1, spacing as usize);
+    let n = match tp {
+        TracepointData::Standard(v) | TracepointData::Fastga(v) => v.len(),
+        TracepointData::FastgaNoDiff(v) => v.len(),
+        _ => {
+            fetch(q, 0, qlen, minus && !fastga, qbuf)?;
+            fetch(t, 0, tlen, minus && fastga, tbuf)?;
+            return Ok(reconstruct_cigar_with_aligner(
+                tp,
+                qbuf,
+                tbuf,
+                query_offset,
+                target_offset,
+                metric,
+                spacing,
+                minus && fastga,
+                aligner,
+                max_value,
+            ));
+        }
+    };
+    // FASTGA query lengths follow the trace grid
+    let first = ts.max(1) - query_offset % ts.max(1);
+    let seg = |i: usize, used: usize| match tp {
+        TracepointData::Standard(v) => v[i],
+        TracepointData::Fastga(v) => ((if i == 0 { first } else { ts }).min(qlen - used), v[i].1),
+        TracepointData::FastgaNoDiff(v) => {
+            ((if i == 0 { first } else { ts }).min(qlen - used), v[i])
+        }
+        _ => unreachable!(),
+    };
+    let mut cigar = String::new();
+    let (mut i0, mut a0, mut b0, mut sa, mut sb) = (0, 0, 0, 0, 0);
+    for i in 0..n {
+        let (a, b) = seg(i, a0 + sa);
+        sa += a;
+        sb += b;
+        // Close a window; the last one keeps >= 2 segments
+        if i + 1 < n && (sa.max(sb) < WINDOW_BP || n - i - 1 < 2) {
+            continue;
+        }
+        if fastga {
+            sb = sb.min(tlen - b0);
+        }
+        if a0 + sa > qlen || b0 + sb > tlen {
+            return Err(format!(
+                "tracepoints span {}x{} past record {}x{}",
+                a0 + sa,
+                b0 + sb,
+                qlen,
+                tlen
+            ));
+        }
+        fetch(q, a0, a0 + sa, minus && !fastga, qbuf)?;
+        fetch(t, b0, b0 + sb, minus && fastga, tbuf)?;
+        let w = match tp {
+            TracepointData::Standard(v) => tracepoints_to_cigar_with_aligner(
+                &v[i0..=i],
+                qbuf,
+                tbuf,
+                0,
+                0,
+                metric,
+                aligner,
+                max_value,
+            ),
+            TracepointData::Fastga(v) => tracepoints_to_cigar_fastga_with_aligner(
+                &v[i0..=i],
+                spacing,
+                qbuf,
+                tbuf,
+                query_offset + a0,
+                target_offset,
+                false,
+                aligner,
+                max_value.is_some(),
+            ),
+            TracepointData::FastgaNoDiff(v) => tracepoints_to_cigar_fastga_nodiff_with_aligner(
+                &v[i0..=i],
+                spacing,
+                qbuf,
+                tbuf,
+                query_offset + a0,
+                false,
+                aligner,
+            ),
+            _ => unreachable!(),
+        };
+        append_cigar(&mut cigar, &w);
+        (i0, a0, b0, sa, sb) = (i + 1, a0 + sa, b0 + sb, 0, 0);
+    }
+    if minus && fastga {
+        let ops = cigar_str_to_cigar_ops(&cigar);
+        cigar = ops.iter().rev().map(|(l, op)| format!("{l}{op}")).collect();
+    }
+    Ok(cigar)
 }
 
 /// Largest single-segment span in a tracepoint record. Used by adaptive memory-mode selection.
@@ -2497,46 +2651,12 @@ fn process_decompress_line(
         std::process::exit(1);
     });
 
-    debug!(
-        "Fetching query sequence {}:{}-{} on {} strand",
-        query_name,
-        query_start,
-        query_end,
-        if strand == "-" && !fastga { "-" } else { "+" }
-    );
-    if let Err(msg) =
-        sequence_index.fetch_sequence_into(query_name, query_start, query_end, query_buf)
-    {
-        error!("{}", message_with_truncate_paf_file(&msg, line));
-        std::process::exit(1);
-    }
-    if strand == "-" && !fastga {
-        reverse_complement_in_place(query_buf);
-    }
-
-    debug!(
-        "Fetching target sequence {}:{}-{} on {} strand",
-        target_name,
-        target_start,
-        target_end,
-        if strand == "-" && fastga { "-" } else { "+" }
-    );
-    if let Err(msg) =
-        sequence_index.fetch_sequence_into(target_name, target_start, target_end, target_buf)
-    {
-        error!("{}", message_with_truncate_paf_file(&msg, line));
-        std::process::exit(1);
-    }
-    if fastga && strand == "-" {
-        reverse_complement_in_place(target_buf);
-    }
-
     // Parse tracepoints based on type (preserve Fastga vs FastgaNoDiff)
     let tracepoints = tpa::parse_tracepoints(tracepoints_str, *tp_type)
         .expect("Failed to parse tracepoints");
 
     // Compute offsets (only used for FastGA)
-    let (query_offset, target_offset, complement) = if fastga {
+    let (query_offset, target_offset) = if fastga {
         let query_start: usize = fields[2].parse().unwrap_or_else(|_| {
             error!(
                 "{}",
@@ -2559,11 +2679,9 @@ fn process_decompress_line(
         // Query grid is the absolute query_start, made contig-local when a contig table is given.
         let query_offset =
             query_start - contig_start_in_table(contig_table, query_name, query_start);
-        // fastga/1aln tracepoints are query-forward vs revcomp-target, so '-' strand needs reversal.
-        let complement = strand == "-";
-        (query_offset, target_offset, complement)
+        (query_offset, target_offset)
     } else {
-        (0, 0, false)
+        (0, 0)
     };
 
     let max_value = if banded {
@@ -2583,18 +2701,26 @@ fn process_decompress_line(
         }
     };
     let aligner = aligners.select(max_segment_span(&tracepoints), divergence);
-    let cigar = reconstruct_cigar_with_aligner(
+    let cigar = reconstruct_windowed(
         &tracepoints,
-        &query_buf[..],
-        &target_buf[..],
+        sequence_index,
+        (query_name, query_start, query_end),
+        (target_name, target_start, target_end),
+        strand == "-",
+        fastga,
         query_offset,
         target_offset,
         *complexity_metric,
         trace_spacing,
-        complement,
         aligner,
         max_value,
-    );
+        query_buf,
+        target_buf,
+    )
+    .unwrap_or_else(|msg| {
+        error!("{}", message_with_truncate_paf_file(&msg, line));
+        std::process::exit(1);
+    });
 
     // Parse CIGAR once and compute all stats
     let stats = CigarStats::from_cigar(&cigar);
@@ -2681,56 +2807,8 @@ fn process_decompress_record(
     let query_name = &record.query_name;
     let target_name = &record.target_name;
 
-    debug!(
-        "Fetching query sequence {}:{}-{} on {} strand",
-        query_name,
-        record.query_start,
-        record.query_end,
-        if record.strand == '-' && !fastga {
-            "-"
-        } else {
-            "+"
-        }
-    );
-    if let Err(msg) = sequence_index.fetch_sequence_into(
-        query_name,
-        record.query_start as usize,
-        record.query_end as usize,
-        query_buf,
-    ) {
-        error!("{}", msg);
-        std::process::exit(1);
-    }
-    if record.strand == '-' && !fastga {
-        reverse_complement_in_place(query_buf);
-    }
-
-    debug!(
-        "Fetching target sequence {}:{}-{} on {} strand",
-        target_name,
-        record.target_start,
-        record.target_end,
-        if record.strand == '-' && fastga {
-            "-"
-        } else {
-            "+"
-        }
-    );
-    if let Err(msg) = sequence_index.fetch_sequence_into(
-        target_name,
-        record.target_start as usize,
-        record.target_end as usize,
-        target_buf,
-    ) {
-        error!("{}", msg);
-        std::process::exit(1);
-    }
-    if fastga && record.strand == '-' {
-        reverse_complement_in_place(target_buf);
-    }
-
     // Compute offsets (only used for FastGA)
-    let (query_offset, target_offset, complement) = if fastga {
+    let (query_offset, target_offset) = if fastga {
         let target_len = record.target_len as usize;
         let target_offset = if record.strand == '+' {
             target_len - (record.target_end as usize)
@@ -2740,9 +2818,9 @@ fn process_decompress_record(
         let qs = record.query_start as usize;
         // Contig-local trace grid when a contig table is provided (matches the contig-aware encoder).
         let query_offset = qs - contig_start_in_table(contig_table, query_name, qs);
-        (query_offset, target_offset, record.strand == '-')
+        (query_offset, target_offset)
     } else {
-        (0, 0, false)
+        (0, 0)
     };
 
     let max_value = if banded {
@@ -2758,18 +2836,26 @@ fn process_decompress_record(
         0.0
     };
     let aligner = aligners.select(max_segment_span(&record.tracepoints), divergence);
-    let cigar = reconstruct_cigar_with_aligner(
+    let cigar = reconstruct_windowed(
         &record.tracepoints,
-        &query_buf[..],
-        &target_buf[..],
+        sequence_index,
+        (query_name, record.query_start as usize, record.query_end as usize),
+        (target_name, record.target_start as usize, record.target_end as usize),
+        record.strand == '-',
+        fastga,
         query_offset,
         target_offset,
         *complexity_metric,
         trace_spacing,
-        complement,
         aligner,
         max_value,
-    );
+        query_buf,
+        target_buf,
+    )
+    .unwrap_or_else(|msg| {
+        error!("{}", msg);
+        std::process::exit(1);
+    });
 
     // Parse CIGAR once and compute all stats
     let stats = CigarStats::from_cigar(&cigar);
