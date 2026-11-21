@@ -204,23 +204,25 @@ fn reconstruct_windowed(
     let n = match tp {
         TracepointData::Standard(v) | TracepointData::Fastga(v) => v.len(),
         TracepointData::FastgaNoDiff(v) => v.len(),
-        _ => {
-            fetch(q, 0, qlen, minus && !fastga, qbuf)?;
-            fetch(t, 0, tlen, minus && fastga, tbuf)?;
-            return Ok(reconstruct_cigar_with_aligner(
-                tp,
-                qbuf,
-                tbuf,
-                query_offset,
-                target_offset,
-                metric,
-                spacing,
-                minus && fastga,
-                aligner,
-                max_value,
-            ));
-        }
+        _ => 0,
     };
+    // One segment (FASTGA pure-match sentinel spans the record) or other formats: whole record
+    if n <= 1 {
+        fetch(q, 0, qlen, minus && !fastga, qbuf)?;
+        fetch(t, 0, tlen, minus && fastga, tbuf)?;
+        return Ok(reconstruct_cigar_with_aligner(
+            tp,
+            qbuf,
+            tbuf,
+            query_offset,
+            target_offset,
+            metric,
+            spacing,
+            minus && fastga,
+            aligner,
+            max_value,
+        ));
+    }
     // FASTGA query lengths follow the trace grid
     let first = ts.max(1) - query_offset % ts.max(1);
     let seg = |i: usize, used: usize| match tp {
