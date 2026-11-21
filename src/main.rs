@@ -1086,35 +1086,33 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 let memory_mode_wfa2 = memory_mode.to_lib_wfa2();
                 // 8 Gbp in flight: no slowdown on FL-TP l=1000 and EB/DB (HG00272, 96 threads)
                 stream_ordered(paf_reader, io::stdout(), 8_000_000_000, |line, buf| {
-                    if let Some(l) = with_decode_state(
-                            &distance_mode,
-                            &memory_mode_wfa2,
-                            adaptive,
-                            adaptive_gate,
-                            adaptive_med,
-                            adaptive_low,
-                            |aligners, query_buf, target_buf| {
-                                process_decompress_line(
-                                    line,
-                                    &tp_type,
-                                    sequence_index.as_ref(),
-                                    &distance_mode,
-                                    is_fastga,
-                                    trace_spacing,
-                                    &complexity_metric,
-                                    banded,
-                                    banded_max_complexity,
-                                    keep_old_stats,
-                                    aligners,
-                                    query_buf,
-                                    target_buf,
-                                    &contig_table,
-                                )
-                            },
-                        ) {
-                        buf.extend_from_slice(l.as_bytes());
-                        buf.push(b'\n');
-                    }
+                    with_decode_state(
+                        &distance_mode,
+                        &memory_mode_wfa2,
+                        adaptive,
+                        adaptive_gate,
+                        adaptive_med,
+                        adaptive_low,
+                        |aligners, query_buf, target_buf| {
+                            process_decompress_line(
+                                line,
+                                &tp_type,
+                                sequence_index.as_ref(),
+                                &distance_mode,
+                                is_fastga,
+                                trace_spacing,
+                                &complexity_metric,
+                                banded,
+                                banded_max_complexity,
+                                keep_old_stats,
+                                aligners,
+                                query_buf,
+                                target_buf,
+                                &contig_table,
+                                buf,
+                            )
+                        },
+                    )
                 })?;
             }
         }
@@ -2592,14 +2590,15 @@ fn process_decompress_line(
     query_buf: &mut Vec<u8>,
     target_buf: &mut Vec<u8>,
     contig_table: &HashMap<String, Vec<(usize, usize)>>,
-) -> Option<String> {
+    out: &mut Vec<u8>,
+) {
     let fields: Vec<&str> = line.split('\t').collect();
     if fields.len() < 12 {
         warn!(
             "{}",
             message_with_truncate_paf_file("Skipping malformed PAF line", line)
         );
-        return None;
+        return;
     }
 
     let Some(tp_field) = fields.iter().find(|&&s| s.starts_with("tp:Z:")) else {
@@ -2607,7 +2606,7 @@ fn process_decompress_line(
             "{}",
             message_with_truncate_paf_file("Skipping tracepoints-less PAF line", line)
         );
-        return None;
+        return;
     };
     let tracepoints_str = &tp_field[5..]; // Direct slice instead of strip_prefix("tp:Z:")
 
@@ -2736,8 +2735,9 @@ fn process_decompress_line(
     let existing_bi = fields.iter().find(|&&s| s.starts_with("bi:f:"));
     let existing_sc = fields.iter().find(|&&s| s.starts_with("sc:i:"));
 
-    // Build the new line
+    // Build the new line; cg_slots mark where the CIGAR goes
     let mut new_fields: Vec<String> = Vec::new();
+    let mut cg_slots = Vec::new();
 
     for (i, field) in fields.iter().enumerate() {
         match i {
@@ -2770,7 +2770,8 @@ fn process_decompress_line(
                     new_fields.push(format!("sc:i:{}", alignment_score));
 
                     // Replace tracepoints with CIGAR
-                    new_fields.push(format!("cg:Z:{}", cigar));
+                    cg_slots.push(new_fields.len());
+                    new_fields.push(String::new());
                 } else if field.starts_with("gi:f:")
                     || field.starts_with("bi:f:")
                     || field.starts_with("sc:i:")
@@ -2784,7 +2785,19 @@ fn process_decompress_line(
         }
     }
 
-    Some(new_fields.join("\t"))
+    // Write the line; the CIGAR is copied once, into out
+    for (i, f) in new_fields.iter().enumerate() {
+        if i > 0 {
+            out.push(b'\t');
+        }
+        if cg_slots.contains(&i) {
+            out.extend_from_slice(b"cg:Z:");
+            out.extend_from_slice(cigar.as_bytes());
+        } else {
+            out.extend_from_slice(f.as_bytes());
+        }
+    }
+    out.push(b'\n');
 }
 
 /// Process a single binary record for decompression (called from par_bridge())
