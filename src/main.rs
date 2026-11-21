@@ -3,7 +3,7 @@ mod sequence;
 #[global_allocator]
 static GLOBAL: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
 
-use crate::sequence::{collect_sequence_paths, SequenceIndex};
+use crate::sequence::{collect_sequence_paths, SequenceIndex, BUF_KEEP};
 use clap::{Parser, ValueEnum};
 use flate2::read::MultiGzDecoder;
 #[cfg(debug_assertions)]
@@ -359,7 +359,14 @@ fn with_decode_state<R>(
                 Vec::new(),
             )
         });
-        f(&mut s.0, &mut s.1, &mut s.2)
+        let r = f(&mut s.0, &mut s.1, &mut s.2);
+        // Free buffers kept from long records
+        for b in [&mut s.1, &mut s.2] {
+            if b.capacity() > BUF_KEEP {
+                *b = Vec::new();
+            }
+        }
+        r
     })
 }
 

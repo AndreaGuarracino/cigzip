@@ -186,6 +186,9 @@ impl GdbIndex {
                 }
                 pos = stop;
             }
+            if buf.capacity() > super::BUF_KEEP {
+                *buf = Vec::new();
+            }
             Ok(())
         })?;
         // Trailing gap up to `end`.
